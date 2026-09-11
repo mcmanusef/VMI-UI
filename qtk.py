@@ -8,8 +8,8 @@ widget-construction and variable-wiring code ports over with only an import
 change (`import tkinter as tk` -> `import qtk as tk`,
 `from tkinter import ttk` -> `from qtk import ttk`), while every widget on
 screen is a genuine QWidget rendered by Qt5. Anything not covered here
-(matplotlib canvas, the scrollable sidebar) is written directly in native
-PyQt5 in its own module rather than shimmed.
+(pyqtgraph plots, the scrollable sidebar) is written directly in native
+PyQt5/pyqtgraph in its own module rather than shimmed.
 
 Layout: `.grid(row=, column=, rowspan=, columnspan=, sticky=, padx=, pady=)`
 on any widget adds it to a QGridLayout owned by its Qt parent (created
@@ -294,8 +294,8 @@ def _grid_layout_for(widget):
 
 def grid_into(widget, parent, row=0, column=0, rowspan=1, columnspan=1, sticky="", padx=0, pady=0):
     """Grid an arbitrary QWidget that isn't a GridMixin -- namely a
-    matplotlib FigureCanvasQTAgg, which is a real QWidget in its own
-    right -- into `parent`'s grid layout."""
+    pyqtgraph PlotWidget/GraphicsLayoutWidget, which is a real QWidget in
+    its own right -- into `parent`'s grid layout."""
     layout = parent._own_layout() if isinstance(parent, GridMixin) else _grid_layout_for(parent)
 
     target = widget

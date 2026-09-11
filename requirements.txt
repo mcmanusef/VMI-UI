@@ -4,7 +4,6 @@
 cmasher>=1.9.2
 h5py>=3.11.0
 ipykernel>=7.2.0
-matplotlib>=3.10.8
 numpy>=2.0
 pandas>=3.0.0
 pandas-stubs~=3.0.0

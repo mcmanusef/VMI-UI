@@ -12,12 +12,6 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5 import QtCore
 
-# Kept only for build_log_norm/build_power_norm below, which
-# momentum_calibration_interface.py and quick_monitor_interface.py still
-# import (their own matplotlib figures haven't been ported to pyqtgraph
-# yet) -- drop once every caller of those two functions is gone.
-from matplotlib.colors import LogNorm, PowerNorm
-
 from qt_plots import hist_to_rgba, ZoomFocusViewBox
 
 from tpx_processing import hist_args, make_counts_per_pixel_hist, make_hist_1d
@@ -43,30 +37,6 @@ DEFAULT_HIST_SETTINGS = {
     "cluster_t": {"bins": 1000, "min": 0.0, "max": 1000.0},
     "etof": {"bins": 2000, "min": 0.0, "max": 1000.0},
 }
-
-
-def build_log_norm(hist_2d):
-    if hist_2d is None or hist_2d.size == 0:
-        return None
-    positive = hist_2d[hist_2d > 0]
-    if positive.size == 0:
-        return None
-    vmin = max(float(positive.min()), 1e-3)
-    vmax = max(float(positive.max()), vmin * 1.1)
-    return LogNorm(vmin=vmin, vmax=vmax)
-
-
-def build_power_norm(hist_2d, gamma: float):
-    """Gamma correction for the linear-scale 2D maps. gamma == 1.0 is plain
-    linear scaling, so we skip PowerNorm entirely in that common case."""
-    if abs(gamma - 1.0) < 1e-6:
-        return None
-    if hist_2d is None or hist_2d.size == 0:
-        return None
-    vmax = float(hist_2d.max())
-    if vmax <= 0:
-        return None
-    return PowerNorm(gamma=gamma, vmin=0.0, vmax=vmax)
 
 
 class HistogramPlotPanel(ttk.Frame):
