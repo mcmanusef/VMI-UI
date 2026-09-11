@@ -25,10 +25,10 @@ import pathlib
 
 import numpy as np
 import pandas as pd
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import qtk as tk
+from qtk import ttk, filedialog, messagebox, grid_into
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.patches import Circle
 
@@ -168,8 +168,8 @@ class MomentumCalibrationInterface(ttk.Frame):
 
         self._figure = Figure(figsize=(7, 6), tight_layout=True)
         self._ax = self._figure.add_subplot(1, 1, 1)
-        self._canvas = FigureCanvasTkAgg(self._figure, master=plot_frame)
-        self._canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self._canvas = FigureCanvasQTAgg(self._figure)
+        grid_into(self._canvas, plot_frame, row=0, column=0, sticky="nsew")
         self._canvas.mpl_connect("button_press_event", self._on_press)
         self._canvas.mpl_connect("motion_notify_event", self._on_motion)
         self._canvas.mpl_connect("button_release_event", self._on_release)
@@ -277,7 +277,7 @@ class MomentumCalibrationInterface(ttk.Frame):
     def _enter_stage(self, stage):
         self._stage = stage
         self.stage_status_var.set("")
-        for child in list(self._stage_frame.children.values()):
+        for child in list(self._stage_frame.winfo_children()):
             child.destroy()
         getattr(self, f"_build_{stage}_controls")()
         getattr(self, f"_draw_{stage}_plot")()

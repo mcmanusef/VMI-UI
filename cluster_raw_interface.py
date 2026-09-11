@@ -11,8 +11,8 @@ import threading
 import time
 from queue import Queue, Empty
 
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import qtk as tk
+from qtk import ttk, filedialog, messagebox
 
 import app_settings
 import cv4_writer

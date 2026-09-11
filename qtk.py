@@ -922,6 +922,22 @@ class Text(TkCompatMixin, GridMixin, QtWidgets.QTextEdit):
         self._fire_binding("<FocusOut>")
 
 
+class Listbox(TkCompatMixin, GridMixin, QtWidgets.QListWidget):
+    def __init__(self, parent=None, height=None, **_kw):
+        super().__init__(parent)
+        if height:
+            fm = self.fontMetrics()
+            self.setMinimumHeight(fm.lineSpacing() * height + 6)
+
+    def delete(self, start, end):
+        del start, end  # only delete(0, "end") -- clear everything -- is used here
+        self.clear()
+
+    def insert(self, index, text):
+        del index  # only insert("end", ...) is used here
+        self.addItem(str(text))
+
+
 class Style:
     """No-op: the "clam" ttk theme is replaced by QApplication's Fusion
     style, set once in Tk.__init__."""
