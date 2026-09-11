@@ -41,12 +41,12 @@ import numpy as np
 import qtk as tk
 from qtk import ttk, filedialog, grid_into
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
+import pyqtgraph as pg
 
 import app_settings
 import cv4_writer
 import serval_client
+from qt_plots import mpl_color, ZoomFocusViewBox
 import shared_state
 import time_estimate
 import xps_client
@@ -364,10 +364,10 @@ class SweepInterface(ttk.Frame):
         plot_frame.rowconfigure(0, weight=1)
         plot_frame.columnconfigure(0, weight=1)
 
-        self._figure = Figure(figsize=(7, 5), tight_layout=True)
-        self._ax = self._figure.add_subplot(1, 1, 1)
-        self._canvas = FigureCanvasQTAgg(self._figure)
-        grid_into(self._canvas, plot_frame, row=0, column=0, sticky="nsew")
+        self._plot_widget = pg.PlotWidget(viewBox=ZoomFocusViewBox())
+        self._plot_item = self._plot_widget.getPlotItem()
+        self._plot_item.addLegend()
+        grid_into(self._plot_widget, plot_frame, row=0, column=0, sticky="nsew")
         self._redraw_plot()
 
     def _browse_folder(self):
@@ -1502,30 +1502,30 @@ class SweepInterface(ttk.Frame):
         # plotted as its own faint, unconnected point, but the line is
         # drawn through each position's mean rate rather than zigzagging
         # through every individual visit.
-        self._ax.clear()
-        plotted_labels = set()
+        self._plot_item.clear()
         if self._points:
             by_position = {}
             for p in self._points:
                 by_position.setdefault(p["requested_position"], []).append(p)
             ordered = sorted(by_position.items(), key=lambda kv: kv[0])
             for key in _RATE_KEYS:
+                color = mpl_color(_RATE_COLORS[key])
                 xs_all = [p["measured_position"] for p in self._points]
                 ys_all = [p[key] for p in self._points]
-                self._ax.plot(
-                    xs_all, ys_all, linestyle="none", color=_RATE_COLORS[key],
-                    marker="o", markersize=3, alpha=0.35,
+                faint = pg.mkColor(color)
+                faint.setAlpha(89)  # ~0.35 alpha, matching the old matplotlib scatter
+                self._plot_item.addItem(
+                    pg.ScatterPlotItem(x=xs_all, y=ys_all, size=6, pen=None, brush=pg.mkBrush(faint))
                 )
                 xs_mean = [np.mean([p["measured_position"] for p in group]) for _, group in ordered]
                 ys_mean = [np.mean([p[key] for p in group]) for _, group in ordered]
-                self._ax.plot(
-                    xs_mean, ys_mean, "-", color=_RATE_COLORS[key],
-                    marker="o", markersize=4, label=_RATE_LABELS[key],
+                self._plot_item.addItem(
+                    pg.PlotDataItem(
+                        xs_mean, ys_mean, pen=pg.mkPen(color, width=1.5),
+                        symbol="o", symbolSize=6, symbolBrush=color, name=_RATE_LABELS[key],
+                    )
                 )
-                plotted_labels.add(key)
-        if plotted_labels:
-            self._ax.legend(loc="best", fontsize=8)
-        self._ax.set_xlabel("Position (relative to zero)")
-        self._ax.set_ylabel("Rate per shot")
-        self._ax.set_title("Average cluster / e-ToF / i-ToF rate vs. position")
-        self._canvas.draw_idle()
+        self._plot_item.setTitle("Average cluster / e-ToF / i-ToF rate vs. position")
+        self._plot_item.setLabel("bottom", "Position (relative to zero)")
+        self._plot_item.setLabel("left", "Rate per shot")
+        self._plot_item.autoRange()
