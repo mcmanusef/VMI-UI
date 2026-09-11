@@ -18,7 +18,7 @@ save_notes() persist the last text, but each tab keeps its own Text widget
 rather than being live-mirrored keystroke for keystroke.
 """
 import datetime
-import tkinter as tk
+import qtk as tk
 
 import app_settings
 from plot_panel import DEFAULT_HIST_SETTINGS

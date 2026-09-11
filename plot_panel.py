@@ -4,12 +4,12 @@ Shared by the Diagnostics tab and the Monitored Acquisition tab so both get
 identical plots, zoom/focus behavior, log-scale toggles, gamma control, and
 bin/range settings without duplicating the code.
 """
-import tkinter as tk
-from tkinter import ttk
+import qtk as tk
+from qtk import grid_into, ttk
 
 import numpy as np
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.colors import LogNorm, PowerNorm
 from matplotlib.widgets import RectangleSelector
@@ -211,8 +211,8 @@ class HistogramPlotPanel(ttk.Frame):
         self._plot_frame.rowconfigure(0, weight=1)
         self._plot_frame.columnconfigure(0, weight=1)
         self._figure = Figure(figsize=(8, 6), tight_layout=True)
-        self._canvas = FigureCanvasTkAgg(self._figure, master=self._plot_frame)
-        self._canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self._canvas = FigureCanvasQTAgg(self._figure)
+        grid_into(self._canvas, self._plot_frame, row=0, column=0, sticky="nsew")
         self._build_axes()
 
         if self._plots_first:
