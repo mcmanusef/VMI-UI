@@ -62,17 +62,10 @@ def rainforest_colormap():
     return _rainforest_cmap
 
 
-def hist_to_rgba(hist, *, log=False, gamma=1.0):
-    """2D histogram -> (rows, cols, 4) uint8 RGBA array, ready for
-    `ImageItem.setImage(rgba, autoLevels=False)`. See the module
-    docstring for the orientation this expects.
-
-    log=True reproduces matplotlib's LogNorm default of masking
-    non-positive bins as fully transparent (log-scaled color otherwise);
-    the linear/gamma path leaves zero mapped to the colormap's lowest
-    color, same as plain imshow / PowerNorm.
-    """
-    data = np.asarray(hist, dtype=np.float64).T
+def _colorize(data, *, log, gamma):
+    """Shared by hist_to_rgba/image_to_rgba: `data` must already be in the
+    orientation pyqtgraph's row-major ImageItem wants (row 0 at the
+    bottom of the view, same as matplotlib's origin="lower")."""
     lut = rainforest_colormap().getLookupTable(0.0, 1.0, 256)
 
     if log:
@@ -95,6 +88,29 @@ def hist_to_rgba(hist, *, log=False, gamma=1.0):
     idx = np.clip((np.nan_to_num(norm) * 255.0).astype(np.intp), 0, 255)
     rgb = lut[idx]
     return np.dstack([rgb, alpha])
+
+
+def hist_to_rgba(hist, *, log=False, gamma=1.0):
+    """2D histogram -> (rows, cols, 4) uint8 RGBA array, ready for
+    `ImageItem.setImage(rgba, autoLevels=False)`. See the module
+    docstring for the orientation this expects.
+
+    log=True reproduces matplotlib's LogNorm default of masking
+    non-positive bins as fully transparent (log-scaled color otherwise);
+    the linear/gamma path leaves zero mapped to the colormap's lowest
+    color, same as plain imshow / PowerNorm.
+    """
+    return _colorize(np.asarray(hist, dtype=np.float64).T, log=log, gamma=gamma)
+
+
+def image_to_rgba(image, *, log=False, gamma=1.0):
+    """Plain 2D image array (image[row, col], row 0 = top -- e.g. a
+    decoded camera frame, as opposed to a numpy.histogram2d() result) ->
+    RGBA, matching matplotlib's `ax.imshow(image, origin="upper", ...)`.
+    Same log/gamma color mapping as hist_to_rgba, just a vertical flip
+    instead of a transpose to get pyqtgraph's row-0-at-bottom convention.
+    """
+    return _colorize(np.flipud(np.asarray(image, dtype=np.float64)), log=log, gamma=gamma)
 
 
 class ZoomFocusViewBox(pg.ViewBox):

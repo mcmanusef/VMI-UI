@@ -39,18 +39,12 @@ import requests
 import qtk as tk
 from qtk import ttk, filedialog, grid_into
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
+import pyqtgraph as pg
 from PIL import Image as PILImage
-
-try:
-    import cmasher as cmr
-except Exception:
-    cmr = None
 
 import app_settings
 import serval_client
-from plot_panel import build_log_norm, build_power_norm
+from qt_plots import image_to_rgba, ZoomFocusViewBox
 
 _MODE_CHOICES = [
     ("count", "Count (raw hits)"),
@@ -146,8 +140,8 @@ class QuickMonitorInterface(ttk.Frame):
         self._last_recv_time = None
         self._recv_interval_ema = None
 
-        self._axes = {}
-        self._canvases = {}
+        self._plots = {}
+        self._images = {}
 
         self._build_ui()
         self._poll_queue()
@@ -255,13 +249,14 @@ class QuickMonitorInterface(ttk.Frame):
         plot_frame.columnconfigure(1, weight=1)
 
         for col, (key, title) in enumerate(_VIEWS):
-            figure = Figure(figsize=(5, 5), tight_layout=True)
-            ax = figure.add_subplot(1, 1, 1)
-            canvas = FigureCanvasQTAgg(figure)
+            plot_widget = pg.PlotWidget(viewBox=ZoomFocusViewBox())
+            plot_item = plot_widget.getPlotItem()
+            img = pg.ImageItem()
+            plot_item.addItem(img)
             pad = (0, 5) if col == 0 else (5, 0)
-            grid_into(canvas, plot_frame, row=0, column=col, sticky="nsew", padx=pad)
-            self._axes[key] = ax
-            self._canvases[key] = canvas
+            grid_into(plot_widget, plot_frame, row=0, column=col, sticky="nsew", padx=pad)
+            self._plots[key] = plot_item
+            self._images[key] = img
 
         self._redraw()
 
@@ -545,27 +540,26 @@ class QuickMonitorInterface(ttk.Frame):
 
     def _redraw(self):
         for key, title in _VIEWS:
-            ax = self._axes[key]
-            ax.clear()
+            plot_item = self._plots[key]
+            img = self._images[key]
             image = self._last_image["image"] if (key == "single" and self._last_image) else None
             if key == "integrated":
                 image = self._accumulated_image
             if image is not None:
-                cmap = cmr.rainforest if cmr is not None else "viridis"
-                norm = build_log_norm(image) if self.log_var.get() else build_power_norm(image, self.gamma_var.get())
-                ax.imshow(image, origin="upper", cmap=cmap, norm=norm)
+                rgba = image_to_rgba(image, log=self.log_var.get(), gamma=self.gamma_var.get())
+                img.setImage(rgba, autoLevels=False)
                 if key == "single" and self._last_image:
                     header = self._last_image["header"]
                     frame_no = header.get("frameNumber", "?")
                     t_frame = header.get("timeAtFrame", 0.0)
-                    ax.set_title(f"{title}: frame {frame_no}  (t = {t_frame:.3f}s)")
+                    plot_item.setTitle(f"{title}: frame {frame_no}  (t = {t_frame:.3f}s)")
                 else:
-                    ax.set_title(f"{title}: {self._accumulated_count} frame(s)")
+                    plot_item.setTitle(f"{title}: {self._accumulated_count} frame(s)")
             else:
-                ax.set_title(f"{title}: no image yet -- press Start")
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
-            self._canvases[key].draw_idle()
+                img.clear()
+                plot_item.setTitle(f"{title}: no image yet -- press Start")
+            plot_item.setLabel("bottom", "X")
+            plot_item.setLabel("left", "Y")
 
         self._update_cluster_rate_estimate()
 
