@@ -171,6 +171,10 @@ class AcquisitionInterface(ttk.Frame):
         main.grid(row=0, column=1, sticky="nsew", padx=(0, 10))
         main.columnconfigure(0, weight=1)
         main.rowconfigure(0, weight=1)
+        # Same default-QGridLayout-margin issue as everywhere else -- left
+        # the plot panel (and "Plot options"' divider rule) inset from
+        # main's own true bounds.
+        main.layout().setContentsMargins(0, 0, 0, 0)
 
         self._build_sidebar(sidebar.body)
 
