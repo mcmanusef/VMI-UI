@@ -126,9 +126,12 @@ class AcquisitionInterface(ttk.Frame):
 
         # Collapsing this hands the whole sidebar's width back to the
         # plots -- Qt excludes hidden widgets from layout sizing, so the
-        # column shrinks to just the "Controls" toggle.
-        sidebar_section = CollapsibleFrame(self, text="Controls")
-        sidebar_section.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        # column shrinks to just the "Controls" toggle. flush=True: a
+        # plain sidebar reaching the tab's edges, set off from the plots
+        # by a single rule on its right edge instead of sitting as an
+        # inset bordered box.
+        sidebar_section = CollapsibleFrame(self, text="Controls", flush=True, separator="right")
+        sidebar_section.grid(row=0, column=0, sticky="nsew")
         sidebar_section.body.columnconfigure(0, weight=1)
         sidebar_section.body.rowconfigure(0, weight=1)
 
@@ -140,7 +143,7 @@ class AcquisitionInterface(ttk.Frame):
         sidebar.grid(row=0, column=0, sticky="nsew")
 
         main = ttk.Frame(self)
-        main.grid(row=0, column=1, sticky="nsew", pady=10, padx=(0, 10))
+        main.grid(row=0, column=1, sticky="nsew", padx=(0, 10))
         main.columnconfigure(0, weight=1)
         main.rowconfigure(0, weight=1)
 

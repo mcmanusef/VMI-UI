@@ -147,8 +147,11 @@ class HistogramPlotPanel(ttk.Frame):
         # Log-scale/gamma/focus controls and the bins/bounds table are
         # secondary to the plots themselves, so they share one collapsible
         # footer -- collapsing it hands its space straight back to the
-        # plots (Qt excludes hidden widgets from layout sizing).
-        self._footer = CollapsibleFrame(self, text="Plot options")
+        # plots (Qt excludes hidden widgets from layout sizing). flush=True:
+        # a plain footer reaching this panel's edges, set off from the
+        # plots by a single rule instead of sitting as an inset box.
+        footer_separator = "top" if self._plots_first else "bottom"
+        self._footer = CollapsibleFrame(self, text="Plot options", flush=True, separator=footer_separator)
         self._footer.body.columnconfigure(0, weight=1)
 
         self._opts_bar = ttk.Frame(self._footer.body)
@@ -167,11 +170,11 @@ class HistogramPlotPanel(ttk.Frame):
         self._build_axes()
 
         if self._plots_first:
-            self._plot_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
+            self._plot_frame.grid(row=0, column=0, sticky="nsew")
             self._footer.grid(row=1, column=0, sticky="ew")
             self.rowconfigure(0, weight=1)
         else:
-            self._footer.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+            self._footer.grid(row=0, column=0, sticky="ew")
             self._plot_frame.grid(row=1, column=0, sticky="nsew")
             self.rowconfigure(1, weight=1)
 
