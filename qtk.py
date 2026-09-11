@@ -414,6 +414,13 @@ def _ensure_app():
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
         app.setStyle("Fusion")
+        # Bump the default point size up slightly from Qt's stock default
+        # (typically 8-9pt on Windows) for better legibility across the
+        # whole app -- applies globally since every widget inherits the
+        # QApplication font unless it sets its own.
+        default_font = app.font()
+        default_font.setPointSize(default_font.pointSize() + 1)
+        app.setFont(default_font)
     _qapp = app
     return app
 

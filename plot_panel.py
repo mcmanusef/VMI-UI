@@ -101,10 +101,13 @@ class HistogramPlotPanel(ttk.Frame):
         self._focus_key = None
 
         # Populated by _build_axes(): PlotItems, and either an ImageItem
-        # (pixel/cluster) or a PlotDataItem (everything else) per key.
+        # (pixel/cluster) or a PlotDataItem (everything else) per key, plus
+        # a centered "no data yet" TextItem per plot (hidden once real data
+        # comes in).
         self._plots = {}
         self._images = {}
         self._curves = {}
+        self._empty_labels = {}
 
         self._build_ui()
         self._wire_hist_traces()
@@ -171,11 +174,16 @@ class HistogramPlotPanel(ttk.Frame):
         )
         self._footer.body.columnconfigure(0, weight=1)
 
-        self._opts_bar = ttk.Frame(self._footer.body)
+        # Both get their own titled/bordered card (QGroupBox, via
+        # ttk.LabelFrame) -- the outer "Plot options" footer itself stays
+        # flush/borderless (a deliberate earlier design choice), but its
+        # contents still read as distinct grouped panels.
+        self._opts_bar = ttk.LabelFrame(self._footer.body, text="Plot controls")
         self._build_opts_bar(self._opts_bar)
-        self._opts_bar.grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self._opts_bar.grid(row=0, column=0, sticky="w", pady=(0, 8))
 
-        self._hist_frame = ttk.LabelFrame(self._footer.body, text="Histogram bins / bounds")
+        self._hist_frame = ttk.Frame(self._footer.body)
+        self._hist_frame.columnconfigure(0, weight=1)
         self._build_hist_frame(self._hist_frame)
         self._hist_frame.grid(row=1, column=0, sticky="ew")
 
@@ -230,7 +238,15 @@ class HistogramPlotPanel(ttk.Frame):
         ttk.Button(plot_opts, textvariable=self.focus_button_var, command=self._toggle_focus).grid(row=0, column=10)
         ttk.Label(plot_opts, text="(double-click a plot to focus / restore)").grid(row=0, column=11, padx=(10, 0))
 
-        ttk.Label(plot_opts, text="Gamma (pixel/cluster maps):").grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        # A full horizontal rule sets the gamma cluster apart from the
+        # log-scale/single-plot row above it, so the bar reads as three
+        # distinct control groups (log-scale checkboxes | single-plot
+        # selector+Focus | gamma) instead of one dense block.
+        ttk.Separator(plot_opts, orient="horizontal").grid(
+            row=1, column=0, columnspan=12, sticky="ew", pady=(8, 8)
+        )
+
+        ttk.Label(plot_opts, text="Gamma (pixel/cluster maps):").grid(row=2, column=0, columnspan=2, sticky="w")
         gamma_scale = ttk.Scale(
             plot_opts,
             from_=0.1,
@@ -240,41 +256,60 @@ class HistogramPlotPanel(ttk.Frame):
             length=160,
             command=self._on_gamma_change,
         )
-        gamma_scale.grid(row=1, column=2, columnspan=3, sticky="w", padx=(6, 6), pady=(6, 0))
-        ttk.Label(plot_opts, textvariable=self.gamma_label_var, width=5).grid(row=1, column=5, sticky="w", pady=(6, 0))
-        ttk.Button(plot_opts, text="Reset", command=self._reset_gamma).grid(row=1, column=6, sticky="w", padx=(6, 0), pady=(6, 0))
+        gamma_scale.grid(row=2, column=2, columnspan=3, sticky="w", padx=(6, 6))
+        ttk.Label(plot_opts, textvariable=self.gamma_label_var, width=5).grid(row=2, column=5, sticky="w")
+        ttk.Button(plot_opts, text="Reset", command=self._reset_gamma).grid(row=2, column=6, sticky="w", padx=(6, 0))
         ttk.Label(
             plot_opts, text="(1.0 = linear; applies when log scale is off)"
-        ).grid(row=1, column=7, columnspan=4, sticky="w", padx=(10, 0), pady=(6, 0))
+        ).grid(row=2, column=7, columnspan=4, sticky="w", padx=(10, 0))
 
-    def _build_hist_frame(self, hist_frame):
-        groups = [PLOT_SPECS[:3], PLOT_SPECS[3:]]
-        for group_idx, group in enumerate(groups):
-            base_col = group_idx * 5
-            ttk.Label(hist_frame, text="Plot").grid(row=0, column=base_col, sticky="w", padx=(6, 4), pady=(4, 2))
-            for offset, header in enumerate(("Bins", "Min", "Max"), start=1):
-                ttk.Label(hist_frame, text=header).grid(row=0, column=base_col + offset, pady=(4, 2))
-            for row_idx, (key, label) in enumerate(group, start=1):
-                ttk.Label(hist_frame, text=label).grid(row=row_idx, column=base_col, sticky="w", padx=(6, 4), pady=1)
-                for offset, field in enumerate(("bins", "min", "max"), start=1):
-                    ttk.Entry(hist_frame, textvariable=self._hist_vars[key][field], width=9).grid(
-                        row=row_idx, column=base_col + offset, padx=2, pady=1
-                    )
-            hist_frame.columnconfigure(base_col + 4, minsize=20)
+    def _build_hist_frame(self, container):
+        # Two separate titled/bordered tables (QGroupBox via ttk.LabelFrame)
+        # instead of one combined table with two column-groups sharing
+        # generic headers -- clearer at a glance which rows are spatial
+        # (pixel bounds) vs. temporal (time-of-flight bounds), and each
+        # table's Min/Max headers can carry the right unit for its rows.
+        px_frame = ttk.LabelFrame(container, text="Pixel/Cluster histograms")
+        px_frame.grid(row=0, column=0, sticky="ew")
+        self._build_hist_table(
+            px_frame, PLOT_SPECS[:3], unit="px",
+            note="Bounds apply to both axes. Counts/pixel: max <= min autoscales range; "
+                 "bins <= 0 autoscales bin count.",
+        )
 
-        ttk.Label(
-            hist_frame,
-            text="Pixel/cluster bounds apply to both axes. Counts/pixel max <= min autoscales the range, "
-                 "and bins <= 0 autoscales the bin count to match it. "
-                 "Cluster t bounds also gate which clusters enter the cluster map. "
-                 "Changes take effect on the next frame.",
-        ).grid(row=4, column=0, columnspan=10, sticky="w", padx=6, pady=(4, 4))
+        time_frame = ttk.LabelFrame(container, text="Time histograms")
+        time_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self._build_hist_table(
+            time_frame, PLOT_SPECS[3:], unit="ns",
+            note="Cluster t bounds also gate which clusters enter the cluster map. "
+                 "Changes apply on the next frame.",
+        )
+
+    def _build_hist_table(self, frame, specs, unit, note):
+        ttk.Label(frame, text="Plot").grid(row=0, column=0, sticky="w", padx=(6, 4), pady=(4, 2))
+        ttk.Label(frame, text="Bins").grid(row=0, column=1, pady=(4, 2))
+        ttk.Label(frame, text=f"Min ({unit})").grid(row=0, column=2, pady=(4, 2))
+        ttk.Label(frame, text=f"Max ({unit})").grid(row=0, column=3, pady=(4, 2))
+        row_idx = 0
+        for row_idx, (key, label) in enumerate(specs, start=1):
+            ttk.Label(frame, text=label).grid(row=row_idx, column=0, sticky="w", padx=(6, 4), pady=1)
+            for offset, field in enumerate(("bins", "min", "max"), start=1):
+                ttk.Entry(frame, textvariable=self._hist_vars[key][field], width=9).grid(
+                    row=row_idx, column=offset, padx=2, pady=1
+                )
+        # Deliberately not word-wrapped (Qt's QGridLayout doesn't reliably
+        # give a wrapped QLabel enough row height through this many nested
+        # custom containers) -- kept short enough to read as one line.
+        ttk.Label(frame, text=note, justify="left").grid(
+            row=row_idx + 1, column=0, columnspan=4, sticky="w", padx=6, pady=(4, 4)
+        )
 
     def _build_axes(self):
-        self._glw.clear()
+        self._glw.clear()  # destroys child items, so the old TextItems go with it
         self._plots = {}
         self._images = {}
         self._curves = {}
+        self._empty_labels = {}
 
         if self._focus_key is not None:
             layout = [(self._focus_key, PLOT_LABELS[self._focus_key], 0, 0)]
@@ -293,6 +328,13 @@ class HistogramPlotPanel(ttk.Frame):
                 self._images[key] = img
             else:
                 self._curves[key] = plot_item.plot([], [])
+
+            empty_label = pg.TextItem(
+                "No data — press Start to acquire", anchor=(0.5, 0.5), color=(140, 140, 140),
+            )
+            empty_label.setVisible(False)
+            plot_item.addItem(empty_label, ignoreBounds=True)
+            self._empty_labels[key] = empty_label
 
     def _on_plot_double_click(self, key):
         self._set_focus(None if self._focus_key is not None else key)
@@ -373,6 +415,16 @@ class HistogramPlotPanel(ttk.Frame):
 
     # ---- drawing ----------------------------------------------------------
 
+    def _set_empty_placeholder(self, key, is_empty):
+        text_item = self._empty_labels.get(key)
+        plot_item = self._plots.get(key)
+        if text_item is None or plot_item is None:
+            return
+        text_item.setVisible(is_empty)
+        if is_empty:
+            (x0, x1), (y0, y1) = plot_item.getViewBox().viewRange()
+            text_item.setPos((x0 + x1) / 2, (y0 + y1) / 2)
+
     def _draw_map(self, key, hist, cfg, log_enabled):
         img = self._images.get(key)
         plot_item = self._plots.get(key)
@@ -388,6 +440,7 @@ class HistogramPlotPanel(ttk.Frame):
         plot_item.setLabel("bottom", "X")
         plot_item.setLabel("left", "Y")
         plot_item.getViewBox().setRange(xRange=(low, high), yRange=(low, high), padding=0)
+        self._set_empty_placeholder(key, not np.any(hist))
 
     def _draw_counts(self, pixel_hist):
         curve = self._curves.get("counts")
@@ -407,6 +460,7 @@ class HistogramPlotPanel(ttk.Frame):
         plot_item.setLabel("left", "Pixels")
         plot_item.enableAutoRange(axis="y")
         plot_item.setXRange(*counts_hist["range"], padding=0)
+        self._set_empty_placeholder("counts", not np.any(counts_hist["counts"]))
 
     def _draw_line(self, key, hist, xlabel, ylabel, log_enabled):
         curve = self._curves.get(key)
@@ -419,3 +473,4 @@ class HistogramPlotPanel(ttk.Frame):
         plot_item.setLabel("left", ylabel)
         plot_item.enableAutoRange(axis="y")
         plot_item.setXRange(*hist["range"], padding=0)
+        self._set_empty_placeholder(key, not np.any(hist["counts"]))

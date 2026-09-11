@@ -43,9 +43,10 @@ from qtk import GridMixin, TkCompatMixin, ttk
 # blocks reads as one uniform hierarchy instead of a patchwork of
 # whatever each tab happened to inherit. Actual input fields (Entry/Text)
 # paint their own white "Base" background regardless, matching the white
-# plots next to all this.
-FLUSH_BACKGROUND = QtGui.QColor("#f0f0f0")
-BOXED_BACKGROUND = QtGui.QColor("#e0e0e0")
+# plots next to all this. Deliberately a bit darker than Qt's own default
+# window grey (#f0f0f0) for clearer contrast against that white.
+FLUSH_BACKGROUND = QtGui.QColor("#e9e9e9")
+BOXED_BACKGROUND = QtGui.QColor("#d8d8d8")
 
 
 def set_background(widget, color):
@@ -60,13 +61,23 @@ def set_background(widget, color):
     widget.setPalette(palette)
 
 
+_TOGGLE_STYLE = """
+QToolButton { border: none; font-weight: bold; padding: 4px; }
+QToolButton:hover { background-color: rgba(0, 0, 0, 25); }
+QToolButton:pressed { background-color: rgba(0, 0, 0, 45); }
+"""
+
+
 class _VerticalToolButton(QtWidgets.QToolButton):
     """A QToolButton whose label is drawn rotated 90 degrees (reads
     top-to-bottom), for a toggle that sits in a narrow vertical strip."""
 
     def sizeHint(self):
         size = super().sizeHint()
-        return QtCore.QSize(size.height(), size.width())
+        # A few extra px on the strip's width (the rotated button's own
+        # *height*) than the bare text needs -- a wider, easier-to-hit
+        # target for what's otherwise a thin sliver along the tab's edge.
+        return QtCore.QSize(size.height() + 10, size.width())
 
     def paintEvent(self, _event):
         painter = QtGui.QPainter(self)
@@ -91,7 +102,7 @@ class CollapsibleFrame(TkCompatMixin, GridMixin, QtWidgets.QWidget):
         self._toggle.setCheckable(True)
         self._toggle.setChecked(not collapsed)
         self._toggle.setCursor(QtCore.Qt.PointingHandCursor)
-        self._toggle.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
+        self._toggle.setStyleSheet(_TOGGLE_STYLE)
         self._toggle.clicked.connect(self._on_toggle)
 
         self._panel = QtWidgets.QFrame(self)
