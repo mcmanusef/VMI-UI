@@ -10,9 +10,9 @@ from qtk import grid_into, ttk
 import numpy as np
 
 import pyqtgraph as pg
-from PyQt5 import QtCore
+from PyQt5 import QtCore, QtGui
 
-from collapsible_frame import CollapsibleFrame
+from collapsible_frame import CollapsibleFrame, set_background
 from qt_plots import hist_to_rgba, ZoomFocusViewBox
 
 from tpx_processing import hist_args, make_counts_per_pixel_hist, make_hist_1d
@@ -149,6 +149,11 @@ class HistogramPlotPanel(ttk.Frame):
         # otherwise leave a small gap between the plots and that rule.
         self.layout().setContentsMargins(0, 0, 0, 0)
         self.layout().setSpacing(0)
+        # Plain QWidgets don't paint a background of their own, so without
+        # this, any sliver not covered by the plots themselves shows the
+        # ordinary grey Qt window background instead of true white --
+        # visibly off against the plots' own explicit white.
+        set_background(self, QtGui.QColor(QtCore.Qt.white))
 
         # Log-scale/gamma/focus controls and the bins/bounds table are
         # secondary to the plots themselves, so they share one collapsible

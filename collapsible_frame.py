@@ -149,9 +149,17 @@ class CollapsibleFrame(TkCompatMixin, GridMixin, QtWidgets.QWidget):
             outer.setContentsMargins(0, 0, 0, 0)
             outer.addWidget(content)
 
-        color = FLUSH_BACKGROUND if flush else BOXED_BACKGROUND
-        for w in (self, content, self._panel):
-            set_background(w, color)
+        if flush:
+            # The whole thing -- title included -- is the sidebar/footer
+            # itself, so it's all one shade.
+            for w in (self, content, self._panel):
+                set_background(w, FLUSH_BACKGROUND)
+        else:
+            # Only the box gets the darker shade; the title stays
+            # untouched (transparent), showing whatever it's sitting
+            # on -- typically the lighter flush background around it --
+            # rather than reading as part of the darker box below it.
+            set_background(self._panel, BOXED_BACKGROUND)
 
         self._update_toggle_text()
 
