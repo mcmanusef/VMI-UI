@@ -182,10 +182,15 @@ class HistogramPlotPanel(ttk.Frame):
         self._build_opts_bar(self._opts_bar)
         self._opts_bar.grid(row=0, column=0, sticky="w", pady=(0, 8))
 
-        self._hist_frame = ttk.Frame(self._footer.body)
-        self._hist_frame.columnconfigure(0, weight=1)
-        self._build_hist_frame(self._hist_frame)
-        self._hist_frame.grid(row=1, column=0, sticky="ew")
+        # Collapsed by default: bins/bounds are a set-once-and-forget
+        # thing, not something glanced at every session, so it starts
+        # tucked away and only takes up space once someone opens it.
+        self._hist_section = CollapsibleFrame(
+            self._footer.body, text="Histogram bins / bounds", collapsed=True,
+        )
+        self._hist_section.body.columnconfigure(0, weight=1)
+        self._build_hist_frame(self._hist_section.body)
+        self._hist_section.grid(row=1, column=0, sticky="ew")
 
         self._plot_frame = ttk.Frame(self)
         self._plot_frame.rowconfigure(0, weight=1)
