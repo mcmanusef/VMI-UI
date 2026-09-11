@@ -12,6 +12,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5 import QtCore
 
+from collapsible_frame import CollapsibleFrame
 from qt_plots import hist_to_rgba, ZoomFocusViewBox
 
 from tpx_processing import hist_args, make_counts_per_pixel_hist, make_hist_1d
@@ -143,11 +144,20 @@ class HistogramPlotPanel(ttk.Frame):
     def _build_ui(self):
         self.columnconfigure(0, weight=1)
 
-        self._opts_bar = ttk.Frame(self)
-        self._build_opts_bar(self._opts_bar)
+        # Log-scale/gamma/focus controls and the bins/bounds table are
+        # secondary to the plots themselves, so they share one collapsible
+        # footer -- collapsing it hands its space straight back to the
+        # plots (Qt excludes hidden widgets from layout sizing).
+        self._footer = CollapsibleFrame(self, text="Plot options")
+        self._footer.body.columnconfigure(0, weight=1)
 
-        self._hist_frame = ttk.LabelFrame(self, text="Histogram bins / bounds")
+        self._opts_bar = ttk.Frame(self._footer.body)
+        self._build_opts_bar(self._opts_bar)
+        self._opts_bar.grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        self._hist_frame = ttk.LabelFrame(self._footer.body, text="Histogram bins / bounds")
         self._build_hist_frame(self._hist_frame)
+        self._hist_frame.grid(row=1, column=0, sticky="ew")
 
         self._plot_frame = ttk.Frame(self)
         self._plot_frame.rowconfigure(0, weight=1)
@@ -158,14 +168,12 @@ class HistogramPlotPanel(ttk.Frame):
 
         if self._plots_first:
             self._plot_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
-            self._opts_bar.grid(row=1, column=0, sticky="w", pady=(0, 6))
-            self._hist_frame.grid(row=2, column=0, sticky="ew")
+            self._footer.grid(row=1, column=0, sticky="ew")
             self.rowconfigure(0, weight=1)
         else:
-            self._opts_bar.grid(row=0, column=0, sticky="w", pady=(0, 6))
-            self._hist_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-            self._plot_frame.grid(row=2, column=0, sticky="nsew")
-            self.rowconfigure(2, weight=1)
+            self._footer.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+            self._plot_frame.grid(row=1, column=0, sticky="nsew")
+            self.rowconfigure(1, weight=1)
 
     def _build_opts_bar(self, plot_opts):
         ttk.Label(plot_opts, text="Log scale:").grid(row=0, column=0, sticky="w")

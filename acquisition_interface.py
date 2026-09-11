@@ -12,6 +12,7 @@ import cv4_writer
 import serval_client
 import shared_state
 import time_estimate
+from collapsible_frame import CollapsibleFrame
 from cv4_writer import Cv4Writer
 from plot_panel import HistogramPlotPanel
 from scrollable_frame import ScrollableFrame
@@ -123,8 +124,16 @@ class AcquisitionInterface(ttk.Frame):
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
 
-        sidebar = ScrollableFrame(self)
-        sidebar.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        # Collapsing this hands the whole sidebar's width back to the
+        # plots -- Qt excludes hidden widgets from layout sizing, so the
+        # column shrinks to just the "Controls" toggle.
+        sidebar_section = CollapsibleFrame(self, text="Controls")
+        sidebar_section.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        sidebar_section.body.columnconfigure(0, weight=1)
+        sidebar_section.body.rowconfigure(0, weight=1)
+
+        sidebar = ScrollableFrame(sidebar_section.body)
+        sidebar.grid(row=0, column=0, sticky="nsew")
 
         main = ttk.Frame(self)
         main.grid(row=0, column=1, sticky="nsew", pady=10, padx=(0, 10))
@@ -142,8 +151,9 @@ class AcquisitionInterface(ttk.Frame):
         self._plot_panel.grid(row=0, column=0, sticky="nsew")
 
     def _build_sidebar(self, sidebar):
-        params = ttk.LabelFrame(sidebar, text="Acquisition parameters")
-        params.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        params_section = CollapsibleFrame(sidebar, text="Acquisition parameters")
+        params_section.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        params = params_section.body
         params.columnconfigure(1, weight=1)
 
         self._add_row(params, 0, "Frame time (s):", ttk.Entry(params, textvariable=self.frame_time_var, width=18))
@@ -186,8 +196,9 @@ class AcquisitionInterface(ttk.Frame):
             row=0, column=1, padx=(4, 0)
         )
 
-        meta = ttk.LabelFrame(sidebar, text="Metadata")
-        meta.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        meta_section = CollapsibleFrame(sidebar, text="Metadata")
+        meta_section.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        meta = meta_section.body
         meta.columnconfigure(1, weight=1)
 
         self._add_row(meta, 0, "Target:", ttk.Entry(meta, textvariable=self.target_var))
@@ -228,8 +239,9 @@ class AcquisitionInterface(ttk.Frame):
             row=2, column=0, sticky="w", pady=(4, 0)
         )
 
-        live = ttk.LabelFrame(sidebar, text="Live totals")
-        live.grid(row=5, column=0, sticky="ew")
+        live_section = CollapsibleFrame(sidebar, text="Live totals")
+        live_section.grid(row=5, column=0, sticky="ew")
+        live = live_section.body
         live.columnconfigure(1, weight=1)
         stat_rows = [
             ("Frames collected:", self.collected_var),
