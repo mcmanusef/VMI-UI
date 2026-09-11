@@ -3,8 +3,8 @@ import pathlib
 import shutil
 import time
 from datetime import date
-import tkinter as tk
-from tkinter import ttk
+import qtk as tk
+from qtk import ttk
 
 import requests
 

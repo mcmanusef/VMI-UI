@@ -1,8 +1,8 @@
 # simple_tabs_ui.py
-# pip install tkinter (usually included with Python)
+# pip install PyQt5
 
-import tkinter as tk
-from tkinter import ttk
+import qtk as tk
+from qtk import ttk
 
 import app_settings
 from acquisition_interface import AcquisitionInterface
@@ -188,12 +188,5 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    # Optional: slightly nicer default theme on some platforms
     app = App()
-    try:
-        style = ttk.Style(app)
-        style.theme_use("clam")
-    except tk.TclError:
-        pass
-
     app.mainloop()

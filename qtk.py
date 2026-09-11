@@ -417,6 +417,14 @@ class Toplevel(TkCompatMixin, GridMixin, QtWidgets.QDialog):
         if m:
             self.move(int(m.group(1)), int(m.group(2)))
 
+    def update_idletasks(self):
+        # Not shown yet at this point in the usual build-then-center-then-show
+        # dialog flow, so force the layout to compute a real sizeHint-based
+        # size -- otherwise winfo_width()/winfo_height() right after this
+        # would report Qt's pre-layout default size instead.
+        self.adjustSize()
+        super().update_idletasks()
+
     def wait_window(self):
         self.exec_()
 

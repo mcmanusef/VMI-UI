@@ -6,9 +6,9 @@ from queue import Queue, Empty
 
 import numpy as np
 import requests
-import tkinter as tk
-from tkinter import ttk
-from tkinter import filedialog, messagebox
+import qtk as tk
+from qtk import ttk
+from qtk import filedialog, messagebox
 
 import app_settings
 import serval_client

@@ -4,8 +4,8 @@ program from UI.py (the live acquisition/diagnostics UI) -- run this one
 directly (`python analysis_ui.py`) whenever there's no Serval server, just
 files to reprocess.
 """
-import tkinter as tk
-from tkinter import ttk
+import qtk as tk
+from qtk import ttk
 
 import app_settings
 from cluster_raw_interface import ClusterRawInterface
@@ -70,9 +70,4 @@ class AnalysisApp(tk.Tk):
 
 if __name__ == "__main__":
     app = AnalysisApp()
-    try:
-        style = ttk.Style(app)
-        style.theme_use("clam")
-    except tk.TclError:
-        pass
     app.mainloop()

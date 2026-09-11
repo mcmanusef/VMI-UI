@@ -2,8 +2,8 @@ import json
 import pathlib
 import tempfile
 import time
-import tkinter as tk
-from tkinter import ttk
+import qtk as tk
+from qtk import ttk
 
 import requests
 
@@ -73,9 +73,6 @@ class ServalInterface(ttk.Frame):
 
         self.log = tk.Text(status, wrap="word", height=8)
         self.log.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
-        scroll = ttk.Scrollbar(status, orient="vertical", command=self.log.yview)
-        scroll.grid(row=1, column=2, sticky="ns", pady=(8, 0))
-        self.log.configure(yscrollcommand=scroll.set)
 
         right = ttk.Frame(layout)
         right.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(0, 10), pady=10)
@@ -87,9 +84,6 @@ class ServalInterface(ttk.Frame):
         )
         self.dashboard = tk.Text(right, wrap="word", height=12)
         self.dashboard.grid(row=1, column=0, sticky="nsew")
-        dashboard_scroll = ttk.Scrollbar(right, orient="vertical", command=self.dashboard.yview)
-        dashboard_scroll.grid(row=1, column=1, sticky="ns")
-        self.dashboard.configure(yscrollcommand=dashboard_scroll.set)
         self.dashboard.configure(state="disabled")
 
     def _add_row(self, parent, row, label, widget):
