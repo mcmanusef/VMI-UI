@@ -36,10 +36,10 @@ from queue import Queue, Empty
 
 import numpy as np
 import requests
-import tkinter as tk
-from tkinter import ttk, filedialog
+import qtk as tk
+from qtk import ttk, filedialog, grid_into
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PIL import Image as PILImage
 
@@ -257,9 +257,9 @@ class QuickMonitorInterface(ttk.Frame):
         for col, (key, title) in enumerate(_VIEWS):
             figure = Figure(figsize=(5, 5), tight_layout=True)
             ax = figure.add_subplot(1, 1, 1)
-            canvas = FigureCanvasTkAgg(figure, master=plot_frame)
+            canvas = FigureCanvasQTAgg(figure)
             pad = (0, 5) if col == 0 else (5, 0)
-            canvas.get_tk_widget().grid(row=0, column=col, sticky="nsew", padx=pad)
+            grid_into(canvas, plot_frame, row=0, column=col, sticky="nsew", padx=pad)
             self._axes[key] = ax
             self._canvases[key] = canvas
 

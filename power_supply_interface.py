@@ -27,8 +27,8 @@ import queue
 import re
 import threading
 import time
-import tkinter as tk
-from tkinter import messagebox, ttk
+import qtk as tk
+from qtk import messagebox, ttk
 
 try:
     import serial
@@ -556,14 +556,6 @@ class PowerSupplyInterface(ttk.Frame):
         self._grid.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
         self._populate_channel_grid()
 
-        self._hint = ttk.Label(
-            self,
-            text=("Edit V0 / I0 / Ramp values then click Apply (or press Enter "
-                  "in any field). ON / OFF buttons act immediately."),
-            foreground="#666", font=("TkDefaultFont", 9, "italic"))
-        self._hint.grid(row=1, column=0, sticky="sw", padx=8, pady=(0, 2))
-        self._hint.lift()
-
     def _populate_channel_grid(self):
         for child in self._grid.winfo_children():
             child.destroy()
@@ -577,12 +569,23 @@ class PowerSupplyInterface(ttk.Frame):
         ttk.Separator(self._grid, orient="horizontal").grid(
             row=1, column=0, columnspan=len(headers), sticky="ew", pady=2)
 
-        for i, ch in enumerate(self._parse_channels()):
+        channels = self._parse_channels()
+        for i, ch in enumerate(channels):
             self.rows[ch] = ChannelRow(
                 self._grid, i + 2, ch,
                 on_apply_cb=self._on_apply_params,
                 on_status_cb=self._on_toggle_status,
             )
+
+        # Was overlaid on top of the channel grid (same cell, stacked via
+        # lift()) under tkinter; Qt's grid layout doesn't stack widgets in
+        # a cell, so this is its own row inside the "Channels" box instead.
+        ttk.Label(
+            self._grid,
+            text=("Edit V0 / I0 / Ramp values then click Apply (or press Enter "
+                  "in any field). ON / OFF buttons act immediately."),
+            foreground="#666", font=("TkDefaultFont", 9, "italic"),
+        ).grid(row=len(channels) + 2, column=0, columnspan=len(headers), sticky="w", padx=4, pady=(6, 2))
 
     def _build_log(self):
         log_frame = ttk.LabelFrame(self, text="Activity")
@@ -591,9 +594,6 @@ class PowerSupplyInterface(ttk.Frame):
         log_frame.columnconfigure(0, weight=1)
         self.log = tk.Text(log_frame, height=6, wrap="word", font=("TkFixedFont", 9))
         self.log.grid(row=0, column=0, sticky="nsew")
-        scroll = ttk.Scrollbar(log_frame, command=self.log.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
-        self.log.config(yscrollcommand=scroll.set)
 
     def _build_status_bar(self):
         ttk.Label(self, textvariable=self.status_var, anchor="w",
@@ -619,7 +619,6 @@ class PowerSupplyInterface(ttk.Frame):
 
         # Rebuild the row set in case the channel list was edited.
         self._populate_channel_grid()
-        self._hint.lift()
 
         try:
             self.sy = SY127(

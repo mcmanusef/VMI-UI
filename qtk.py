@@ -133,6 +133,7 @@ def _sticky_to_alignment(sticky):
 
 
 _FIXED_FONT_ALIASES = {"tkfixedfont", "courier", "courier new"}
+_DEFAULT_FONT_ALIASES = {"tkdefaultfont"}
 
 
 def _apply_font(widget, font_spec):
@@ -144,8 +145,11 @@ def _apply_font(widget, font_spec):
     family = font_spec[0]
     size = font_spec[1] if len(font_spec) > 1 else None
     style = font_spec[2] if len(font_spec) > 2 else ""
-    if str(family).strip().lower() in _FIXED_FONT_ALIASES:
+    family_key = str(family).strip().lower()
+    if family_key in _FIXED_FONT_ALIASES:
         f = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+    elif family_key in _DEFAULT_FONT_ALIASES:
+        f = QtWidgets.QApplication.font()
     else:
         f = QtGui.QFont(family)
     if size:
@@ -246,6 +250,37 @@ class GridMixin:
         if minsize is not None:
             layout.setRowMinimumHeight(index, minsize)
 
+    def pack(self, side="top", padx=0, pady=0, **_kw):
+        """Only `side` (top/bottom/left/right) + padx/pady are supported --
+        the only pack() usage in this codebase is a simple left-to-right
+        toolbar row."""
+        parent = self.parentWidget()
+        if parent is None:
+            raise TclError("pack() called on a widget with no parent")
+        layout = parent.layout()
+        horizontal = side in ("left", "right")
+        if layout is None:
+            layout = QtWidgets.QHBoxLayout(parent) if horizontal else QtWidgets.QVBoxLayout(parent)
+            parent.setLayout(layout)
+        if not isinstance(layout, (QtWidgets.QHBoxLayout, QtWidgets.QVBoxLayout)):
+            raise TclError(f"{parent!r} already has a non-pack layout")
+
+        target = self
+        px = tuple(padx) if isinstance(padx, (tuple, list)) else (padx, padx)
+        py = tuple(pady) if isinstance(pady, (tuple, list)) else (pady, pady)
+        if any(px) or any(py):
+            container = QtWidgets.QWidget(parent)
+            inner = QtWidgets.QVBoxLayout(container)
+            inner.setSpacing(0)
+            inner.setContentsMargins(px[0], py[0], px[1], py[1])
+            inner.addWidget(self)
+            target = container
+
+        if side in ("left", "top"):
+            layout.addWidget(target)
+        else:
+            layout.insertWidget(0, target)
+
 
 def _grid_layout_for(widget):
     layout = widget.layout()
@@ -261,9 +296,20 @@ def grid_into(widget, parent, row=0, column=0, rowspan=1, columnspan=1, sticky="
     """Grid an arbitrary QWidget that isn't a GridMixin -- namely a
     matplotlib FigureCanvasQTAgg, which is a real QWidget in its own
     right -- into `parent`'s grid layout."""
-    del padx, pady  # not needed by any current call site
     layout = parent._own_layout() if isinstance(parent, GridMixin) else _grid_layout_for(parent)
-    layout.addWidget(widget, row, column, rowspan, columnspan, _sticky_to_alignment(sticky))
+
+    target = widget
+    px = tuple(padx) if isinstance(padx, (tuple, list)) else (padx, padx)
+    py = tuple(pady) if isinstance(pady, (tuple, list)) else (pady, pady)
+    if any(px) or any(py):
+        container = QtWidgets.QWidget(parent)
+        inner = QtWidgets.QVBoxLayout(container)
+        inner.setSpacing(0)
+        inner.setContentsMargins(px[0], py[0], px[1], py[1])
+        inner.addWidget(widget)
+        target = container
+
+    layout.addWidget(target, row, column, rowspan, columnspan, _sticky_to_alignment(sticky))
 
 
 class _FakeEvent:
@@ -339,6 +385,20 @@ class TkCompatMixin:
 
     def update_idletasks(self):
         QtWidgets.QApplication.processEvents()
+
+    def winfo_children(self):
+        return [c for c in self.children() if isinstance(c, QtWidgets.QWidget)]
+
+    def lift(self):
+        self.raise_()
+
+    def destroy(self):
+        parent = self.parentWidget()
+        target = getattr(self, "_pad_container", None) or self
+        if parent is not None and parent.layout() is not None:
+            parent.layout().removeWidget(target)
+        target.setParent(None)
+        target.deleteLater()
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +509,8 @@ class LabelFrame(TkCompatMixin, GridMixin, QtWidgets.QGroupBox):
 
 class Label(TkCompatMixin, GridMixin, QtWidgets.QLabel):
     def __init__(self, parent=None, text="", textvariable=None, font=None, wraplength=None,
-                 justify=None, anchor=None, width=None, relief=None, padding=None, **_kw):
+                 justify=None, anchor=None, width=None, relief=None, padding=None,
+                 foreground=None, **_kw):
         super().__init__(parent)
         self._var = textvariable
         if textvariable is not None:
@@ -472,9 +533,19 @@ class Label(TkCompatMixin, GridMixin, QtWidgets.QLabel):
         if padding:
             px, py = padding if isinstance(padding, (tuple, list)) and len(padding) == 2 else (padding, padding)
             self.setContentsMargins(px, py, px, py)
+        if foreground:
+            self.setStyleSheet(f"color: {foreground};")
 
     def _on_var_write(self, *_):
         self.setText(str(self._var.get()))
+
+    def configure(self, **kw):
+        if "text" in kw:
+            self.setText(str(kw["text"]))
+        if "foreground" in kw:
+            self.setStyleSheet(f"color: {kw['foreground']};")
+
+    config = configure
 
 
 class Button(TkCompatMixin, GridMixin, QtWidgets.QPushButton):
@@ -493,6 +564,12 @@ class Button(TkCompatMixin, GridMixin, QtWidgets.QPushButton):
 
     def _on_var_write(self, *_):
         self.setText(str(self._var.get()))
+
+    def configure(self, **kw):
+        if "text" in kw:
+            self.setText(str(kw["text"]))
+
+    config = configure
 
 
 class Checkbutton(TkCompatMixin, GridMixin, QtWidgets.QCheckBox):
@@ -551,7 +628,7 @@ class Radiobutton(TkCompatMixin, GridMixin, QtWidgets.QRadioButton):
 
 
 class Entry(TkCompatMixin, GridMixin, QtWidgets.QLineEdit):
-    def __init__(self, parent=None, textvariable=None, width=None, show=None, **_kw):
+    def __init__(self, parent=None, textvariable=None, width=None, show=None, justify=None, **_kw):
         super().__init__(parent)
         self._var = textvariable
         self._updating = False
@@ -563,6 +640,8 @@ class Entry(TkCompatMixin, GridMixin, QtWidgets.QLineEdit):
             _apply_width_chars(self, width)
         if show:
             self.setEchoMode(QtWidgets.QLineEdit.Password)
+        if justify:
+            self.setAlignment(_JUSTIFY_MAP.get(justify, QtCore.Qt.AlignLeft))
 
     def _on_var_write(self, *_):
         value = str(self._var.get())
@@ -791,13 +870,34 @@ class Text(TkCompatMixin, GridMixin, QtWidgets.QTextEdit):
         cursor.insertText(text)
         self.setTextCursor(cursor)
 
+    def _line_start_cursor(self, line_number):
+        cursor = QtGui.QTextCursor(self.document())
+        cursor.movePosition(QtGui.QTextCursor.Start)
+        if line_number > 1:
+            cursor.movePosition(QtGui.QTextCursor.Down, QtGui.QTextCursor.MoveAnchor, line_number - 1)
+        return cursor
+
     def delete(self, start, end):
-        del start, end  # only "1.0".."end" is used here -> clear everything
-        self.clear()
+        if start == "1.0" and end == "end":
+            self.clear()
+            return
+        # Only other pattern used in this codebase: "1.0" .. "<line>.0",
+        # trimming a rolling log down to its last N lines.
+        start_line = 1 if start == "1.0" else int(str(start).split(".")[0])
+        end_line = int(str(end).split(".")[0])
+        cursor = self._line_start_cursor(start_line)
+        cursor.setPosition(self._line_start_cursor(end_line).position(), QtGui.QTextCursor.KeepAnchor)
+        cursor.removeSelectedText()
 
     def get(self, start, end):
         del start, end  # "end" and "end-1c" both resolve to the full text
         return self.toPlainText()
+
+    def index(self, spec):
+        # Only the line number (the part before ".") is ever consumed by
+        # callers in this codebase.
+        del spec
+        return f"{self.document().blockCount()}.0"
 
     def see(self, index):
         del index  # only "end" is used here
