@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.idea/
+
+# Large binary data / manuals (not source)
+*.cv4
+*.pdf
+*.h5
+*.tpx3
+Timepix Documentation/
+
+# Jupyter
+.ipynb_checkpoints/

@@ -1,0 +1,8 @@
+{
+  "server": "http://localhost:8080",
+  "bpc_file": "C:\\SoPhy\\pixelconfig_20260212.bpc",
+  "dacs_file": "C:\\SoPhy\\pixelconfig_20260212.bpc.dacs",
+  "bias_voltage": 100,
+  "destination": "C:\\serval_test",
+  "file_pattern": "raw%Hms_"
+}

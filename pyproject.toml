@@ -1,0 +1,19 @@
+[project]
+name = "vmi-ui"
+version = "0.1.0"
+description = "VMI experiment control UI"
+requires-python = ">=3.13"
+dependencies = [
+    "cmasher>=1.9.2",
+    "h5py>=3.11.0",
+    "ipykernel>=7.2.0",
+    "matplotlib>=3.10.8",
+    "numpy>=2.0",
+    "pandas>=3.0.0",
+    "pandas-stubs~=3.0.0",
+    "pillow>=10.0.0",
+    "pyserial>=3.5",
+    "requests>=2.32.5",
+    "ruff==0.15.0",
+    "scipy>=1.13.0",
+]
