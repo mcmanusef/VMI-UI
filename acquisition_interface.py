@@ -140,8 +140,11 @@ class AcquisitionInterface(ttk.Frame):
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
         # Qt's default QGridLayout margins would otherwise leave "Controls"
-        # (and its divider rule) inset from this tab's true edges.
+        # (and its divider rule) inset from this tab's true edges; the
+        # default column *spacing* (separate from margins) would otherwise
+        # leave a small gap between "Controls" and the plots next to it.
         self.layout().setContentsMargins(0, 0, 0, 0)
+        self.layout().setSpacing(0)
 
         # Collapsing this hands the whole sidebar's width back to the
         # plots -- Qt excludes hidden widgets from layout sizing, so the
@@ -168,7 +171,7 @@ class AcquisitionInterface(ttk.Frame):
         _set_background(sidebar.viewport(), QtCore.Qt.white)
 
         main = ttk.Frame(self)
-        main.grid(row=0, column=1, sticky="nsew", padx=(0, 10))
+        main.grid(row=0, column=1, sticky="nsew")
         main.columnconfigure(0, weight=1)
         main.rowconfigure(0, weight=1)
         # Same default-QGridLayout-margin issue as everywhere else -- left
