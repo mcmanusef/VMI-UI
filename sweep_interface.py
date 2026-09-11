@@ -49,9 +49,9 @@ import serval_client
 from qt_plots import mpl_color, ZoomFocusViewBox
 import shared_state
 import time_estimate
-import xps_client
 from cv4_writer import Cv4Writer
 from scrollable_frame import ScrollableFrame
+from stage_interface import describe_move_failure
 from tpx_processing import (
     decode_tpx3,
     sort_tdcs,
@@ -78,11 +78,17 @@ _RATE_COLORS = {
 
 
 class SweepInterface(ttk.Frame):
-    def __init__(self, parent, server_var=None, acq_shared_vars=None, coordinator=None, **kwargs):
+    def __init__(self, parent, server_var=None, acq_shared_vars=None, stage_ui=None, coordinator=None, **kwargs):
         super().__init__(parent, **kwargs)
 
         self._server_var = server_var
         self._fallback_server_var = tk.StringVar(self, value="http://localhost:8080")
+        # The stage connection itself lives on the Stage Control tab (see
+        # stage_interface.StageInterface) -- sweeps are driven through
+        # whatever XPSStage instance is connected there, rather than this
+        # tab opening its own separate connection to the same physical
+        # stage.
+        self._stage_ui = stage_ui
         self._coordinator = coordinator
         if coordinator is not None:
             coordinator.register(self)
@@ -95,33 +101,6 @@ class SweepInterface(ttk.Frame):
         self.spot_size_var = acq.get("spot_size_var") or tk.StringVar(self)
         self.polarization_var = acq.get("polarization_var") or tk.StringVar(self)
         self.wavelength_var = acq.get("wavelength_var") or tk.StringVar(self)
-
-        # Stage connection -- persisted since the IP/group don't change often.
-        self.stage_ip_var = app_settings.persistent_var(self, tk.StringVar, "xps.ip", "192.168.93.51")
-        self.group_var = app_settings.persistent_var(self, tk.StringVar, "xps.group", "")
-        # Plain-Python mirror of group_var, kept in sync below -- Tkinter/Tcl
-        # isn't thread-safe, and _position_poll_loop (a background thread
-        # that runs for the app's whole lifetime) needs the group name on
-        # every tick without ever calling .get() on the Tk variable itself
-        # from off the main thread.
-        self._group_name_cache = self.group_var.get().strip()
-        self.group_var.trace_add("write", lambda *_: setattr(self, "_group_name_cache", self.group_var.get().strip()))
-        self.zero_offset_var = app_settings.persistent_var(self, tk.DoubleVar, "xps.zero_position", 0.0)
-        self.zero_display_var = tk.StringVar(self, value=f"{self.zero_offset_var.get():.4f}")
-        self.zero_offset_var.trace_add(
-            "write", lambda *_: self.zero_display_var.set(f"{self.zero_offset_var.get():.4f}")
-        )
-        self.current_position_var = tk.StringVar(self, value="--")
-        self.group_state_var = tk.StringVar(self, value="--")
-        self.move_target_var = tk.StringVar(self, value="0")
-        self.stage_status_var = tk.StringVar(self, value="Not connected.")
-        self.objects_var = tk.StringVar(self, value="")
-
-        # Continuous 10 Hz position/group-state poll, running for as long as
-        # the widget exists (no-ops until connected). Runs concurrently with
-        # whatever a move/sweep is doing on the same stage connection --
-        # XPSStage serializes access to the socket itself, so this is safe.
-        self._position_poll_thread = threading.Thread(target=self._position_poll_loop, daemon=True)
 
         # Sweep-specific (not shared with Collection/Acquisition -- a
         # sweep's per-position exposure and save location are their own
@@ -143,7 +122,6 @@ class SweepInterface(ttk.Frame):
         self._progress_var = tk.DoubleVar(self, value=0.0)
         self.eta_var = tk.StringVar(self, value="--")
 
-        self._stage = None
         self._sweep_thread = None
         self._stop_event = threading.Event()
         # Graceful stop: don't trigger any more frames/positions, but let
@@ -175,7 +153,6 @@ class SweepInterface(ttk.Frame):
 
         self._build_ui()
         self._poll_queue()
-        self._position_poll_thread.start()
 
     def _default_save_folder(self):
         return rf"C:\DATA\{datetime.date.today().strftime('%Y%m%d')}\sweep"
@@ -206,49 +183,19 @@ class SweepInterface(ttk.Frame):
             row=0, column=0, sticky="w", pady=(0, 6)
         )
 
-        stage = ttk.LabelFrame(sidebar, text="Stage (Newport XPS-D)")
-        stage.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        stage.columnconfigure(1, weight=1)
-
-        self._add_row(stage, 0, "IP:", ttk.Entry(stage, textvariable=self.stage_ip_var, width=18))
-        self._add_row(stage, 1, "Group name:", ttk.Entry(stage, textvariable=self.group_var, width=18))
-        buttons = ttk.Frame(stage)
-        buttons.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 4))
-        ttk.Button(buttons, text="Connect", command=self._connect_stage).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(buttons, text="Initialize", command=self._initialize_stage).grid(row=0, column=1, padx=(0, 6))
-        ttk.Button(buttons, text="Home", command=self._home_stage).grid(row=0, column=2, padx=(0, 6))
-        ttk.Label(stage, textvariable=self.stage_status_var, wraplength=220, justify="left").grid(
-            row=3, column=0, columnspan=2, sticky="w", padx=(0, 4)
+        # The stage connection itself (IP/group, Connect/Initialize/Home,
+        # manual jog + Set Zero) lives on the Stage Control tab now -- see
+        # stage_interface.StageInterface -- so a sweep just needs that
+        # connection to already be up before Start.
+        stage_note = ttk.Label(
+            sidebar,
+            text="Uses the connection from the Stage Control tab -- connect/initialize/home there first.",
+            font=("Segoe UI", 8), wraplength=260, justify="left",
         )
-        ttk.Label(stage, text="Objects:", font=("Segoe UI", 8)).grid(row=4, column=0, sticky="nw", pady=(4, 0))
-        ttk.Label(stage, textvariable=self.objects_var, wraplength=220, justify="left", font=("Segoe UI", 8)).grid(
-            row=4, column=1, sticky="w", pady=(4, 0)
-        )
-        self._add_row(stage, 5, "Group state:", ttk.Label(stage, textvariable=self.group_state_var))
-
-        manual = ttk.LabelFrame(sidebar, text="Manual control")
-        manual.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        manual.columnconfigure(1, weight=1)
-        self._add_row(manual, 0, "Position (rel. zero):", ttk.Label(manual, textvariable=self.current_position_var))
-        zero_entry = ttk.Entry(manual, textvariable=self.zero_display_var, width=12)
-        zero_entry.bind("<Return>", self._commit_zero_edit)
-        zero_entry.bind("<FocusOut>", self._commit_zero_edit)
-        self._add_row(manual, 1, "Saved zero (raw):", zero_entry)
-        self._add_row(manual, 2, "Move to:", ttk.Entry(manual, textvariable=self.move_target_var, width=12))
-        move_buttons = ttk.Frame(manual)
-        move_buttons.grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 4))
-        ttk.Button(move_buttons, text="Move", command=self._move_stage).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(move_buttons, text="Refresh", command=self._refresh_position).grid(row=0, column=1, padx=(0, 6))
-        ttk.Button(move_buttons, text="Set current as Zero", command=self._set_zero).grid(row=0, column=2)
-        ttk.Label(
-            manual,
-            text='A Move failing with "Not allowed action" usually means the stage '
-                 "hasn't been initialized/homed yet -- try Initialize, then Home.",
-            font=("Segoe UI", 8), wraplength=220, justify="left",
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=(0, 4), pady=(0, 4))
+        stage_note.grid(row=1, column=0, sticky="w", pady=(0, 8))
 
         positions = ttk.LabelFrame(sidebar, text="Positions")
-        positions.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        positions.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         positions.columnconfigure(1, weight=1)
         ttk.Radiobutton(
             positions, text="Range", value="range", variable=self.position_mode_var
@@ -270,7 +217,7 @@ class SweepInterface(ttk.Frame):
         )
 
         options = ttk.LabelFrame(sidebar, text="Sweep options")
-        options.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        options.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         options.columnconfigure(1, weight=1)
         self._add_row(options, 0, "Passes:", ttk.Entry(options, textvariable=self.passes_var, width=8))
         ttk.Label(
@@ -296,7 +243,7 @@ class SweepInterface(ttk.Frame):
         ttk.Label(options, text="Save folder:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
 
         meta = ttk.LabelFrame(sidebar, text="Metadata")
-        meta.grid(row=5, column=0, sticky="ew", pady=(0, 8))
+        meta.grid(row=4, column=0, sticky="ew", pady=(0, 8))
         meta.columnconfigure(1, weight=1)
         self._add_row(meta, 0, "Target:", ttk.Entry(meta, textvariable=self.target_var))
         self._add_row(meta, 1, "Target Pressure:", ttk.Entry(meta, textvariable=self.target_pressure_var))
@@ -311,7 +258,7 @@ class SweepInterface(ttk.Frame):
         shared_state.wire_notes_widget(self.notes)
 
         live = ttk.LabelFrame(sidebar, text="Live collection")
-        live.grid(row=6, column=0, sticky="ew", pady=(0, 8))
+        live.grid(row=5, column=0, sticky="ew", pady=(0, 8))
         live.columnconfigure(1, weight=1)
         for row, (label, var) in enumerate([
             ("Est. frames needed (this visit):", self.position_estimate_var),
@@ -324,7 +271,7 @@ class SweepInterface(ttk.Frame):
             ttk.Label(live, textvariable=var).grid(row=row, column=1, sticky="w", pady=1)
 
         run_buttons = ttk.Frame(sidebar)
-        run_buttons.grid(row=7, column=0, sticky="ew", pady=(0, 6))
+        run_buttons.grid(row=6, column=0, sticky="ew", pady=(0, 6))
         ttk.Button(run_buttons, text="Start", command=self.start).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(run_buttons, text="Finish & Stop", command=self.finish_and_stop).grid(row=0, column=1, padx=(0, 8))
         ttk.Button(run_buttons, text="Stop", command=self.stop).grid(row=0, column=2)
@@ -334,10 +281,10 @@ class SweepInterface(ttk.Frame):
             text='"Finish & Stop" lets the current backlog fully process before stopping '
                  '(no half-done files); "Stop" cuts off immediately.',
             font=("Segoe UI", 8), wraplength=260, justify="left",
-        ).grid(row=8, column=0, sticky="w", pady=(0, 6))
+        ).grid(row=7, column=0, sticky="w", pady=(0, 6))
 
         status = ttk.Frame(sidebar)
-        status.grid(row=9, column=0, sticky="ew")
+        status.grid(row=8, column=0, sticky="ew")
         ttk.Label(status, textvariable=self.status_var, wraplength=220, justify="left").grid(row=0, column=0, sticky="w")
         ttk.Progressbar(status, variable=self._progress_var, maximum=100.0, mode="determinate", length=220).grid(
             row=1, column=0, sticky="ew", pady=(4, 0)
@@ -391,171 +338,6 @@ class SweepInterface(ttk.Frame):
             url = f"http://{url}"
         return url
 
-    # ---- stage connection / manual control (background threads) ----------
-
-    def _require_stage_group(self):
-        if not self._stage or not self._stage.connected:
-            self.stage_status_var.set("Connect to the stage first.")
-            return False
-        if not self.group_var.get().strip():
-            self.stage_status_var.set("Group name is required.")
-            return False
-        return True
-
-    def _connect_stage(self):
-        ip = self.stage_ip_var.get().strip()
-        if not ip:
-            self.stage_status_var.set("IP is required.")
-            return
-        self.stage_status_var.set("Connecting...")
-        threading.Thread(target=self._connect_worker, args=(ip,), daemon=True).start()
-
-    def _connect_worker(self, ip):
-        try:
-            stage = xps_client.XPSStage(ip)
-            stage.connect()
-            objects = stage.objects_list()
-        except Exception as exc:
-            self._queue.put({"stage_error": str(exc)})
-            return
-        self._stage = stage
-        # ObjectsListGet returns every object (groups AND their individual
-        # positioners, e.g. "Group2;Group2.Pos;..."); positioner entries
-        # have a '.' in the name, group names don't -- keep only the
-        # group-level entries, since that's what Group* commands take.
-        groups = sorted({
-            entry.strip() for entry in objects.split(";") if entry.strip() and "." not in entry.strip()
-        })
-        self._queue.put({"stage_connected": True, "objects": ", ".join(groups)})
-
-    def _initialize_stage(self):
-        if not self._require_stage_group():
-            return
-        self.stage_status_var.set("Initializing...")
-        threading.Thread(
-            target=self._initialize_worker, args=(self.group_var.get().strip(),), daemon=True
-        ).start()
-
-    def _initialize_worker(self, group_name):
-        try:
-            self._stage.initialize(group_name)
-        except Exception as exc:
-            self._queue.put({"stage_error": str(exc)})
-            return
-        self._queue.put({"stage_initialized": True})
-
-    def _home_stage(self):
-        if not self._require_stage_group():
-            return
-        self.stage_status_var.set("Homing...")
-        threading.Thread(target=self._home_worker, args=(self.group_var.get().strip(),), daemon=True).start()
-
-    def _home_worker(self, group_name):
-        try:
-            self._stage.home(group_name)
-            pos = self._stage.wait_for_settle(group_name, timeout=120.0)
-        except Exception as exc:
-            self._queue.put({"stage_error": str(exc)})
-            return
-        self._queue.put({"stage_homed": True, "position": pos})
-
-    def _move_stage(self):
-        if not self._require_stage_group():
-            return
-        try:
-            target = float(self.move_target_var.get())
-        except ValueError:
-            self.stage_status_var.set("Invalid target position.")
-            return
-        self.stage_status_var.set("Moving...")
-        threading.Thread(
-            target=self._move_worker,
-            args=(self.group_var.get().strip(), self.zero_offset_var.get() + target),
-            daemon=True,
-        ).start()
-
-    def _move_worker(self, group_name, absolute_target):
-        try:
-            self._stage.move_absolute(group_name, absolute_target)
-            pos = self._stage.wait_for_settle(group_name, timeout=120.0)
-        except Exception as exc:
-            self._queue.put({"stage_error": self._describe_move_failure(group_name, exc)})
-            return
-        self._queue.put({"stage_moved": True, "position": pos})
-
-    def _describe_move_failure(self, group_name, exc):
-        """XPS motion errors (e.g. -22 "Not allowed action") usually mean the
-        group isn't in a state that accepts motion commands -- most often it
-        just hasn't been homed yet. Rather than guess at status codes (they
-        vary by firmware), ask the controller for its own current status text
-        and fold that into the message so the operator can see why."""
-        try:
-            _, status_text = self._stage.status(group_name)
-            return f"{exc} -- current group status: {status_text}. (Try Home if it hasn't been homed yet.)"
-        except Exception:
-            return str(exc)
-
-    def _refresh_position(self):
-        if not self._require_stage_group():
-            return
-        threading.Thread(target=self._refresh_worker, args=(self.group_var.get().strip(),), daemon=True).start()
-
-    def _refresh_worker(self, group_name):
-        try:
-            pos = self._stage.position(group_name)
-        except Exception as exc:
-            self._queue.put({"stage_error": str(exc)})
-            return
-        self._queue.put({"stage_position": pos})
-
-    def _set_zero(self):
-        if not self._require_stage_group():
-            return
-        threading.Thread(target=self._set_zero_worker, args=(self.group_var.get().strip(),), daemon=True).start()
-
-    def _set_zero_worker(self, group_name):
-        try:
-            pos = self._stage.position(group_name)
-        except Exception as exc:
-            self._queue.put({"stage_error": str(exc)})
-            return
-        self._queue.put({"stage_zero_set": True, "position": pos})
-
-    def _update_position_display(self, raw_position):
-        relative = raw_position - self.zero_offset_var.get()
-        self.current_position_var.set(f"{relative:.4f}")
-
-    def _commit_zero_edit(self, _event=None):
-        """The "Saved zero" field is directly editable (not just settable
-        via "Set current as Zero") -- commits on Enter or losing focus.
-        Invalid text just reverts to the last valid value rather than
-        raising, same as every other numeric field in this app."""
-        try:
-            value = float(self.zero_display_var.get())
-        except ValueError:
-            self.zero_display_var.set(f"{self.zero_offset_var.get():.4f}")
-            return
-        self.zero_offset_var.set(value)  # persists automatically; re-formats this field too
-
-    def _position_poll_loop(self):
-        """Runs for the lifetime of the widget, refreshing the displayed
-        position and group state at 10 Hz whenever a stage is connected and
-        a group name is set. Silently skips a tick on error rather than
-        spamming the status line 10x/second -- a real problem still shows
-        up clearly the moment a manual action (Move, Home, ...) is tried.
-        """
-        while True:
-            stage = self._stage
-            group_name = self._group_name_cache
-            if stage is not None and stage.connected and group_name:
-                try:
-                    pos = stage.position(group_name)
-                    _, status_text = stage.status(group_name)
-                    self._queue.put({"stage_position": pos, "stage_group_state": status_text})
-                except Exception:
-                    pass
-            time.sleep(0.1)  # 10 Hz
-
     # ---- start / stop -------------------------------------------------
 
     def is_running(self):
@@ -599,12 +381,13 @@ class SweepInterface(ttk.Frame):
         if self.is_running():
             self.stop()
 
-        if not self._stage or not self._stage.connected:
-            self.status_var.set("Connect to the stage first.")
+        stage = self._stage_ui.get_stage() if self._stage_ui is not None else None
+        if not stage or not stage.connected:
+            self.status_var.set("Connect to the stage first (see the Stage Control tab).")
             return
-        group_name = self.group_var.get().strip()
+        group_name = self._stage_ui.group_var.get().strip()
         if not group_name:
-            self.status_var.set("Group name is required.")
+            self.status_var.set("Group name is required (see the Stage Control tab).")
             return
 
         try:
@@ -650,7 +433,7 @@ class SweepInterface(ttk.Frame):
 
         metadata_base = self._collect_metadata(frame_time, dwell_mode, dwell_value, passes)
         server = self._server_url()
-        zero_offset = self.zero_offset_var.get()
+        zero_offset = self._stage_ui.zero_offset_var.get()
 
         self._stop_event.clear()
         self._finish_event.clear()
@@ -677,7 +460,7 @@ class SweepInterface(ttk.Frame):
         self._sweep_thread = threading.Thread(
             target=self._sweep_loop,
             args=(
-                server, group_name, zero_offset, positions, passes,
+                stage, server, group_name, zero_offset, positions, passes,
                 dwell_mode, dwell_value, frame_time, raw_root, save_folder, metadata_base,
             ),
             daemon=True,
@@ -1000,7 +783,7 @@ class SweepInterface(ttk.Frame):
             **entry,
         })
 
-    def _calibrate_frame_counts(self, server, group_name, zero_offset, positions, frame_time, dwell_value, raw_root):
+    def _calibrate_frame_counts(self, stage, server, group_name, zero_offset, positions, frame_time, dwell_value, raw_root):
         """Cluster-dwell mode only, run once before the real sweep starts:
         visit every distinct requested position, collect and process
         _CALIBRATION_FRAME_COUNT frames there, and use the average cluster
@@ -1047,12 +830,12 @@ class SweepInterface(ttk.Frame):
             target = zero_offset + requested
 
             try:
-                self._stage.move_absolute(group_name, target)
-                self._stage.wait_for_settle(group_name, timeout=120.0)
+                stage.move_absolute(group_name, target)
+                stage.wait_for_settle(group_name, timeout=120.0)
             except Exception as exc:
                 self._queue.put({
                     "error": f"Calibration move failed at position {requested}: "
-                             f"{self._describe_move_failure(group_name, exc)}"
+                             f"{describe_move_failure(stage, group_name, exc)}"
                 })
                 continue
 
@@ -1132,7 +915,7 @@ class SweepInterface(ttk.Frame):
         return frame_counts
 
     def _sweep_loop(
-        self, server, group_name, zero_offset, positions, passes,
+        self, stage, server, group_name, zero_offset, positions, passes,
         dwell_mode, dwell_value, frame_time, raw_root, save_folder, metadata_base,
     ):
         """The mover: moves the stage through every position/pass and
@@ -1159,7 +942,7 @@ class SweepInterface(ttk.Frame):
         fallback_count = None
         if dwell_mode == "clusters":
             frame_counts = self._calibrate_frame_counts(
-                server, group_name, zero_offset, positions, frame_time, dwell_value, raw_root
+                stage, server, group_name, zero_offset, positions, frame_time, dwell_value, raw_root
             )
             if self._stop_event.is_set() or self._finish_event.is_set():
                 self._queue.put({"sweep_done": True, "reason": "Stopped during calibration."})
@@ -1211,15 +994,15 @@ class SweepInterface(ttk.Frame):
                     visit_tag = f"pos_{global_index:03d}_{requested:+.4f}"
 
                     try:
-                        self._stage.move_absolute(group_name, target)
-                        measured_abs = self._stage.wait_for_settle(group_name, timeout=120.0)
+                        stage.move_absolute(group_name, target)
+                        measured_abs = stage.wait_for_settle(group_name, timeout=120.0)
                     except Exception as exc:
                         # One bad position (a transient controller hiccup, a
                         # requested value outside the travel limits, ...)
                         # shouldn't abort the rest of the list/pass -- report
                         # it and move on to the next requested position.
                         move_failures += 1
-                        self._queue.put({"error": f"Move failed: {self._describe_move_failure(group_name, exc)}"})
+                        self._queue.put({"error": f"Move failed: {describe_move_failure(stage, group_name, exc)}"})
                         continue
                     measured = measured_abs - zero_offset
 
@@ -1375,34 +1158,6 @@ class SweepInterface(ttk.Frame):
     def _apply_result(self, result):
         if "error" in result:
             self.status_var.set(f"Error: {result['error']}")
-            return
-        if "stage_error" in result:
-            self.stage_status_var.set(f"Error: {result['stage_error']}")
-            return
-        if result.get("stage_connected"):
-            self.stage_status_var.set("Connected.")
-            self.objects_var.set(result.get("objects", ""))
-            return
-        if result.get("stage_initialized"):
-            self.stage_status_var.set("Initialized.")
-            return
-        if result.get("stage_homed"):
-            self._update_position_display(result["position"])
-            self.stage_status_var.set("Homed.")
-            return
-        if result.get("stage_moved"):
-            self._update_position_display(result["position"])
-            self.stage_status_var.set("Move complete.")
-            return
-        if "stage_position" in result:
-            self._update_position_display(result["stage_position"])
-            if "stage_group_state" in result:
-                self.group_state_var.set(result["stage_group_state"])
-            return
-        if result.get("stage_zero_set"):
-            self.zero_offset_var.set(result["position"])
-            self._update_position_display(result["position"])
-            self.stage_status_var.set(f"Zero set at raw position {result['position']:.4f}.")
             return
         if result.get("sweep_done"):
             reason = result.get("reason", "Sweep finished.")

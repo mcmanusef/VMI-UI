@@ -4,7 +4,6 @@
 import qtk as tk
 from qtk import ttk
 
-import app_settings
 from acquisition_interface import AcquisitionInterface
 from collection_interface import CollectionInterface
 from diagnostics_interface import DiagnosticsInterface
@@ -12,6 +11,7 @@ from power_supply_interface import PowerSupplyInterface
 from quick_monitor_interface import QuickMonitorInterface
 from serval_interface import ServalInterface
 from shared_state import make_plot_shared_vars, make_acquisition_shared_vars
+from stage_interface import StageInterface
 from sweep_interface import SweepInterface
 from tab_coordinator import TabCoordinator
 from timewalk_interface import TimewalkInterface
@@ -24,7 +24,7 @@ class App(tk.Tk):
 
         # Top-level layout
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
 
         # Shared, persisted state: same live Tk variables handed to every
         # tab that needs them, so editing e.g. frame time or histogram bins
@@ -34,66 +34,65 @@ class App(tk.Tk):
         self._plot_shared_vars = make_plot_shared_vars(self)
         self._acq_shared_vars = make_acquisition_shared_vars(self)
 
-        toolbar = ttk.Frame(self)
-        toolbar.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 0))
-        self._save_defaults_status_var = tk.StringVar(self, value="")
-        ttk.Button(toolbar, text="Save current as default", command=self._save_current_as_default).grid(
-            row=0, column=0, sticky="w"
-        )
-        ttk.Label(toolbar, textvariable=self._save_defaults_status_var, font=("Segoe UI", 8)).grid(
-            row=0, column=1, sticky="w", padx=(8, 0)
-        )
+        # Two top-level groups -- Hardware (things you connect to/operate)
+        # and Acquisition (things that collect or analyze data) -- each its
+        # own inner tab bar.
+        groups = ttk.Notebook(self)
+        groups.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
-        notebook = ttk.Notebook(self)
-        notebook.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        hardware_group = ttk.Frame(groups)
+        acquisition_group = ttk.Frame(groups)
+        groups.add(hardware_group, text="Hardware")
+        groups.add(acquisition_group, text="Acquisition")
 
-        # Tabs
-        serval_tab = ttk.Frame(notebook)
-        collection_tab = ttk.Frame(notebook)
-        diagnostics_tab = ttk.Frame(notebook)
-        acquisition_tab = ttk.Frame(notebook)
-        timewalk_tab = ttk.Frame(notebook)
-        quick_monitor_tab = ttk.Frame(notebook)
-        sweep_tab = ttk.Frame(notebook)
-        power_supply_tab = ttk.Frame(notebook)
+        hardware = self._build_group_notebook(hardware_group)
+        acquisition = self._build_group_notebook(acquisition_group)
 
-        notebook.add(serval_tab, text="serval config")
-        notebook.add(collection_tab, text="collection parameters")
-        notebook.add(diagnostics_tab, text="diagnostics")
-        notebook.add(acquisition_tab, text="monitored acquisition")
-        notebook.add(timewalk_tab, text="timewalk calibration")
-        notebook.add(quick_monitor_tab, text="quick monitor")
-        notebook.add(sweep_tab, text="parameter sweep")
-        notebook.add(power_supply_tab, text="power supply")
+        # Hardware tabs
+        serval_tab = ttk.Frame(hardware)
+        stage_tab = ttk.Frame(hardware)
+        power_supply_tab = ttk.Frame(hardware)
+        hardware.add(serval_tab, text="serval config")
+        hardware.add(stage_tab, text="stage control")
+        hardware.add(power_supply_tab, text="power supply")
 
-        # Fill each tab with a simple example layout
+        # Acquisition tabs
+        collection_tab = ttk.Frame(acquisition)
+        diagnostics_tab = ttk.Frame(acquisition)
+        acquisition_tab = ttk.Frame(acquisition)
+        timewalk_tab = ttk.Frame(acquisition)
+        sweep_tab = ttk.Frame(acquisition)
+        quick_monitor_tab = ttk.Frame(acquisition)
+        acquisition.add(collection_tab, text="collection parameters")
+        acquisition.add(diagnostics_tab, text="diagnostics")
+        acquisition.add(acquisition_tab, text="monitored acquisition")
+        acquisition.add(timewalk_tab, text="timewalk calibration")
+        acquisition.add(sweep_tab, text="parameter sweep")
+        quick_monitor_index = acquisition.count()
+        acquisition.add(quick_monitor_tab, text="quick monitor")
+
+        # Fill each tab with its interface. Stage must be built before
+        # Sweep -- Sweep drives its moves through the stage connection
+        # StageInterface owns (see stage_interface.py / sweep_interface.py).
         self._build_serval_config(serval_tab)
+        self._build_stage(stage_tab)
+        self._build_power_supply(power_supply_tab)
         self._build_collection_params(collection_tab)
         self._build_diagnostics(diagnostics_tab)
         self._build_acquisition(acquisition_tab)
         self._build_timewalk(timewalk_tab)
-        self._build_quick_monitor(quick_monitor_tab)
         self._build_sweep(sweep_tab)
-        self._build_power_supply(power_supply_tab)
+        self._build_quick_monitor(quick_monitor_tab)
 
-    def _save_current_as_default(self):
-        """Snapshot every tab's user-editable fields into app_settings.json
-        as the new defaults. Fields already wired to a shared/persisted Tk
-        variable (see shared_state.py) auto-save on every change already --
-        this is for the rest of each tab's fields, which otherwise reset to
-        their hardcoded defaults every restart. Each tab that has any such
-        fields exposes them via a default_fields() -> {key: var} method;
-        tabs with nothing extra to save (already fully shared/persisted)
-        just don't define one.
-        """
-        saved = 0
-        for tab in self._coordinator._tabs:
-            fields = getattr(tab, "default_fields", None)
-            if fields is None:
-                continue
-            app_settings.update({key: var.get() for key, var in fields().items()})
-            saved += 1
-        self._save_defaults_status_var.set(f"Saved current values as default ({saved} tab(s)).")
+        # Disabled for now.
+        acquisition.setTabEnabled(quick_monitor_index, False)
+
+    def _build_group_notebook(self, parent: ttk.Frame):
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        notebook = ttk.Notebook(parent)
+        notebook.grid(row=0, column=0, sticky="nsew")
+        return notebook
 
     def _build_serval_config(self, parent: ttk.Frame):
         parent.columnconfigure(0, weight=1)
@@ -101,6 +100,13 @@ class App(tk.Tk):
 
         self.serval_ui = ServalInterface(parent, coordinator=self._coordinator)
         self.serval_ui.grid(row=0, column=0, sticky="nsew")
+
+    def _build_stage(self, parent: ttk.Frame):
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+
+        self.stage_ui = StageInterface(parent, coordinator=self._coordinator)
+        self.stage_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_collection_params(self, parent: ttk.Frame):
         parent.columnconfigure(0, weight=1)
@@ -175,6 +181,7 @@ class App(tk.Tk):
             parent,
             server_var=server_var.server_var if server_var else None,
             acq_shared_vars=self._acq_shared_vars,
+            stage_ui=getattr(self, "stage_ui", None),
             coordinator=self._coordinator,
         )
         sweep_ui.grid(row=0, column=0, sticky="nsew")
