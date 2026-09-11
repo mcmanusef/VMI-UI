@@ -155,6 +155,12 @@ class AcquisitionInterface(ttk.Frame):
         self._plot_panel.grid(row=0, column=0, sticky="nsew")
 
     def _build_sidebar(self, sidebar):
+        # A trailing empty row soaks up any leftover vertical space (e.g.
+        # once collapsed sections have shrunk) so the real content stays
+        # packed at the top and pulls upward as sections collapse, rather
+        # than leftover space landing inside one of the rows above.
+        sidebar.rowconfigure(5, weight=1)
+
         buttons = ttk.Frame(sidebar)
         buttons.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         ttk.Button(buttons, text="Start", command=self.start).grid(row=0, column=0, padx=(0, 8))
