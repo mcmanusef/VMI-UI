@@ -9,15 +9,16 @@ from qtk import grid_into, ttk
 
 import numpy as np
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
-from matplotlib.colors import LogNorm, PowerNorm
-from matplotlib.widgets import RectangleSelector
+import pyqtgraph as pg
+from PyQt5 import QtCore
 
-try:
-    import cmasher as cmr
-except Exception:
-    cmr = None
+# Kept only for build_log_norm/build_power_norm below, which
+# momentum_calibration_interface.py and quick_monitor_interface.py still
+# import (their own matplotlib figures haven't been ported to pyqtgraph
+# yet) -- drop once every caller of those two functions is gone.
+from matplotlib.colors import LogNorm, PowerNorm
+
+from qt_plots import hist_to_rgba, ZoomFocusViewBox
 
 from tpx_processing import hist_args, make_counts_per_pixel_hist, make_hist_1d
 
@@ -42,31 +43,6 @@ DEFAULT_HIST_SETTINGS = {
     "cluster_t": {"bins": 1000, "min": 0.0, "max": 1000.0},
     "etof": {"bins": 2000, "min": 0.0, "max": 1000.0},
 }
-
-
-def apply_log_scale(ax, counts, enabled: bool):
-    if not enabled:
-        ax.set_yscale("linear")
-        ax.set_ylim(*_auto_hist_ylim(counts))
-        return
-    positive = counts[counts > 0]
-    if positive.size == 0:
-        ax.set_yscale("linear")
-        ax.set_ylim(*_auto_hist_ylim(counts))
-        return
-    min_val = float(positive.min())
-    max_val = float(positive.max())
-    min_val = max(min_val, 1e-3)
-    max_val = max(max_val, min_val * 1.1)
-    ax.set_yscale("log")
-    ax.set_ylim(min_val, max_val * 1.1)
-
-
-def _auto_hist_ylim(counts):
-    max_val = counts.max() if len(counts) else 0
-    if max_val <= 0:
-        max_val = 1
-    return 0, 1.1 * max_val
 
 
 def build_log_norm(hist_2d):
@@ -153,10 +129,11 @@ class HistogramPlotPanel(ttk.Frame):
         self.focus_button_var = tk.StringVar(self, value="Focus")
         self._focus_key = None
 
-        self._zoom_selectors = []
-        self._base_limits = {}
-        self._axes = {}
-        self._press_cid = None
+        # Populated by _build_axes(): PlotItems, and either an ImageItem
+        # (pixel/cluster) or a PlotDataItem (everything else) per key.
+        self._plots = {}
+        self._images = {}
+        self._curves = {}
 
         self._build_ui()
         self._wire_hist_traces()
@@ -184,17 +161,12 @@ class HistogramPlotPanel(ttk.Frame):
         self._last_data = data
         settings = data.get("settings", self.hist_snapshot())
 
-        for ax in self._axes.values():
-            ax.clear()
-
         self._draw_map("pixel", data["pixel_hist"], settings["pixel"], self.log_pixel_var.get())
         self._draw_map("cluster", data["cluster_hist"], settings["cluster"], self.log_cluster_var.get())
         self._draw_counts(data["pixel_hist"])
         self._draw_line("itof", data["itof_hist"], "Time (ns)", "Counts", self.log_itof_var.get())
         self._draw_line("cluster_t", data["cluster_t_hist"], "Time (ns)", "Counts", self.log_cluster_t_var.get())
         self._draw_line("etof", data["etof_hist"], "Time (ns)", "Counts", self.log_etof_var.get())
-
-        self._canvas.draw_idle()
 
     # ---- UI construction --------------------------------------------------
 
@@ -210,9 +182,8 @@ class HistogramPlotPanel(ttk.Frame):
         self._plot_frame = ttk.Frame(self)
         self._plot_frame.rowconfigure(0, weight=1)
         self._plot_frame.columnconfigure(0, weight=1)
-        self._figure = Figure(figsize=(8, 6), tight_layout=True)
-        self._canvas = FigureCanvasQTAgg(self._figure)
-        grid_into(self._canvas, self._plot_frame, row=0, column=0, sticky="nsew")
+        self._glw = pg.GraphicsLayoutWidget()
+        grid_into(self._glw, self._plot_frame, row=0, column=0, sticky="nsew")
         self._build_axes()
 
         if self._plots_first:
@@ -302,75 +273,31 @@ class HistogramPlotPanel(ttk.Frame):
         ).grid(row=4, column=0, columnspan=10, sticky="w", padx=6, pady=(4, 4))
 
     def _build_axes(self):
-        self._figure.clear()
-        self._axes = {}
-        self._base_limits = {}
+        self._glw.clear()
+        self._plots = {}
+        self._images = {}
+        self._curves = {}
 
         if self._focus_key is not None:
-            self._axes[self._focus_key] = self._figure.add_subplot(1, 1, 1)
+            layout = [(self._focus_key, PLOT_LABELS[self._focus_key], 0, 0)]
         else:
-            grid = self._figure.subplots(2, 3)
-            for idx, (key, _) in enumerate(PLOT_SPECS):
-                self._axes[key] = grid[idx // 3, idx % 3]
+            layout = [(key, label, idx // 3, idx % 3) for idx, (key, label) in enumerate(PLOT_SPECS)]
 
-        self._wire_zoom()
+        for key, label, row, col in layout:
+            vb = ZoomFocusViewBox(on_focus=lambda k=key: self._on_plot_double_click(k))
+            plot_item = self._glw.addPlot(row=row, col=col, viewBox=vb)
+            plot_item.setTitle(label)
+            self._plots[key] = plot_item
+            if key in ("pixel", "cluster"):
+                img = pg.ImageItem()
+                plot_item.addItem(img)
+                vb.setAspectLocked(True)
+                self._images[key] = img
+            else:
+                self._curves[key] = plot_item.plot([], [])
 
-    def _wire_zoom(self):
-        self._zoom_selectors = []
-        for ax in self._axes.values():
-            selector = RectangleSelector(
-                ax,
-                self._on_zoom_select,
-                useblit=True,
-                button=[1],
-                interactive=False,
-            )
-            self._zoom_selectors.append(selector)
-
-        if self._press_cid is not None:
-            self._canvas.mpl_disconnect(self._press_cid)
-        self._press_cid = self._canvas.mpl_connect("button_press_event", self._on_button_press)
-
-    def _on_zoom_select(self, eclick, erelease):
-        ax = eclick.inaxes
-        if ax is None or erelease.inaxes != ax:
-            return
-        x0, y0 = eclick.xdata, eclick.ydata
-        x1, y1 = erelease.xdata, erelease.ydata
-        if x0 is None or x1 is None or y0 is None or y1 is None:
-            return
-        if abs(x1 - x0) < 1e-6 or abs(y1 - y0) < 1e-6:
-            return
-        ax.set_xlim(min(x0, x1), max(x0, x1))
-        ax.set_ylim(min(y0, y1), max(y0, y1))
-        self._canvas.draw_idle()
-
-    def _on_button_press(self, event):
-        ax = event.inaxes
-        if ax is None:
-            return
-
-        if getattr(event, "dblclick", False) and event.button == 1:
-            key = self._key_for_axis(ax)
-            if key is not None:
-                self._set_focus(None if self._focus_key is not None else key)
-            return
-
-        if event.button != 3:
-            return
-        limits = self._base_limits.get(ax)
-        if limits is None:
-            return
-        xlim, ylim = limits
-        ax.set_xlim(xlim)
-        ax.set_ylim(ylim)
-        self._canvas.draw_idle()
-
-    def _key_for_axis(self, ax):
-        for key, candidate in self._axes.items():
-            if candidate is ax:
-                return key
-        return None
+    def _on_plot_double_click(self, key):
+        self._set_focus(None if self._focus_key is not None else key)
 
     def _toggle_focus(self):
         if self._focus_key is not None:
@@ -449,30 +376,25 @@ class HistogramPlotPanel(ttk.Frame):
     # ---- drawing ----------------------------------------------------------
 
     def _draw_map(self, key, hist, cfg, log_enabled):
-        ax = self._axes.get(key)
-        if ax is None:
+        img = self._images.get(key)
+        plot_item = self._plots.get(key)
+        if img is None or plot_item is None:
             return
         low = float(cfg["min"])
         high = float(cfg["max"])
-        cmap = cmr.rainforest if cmr is not None else "viridis"
-        norm = build_log_norm(hist) if log_enabled else build_power_norm(hist, self.gamma_var.get())
-        ax.set_title(PLOT_LABELS[key])
-        ax.imshow(
-            hist.T,
-            origin="lower",
-            extent=(low, high, low, high),
-            cmap=cmap,
-            norm=norm,
-        )
-        ax.set_xlim(low, high)
-        ax.set_ylim(low, high)
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        self._base_limits[ax] = (ax.get_xlim(), ax.get_ylim())
+        if high <= low:
+            high = low + 1.0
+        rgba = hist_to_rgba(hist, log=log_enabled, gamma=self.gamma_var.get())
+        img.setImage(rgba, autoLevels=False)
+        img.setRect(QtCore.QRectF(low, low, high - low, high - low))
+        plot_item.setLabel("bottom", "X")
+        plot_item.setLabel("left", "Y")
+        plot_item.getViewBox().setRange(xRange=(low, high), yRange=(low, high), padding=0)
 
     def _draw_counts(self, pixel_hist):
-        ax = self._axes.get("counts")
-        if ax is None:
+        curve = self._curves.get("counts")
+        plot_item = self._plots.get("counts")
+        if curve is None or plot_item is None:
             return
         cfg = self._hist_settings["counts"]
         counts_hist = make_counts_per_pixel_hist(
@@ -481,22 +403,21 @@ class HistogramPlotPanel(ttk.Frame):
             range_min=float(cfg["min"]),
             range_max=float(cfg["max"]),
         )
-        ax.set_title(PLOT_LABELS["counts"])
-        ax.plot(counts_hist["bins"], counts_hist["counts"])
-        ax.set_xlim(counts_hist["range"])
-        apply_log_scale(ax, counts_hist["counts"], self.log_counts_var.get())
-        ax.set_xlabel("Counts per pixel")
-        ax.set_ylabel("Pixels")
-        self._base_limits[ax] = (ax.get_xlim(), ax.get_ylim())
+        plot_item.setLogMode(y=self.log_counts_var.get())
+        curve.setData(counts_hist["bins"], counts_hist["counts"])
+        plot_item.setLabel("bottom", "Counts per pixel")
+        plot_item.setLabel("left", "Pixels")
+        plot_item.enableAutoRange(axis="y")
+        plot_item.setXRange(*counts_hist["range"], padding=0)
 
     def _draw_line(self, key, hist, xlabel, ylabel, log_enabled):
-        ax = self._axes.get(key)
-        if ax is None:
+        curve = self._curves.get(key)
+        plot_item = self._plots.get(key)
+        if curve is None or plot_item is None:
             return
-        ax.set_title(PLOT_LABELS[key])
-        ax.plot(hist["bins"], hist["counts"])
-        ax.set_xlim(hist["range"])
-        apply_log_scale(ax, hist["counts"], log_enabled)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        self._base_limits[ax] = (ax.get_xlim(), ax.get_ylim())
+        plot_item.setLogMode(y=log_enabled)
+        curve.setData(hist["bins"], hist["counts"])
+        plot_item.setLabel("bottom", xlabel)
+        plot_item.setLabel("left", ylabel)
+        plot_item.enableAutoRange(axis="y")
+        plot_item.setXRange(*hist["range"], padding=0)
