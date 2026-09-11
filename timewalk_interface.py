@@ -7,17 +7,12 @@ import numpy as np
 import qtk as tk
 from qtk import ttk, filedialog, messagebox, grid_into
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
-from matplotlib.colors import LogNorm
-
-try:
-    import cmasher as cmr
-except Exception:
-    cmr = None
+import pyqtgraph as pg
+from PyQt5 import QtCore
 
 import app_settings
 import serval_client
+from qt_plots import hist_to_rgba, mpl_color, ZoomFocusViewBox
 from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection, generate_correction
 from tpx_processing import decode_tpx3, sort_tdcs, group_pixels_by_pulse
 
@@ -153,11 +148,11 @@ class TimewalkInterface(ttk.Frame):
         plot_frame.rowconfigure(0, weight=1)
         plot_frame.columnconfigure(0, weight=1)
 
-        self._figure = Figure(figsize=(9, 4.5), tight_layout=True)
-        self._ax_hist = self._figure.add_subplot(1, 2, 1)
-        self._ax_corr = self._figure.add_subplot(1, 2, 2)
-        self._canvas = FigureCanvasQTAgg(self._figure)
-        grid_into(self._canvas, plot_frame, row=0, column=0, sticky="nsew")
+        self._glw = pg.GraphicsLayoutWidget()
+        self._plot_hist = self._glw.addPlot(row=0, col=0, viewBox=ZoomFocusViewBox())
+        self._plot_hist.addLegend()
+        self._plot_corr = self._glw.addPlot(row=0, col=1, viewBox=ZoomFocusViewBox())
+        grid_into(self._glw, plot_frame, row=0, column=0, sticky="nsew")
 
     # ---- settings -----------------------------------------------------
 
@@ -463,47 +458,41 @@ class TimewalkInterface(ttk.Frame):
     # ---- drawing --------------------------------------------------------
 
     def _redraw(self):
-        self._ax_hist.clear()
-        self._ax_corr.clear()
+        self._plot_hist.clear()
+        self._plot_corr.clear()
 
         if self._hist2d is not None and self._hist2d.sum() > 0:
-            cmap = cmr.rainforest if cmr is not None else "viridis"
-            hist = self._hist2d
-            norm = None
-            if self.log_color_var.get():
-                positive = hist[hist > 0]
-                if positive.size:
-                    vmin = max(float(positive.min()), 1e-3)
-                    vmax = max(float(positive.max()), vmin * 1.1)
-                    norm = LogNorm(vmin=vmin, vmax=vmax)
-            self._ax_hist.imshow(
-                hist.T,
-                origin="lower",
-                aspect="auto",
-                extent=(self._tot_edges[0], self._tot_edges[-1], self._t_edges[0], self._t_edges[-1]),
-                cmap=cmap,
-                norm=norm,
-            )
+            x0, x1 = self._tot_edges[0], self._tot_edges[-1]
+            y0, y1 = self._t_edges[0], self._t_edges[-1]
+            img = pg.ImageItem(hist_to_rgba(self._hist2d, log=self.log_color_var.get()))
+            img.setRect(QtCore.QRectF(x0, y0, x1 - x0, y1 - y0))
+            self._plot_hist.addItem(img)
 
-        self._ax_hist.set_title("Pixel hits: ToT vs t")
-        self._ax_hist.set_xlabel("ToT")
-        self._ax_hist.set_ylabel("t (ns, relative to pulse)")
+        self._plot_hist.setTitle("Pixel hits: ToT vs t")
+        self._plot_hist.setLabel("bottom", "ToT")
+        self._plot_hist.setLabel("left", "t (ns, relative to pulse)")
 
         if self._correction is not None:
             tot_c = self._correction.tot_centers
             ridge = np.asarray(self._correction.meta.get("ridge_ns", []))
             if ridge.size == tot_c.size:
-                self._ax_hist.plot(tot_c, ridge, color="white", linewidth=1.2, label="fitted ridge")
-                self._ax_hist.legend(loc="upper right", fontsize=8)
+                self._plot_hist.addItem(
+                    pg.PlotDataItem(tot_c, ridge, pen=pg.mkPen("w", width=1.2), name="fitted ridge")
+                )
 
-            self._ax_corr.plot(tot_c, self._correction.correction_ns, color="tab:orange")
-            self._ax_corr.axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
-            self._ax_corr.set_title("Fitted correction")
-            self._ax_corr.set_xlabel("ToT")
-            self._ax_corr.set_ylabel("Correction subtracted from t (ns)")
+            self._plot_corr.addItem(
+                pg.PlotDataItem(tot_c, self._correction.correction_ns, pen=pg.mkPen(mpl_color("tab:orange")))
+            )
+            self._plot_corr.addItem(
+                pg.InfiniteLine(pos=0.0, angle=0, pen=pg.mkPen("gray", width=0.8, style=QtCore.Qt.DashLine))
+            )
+            self._plot_corr.setTitle("Fitted correction")
+            self._plot_corr.setLabel("bottom", "ToT")
+            self._plot_corr.setLabel("left", "Correction subtracted from t (ns)")
         else:
-            self._ax_corr.set_title("Fitted correction (none yet)")
-            self._ax_corr.set_xlabel("ToT")
-            self._ax_corr.set_ylabel("Correction subtracted from t (ns)")
+            self._plot_corr.setTitle("Fitted correction (none yet)")
+            self._plot_corr.setLabel("bottom", "ToT")
+            self._plot_corr.setLabel("left", "Correction subtracted from t (ns)")
 
-        self._canvas.draw_idle()
+        self._plot_hist.autoRange()
+        self._plot_corr.autoRange()
