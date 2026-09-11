@@ -37,6 +37,28 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from qtk import GridMixin, TkCompatMixin, ttk
 
+# One consistent color tier for every CollapsibleFrame in the app: flush
+# (sidebar/footer) containers get a light grey, and the boxed sections
+# nested inside them get a step darker, so a sidebar full of collapsible
+# blocks reads as one uniform hierarchy instead of a patchwork of
+# whatever each tab happened to inherit. Actual input fields (Entry/Text)
+# paint their own white "Base" background regardless, matching the white
+# plots next to all this.
+FLUSH_BACKGROUND = QtGui.QColor("#f0f0f0")
+BOXED_BACKGROUND = QtGui.QColor("#e0e0e0")
+
+
+def set_background(widget, color):
+    """Force a solid background fill. Plain QWidgets (and QScrollArea /
+    its viewport) don't paint one of their own by default -- they just
+    show whatever's behind them -- so without this, backgrounds don't
+    layer the way nested boxes need them to."""
+    widget.setAutoFillBackground(True)
+    palette = widget.palette()
+    palette.setColor(QtGui.QPalette.Window, color)
+    palette.setColor(QtGui.QPalette.Base, color)
+    widget.setPalette(palette)
+
 
 class _VerticalToolButton(QtWidgets.QToolButton):
     """A QToolButton whose label is drawn rotated 90 degrees (reads
@@ -126,6 +148,10 @@ class CollapsibleFrame(TkCompatMixin, GridMixin, QtWidgets.QWidget):
             outer = QtWidgets.QVBoxLayout(self)
             outer.setContentsMargins(0, 0, 0, 0)
             outer.addWidget(content)
+
+        color = FLUSH_BACKGROUND if flush else BOXED_BACKGROUND
+        for w in (self, content, self._panel):
+            set_background(w, color)
 
         self._update_toggle_text()
 

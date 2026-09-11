@@ -4,8 +4,6 @@ import threading
 import time
 from queue import Queue, Empty
 
-from PyQt5 import QtCore, QtGui
-
 import qtk as tk
 from qtk import ttk, messagebox, filedialog
 
@@ -14,7 +12,7 @@ import cv4_writer
 import serval_client
 import shared_state
 import time_estimate
-from collapsible_frame import CollapsibleFrame
+from collapsible_frame import CollapsibleFrame, FLUSH_BACKGROUND, set_background
 from cv4_writer import Cv4Writer
 from plot_panel import HistogramPlotPanel
 from scrollable_frame import ScrollableFrame
@@ -36,20 +34,6 @@ from tpx_processing import (
     summarize_records,
     merge_stats,
 )
-
-
-def _set_background(widget, color):
-    """Plain QWidgets (and QScrollArea/its viewport) don't paint a
-    background of their own by default -- they just show whatever's
-    behind them, which here is the tab's own light-grey window
-    background. Force a solid fill instead, e.g. so "Controls" reads as
-    a clean white sidebar rather than a grey strip next to the (white)
-    plots."""
-    widget.setAutoFillBackground(True)
-    palette = widget.palette()
-    palette.setColor(QtGui.QPalette.Window, color)
-    palette.setColor(QtGui.QPalette.Base, color)
-    widget.setPalette(palette)
 
 
 class AcquisitionInterface(ttk.Frame):
@@ -159,7 +143,6 @@ class AcquisitionInterface(ttk.Frame):
         sidebar_section.grid(row=0, column=0, sticky="nsew")
         sidebar_section.body.columnconfigure(0, weight=1)
         sidebar_section.body.rowconfigure(0, weight=1)
-        _set_background(sidebar_section, QtCore.Qt.white)
 
         # Wide enough for the sidebar's widest row (the button bar) plus the
         # vertical scrollbar that appears once every section is expanded --
@@ -167,8 +150,11 @@ class AcquisitionInterface(ttk.Frame):
         # horizontal scrollbar is intentionally off.
         sidebar = ScrollableFrame(sidebar_section.body, width=400)
         sidebar.grid(row=0, column=0, sticky="nsew")
-        _set_background(sidebar, QtCore.Qt.white)
-        _set_background(sidebar.viewport(), QtCore.Qt.white)
+        # CollapsibleFrame colors itself; the ScrollableFrame nested inside
+        # it needs the same light grey explicitly, same reason as always --
+        # QScrollArea/its viewport don't inherit a background on their own.
+        set_background(sidebar, FLUSH_BACKGROUND)
+        set_background(sidebar.viewport(), FLUSH_BACKGROUND)
 
         main = ttk.Frame(self)
         main.grid(row=0, column=1, sticky="nsew")
