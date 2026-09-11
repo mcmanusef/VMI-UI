@@ -160,15 +160,9 @@ class AcquisitionInterface(ttk.Frame):
         ttk.Button(buttons, text="Start", command=self.start).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(buttons, text="Stop", command=self.finish_and_stop).grid(row=0, column=1, padx=(0, 8))
         ttk.Button(buttons, text="Force Stop", command=self.stop).grid(row=0, column=2)
-        ttk.Label(
-            sidebar,
-            text='"Stop" lets the current backlog fully process before stopping '
-                 '(no half-done files); "Force Stop" cuts off immediately.',
-            font=("Segoe UI", 8), wraplength=220, justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(0, 6))
 
         status = ttk.Frame(sidebar)
-        status.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        status.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(status, textvariable=self.status_var, wraplength=220, justify="left").grid(
             row=0, column=0, sticky="w"
         )
@@ -181,7 +175,7 @@ class AcquisitionInterface(ttk.Frame):
         )
 
         params_section = CollapsibleFrame(sidebar, text="Acquisition parameters")
-        params_section.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        params_section.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         params = params_section.body
         params.columnconfigure(1, weight=1)
 
@@ -226,7 +220,7 @@ class AcquisitionInterface(ttk.Frame):
         )
 
         meta_section = CollapsibleFrame(sidebar, text="Metadata")
-        meta_section.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        meta_section.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         meta = meta_section.body
         meta.columnconfigure(1, weight=1)
 
@@ -244,7 +238,7 @@ class AcquisitionInterface(ttk.Frame):
         shared_state.wire_notes_widget(self.notes)
 
         live_section = CollapsibleFrame(sidebar, text="Live totals")
-        live_section.grid(row=5, column=0, sticky="ew")
+        live_section.grid(row=4, column=0, sticky="ew")
         live = live_section.body
         live.columnconfigure(1, weight=1)
         stat_rows = [
