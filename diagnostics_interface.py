@@ -176,7 +176,7 @@ class DiagnosticsInterface(ttk.Frame):
         self._plot_panel = HistogramPlotPanel(
             self,
             on_settings_changed=self._on_panel_settings_changed,
-            plots_first=False,
+            plots_first=True,
             shared_vars=self._plot_shared_vars,
         )
         self._plot_panel.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 10))

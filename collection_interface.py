@@ -56,13 +56,10 @@ class CollectionInterface(ttk.Frame):
 
     def _build_ui(self):
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
-
-        header = ttk.Label(self, text="Collection parameters", font=("Segoe UI", 12, "bold"))
-        header.grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
+        self.rowconfigure(1, weight=1)
 
         form = ttk.Frame(self)
-        form.grid(row=1, column=0, sticky="ew", padx=10)
+        form.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 0))
         form.columnconfigure(1, weight=1)
 
         self._add_row(form, 0, "Frame time (s):", ttk.Entry(form, textvariable=self.frame_time_var))
@@ -70,7 +67,7 @@ class CollectionInterface(ttk.Frame):
         self._add_row(form, 2, "Save folder:", ttk.Entry(form, textvariable=self.save_folder_var))
 
         meta = ttk.LabelFrame(self, text="Metadata")
-        meta.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
+        meta.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
         meta.columnconfigure(1, weight=1)
 
         self._add_row(meta, 0, "Target:", ttk.Entry(meta, textvariable=self.target_var))
@@ -88,12 +85,12 @@ class CollectionInterface(ttk.Frame):
         shared_state.wire_notes_widget(self.notes)
 
         buttons = ttk.Frame(self)
-        buttons.grid(row=3, column=0, sticky="w", padx=10, pady=(0, 10))
+        buttons.grid(row=2, column=0, sticky="w", padx=10, pady=(0, 10))
         ttk.Button(buttons, text="Start Run", command=self.start_run).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(buttons, text="Stop Run", command=self.stop_run).grid(row=0, column=1)
 
         status = ttk.Frame(self)
-        status.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 10))
+        status.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 10))
         status.columnconfigure(1, weight=1)
         ttk.Label(status, text="Status:").grid(row=0, column=0, sticky="w", padx=(0, 8))
         ttk.Label(status, textvariable=self.status_var).grid(row=0, column=1, sticky="w")

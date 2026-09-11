@@ -44,13 +44,10 @@ class ServalInterface(ttk.Frame):
         left = ttk.Frame(layout)
         left.grid(row=0, column=0, rowspan=2, sticky="nsew")
         left.columnconfigure(0, weight=1)
-        left.rowconfigure(2, weight=1)
-
-        header = ttk.Label(left, text="Serval configuration", font=("Segoe UI", 12, "bold"))
-        header.grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
+        left.rowconfigure(1, weight=1)
 
         form = ttk.Frame(left)
-        form.grid(row=1, column=0, sticky="ew", padx=10)
+        form.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 0))
         form.columnconfigure(1, weight=1)
 
         self._add_row(form, 0, "Server URL:", ttk.Entry(form, textvariable=self.server_var))
@@ -64,7 +61,7 @@ class ServalInterface(ttk.Frame):
         ttk.Button(buttons, text="Initialize", command=self.initialize).grid(row=0, column=1, padx=(0, 8))
 
         status = ttk.Frame(left)
-        status.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
+        status.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
         status.columnconfigure(1, weight=1)
         status.rowconfigure(1, weight=1)
 

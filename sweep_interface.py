@@ -179,10 +179,6 @@ class SweepInterface(ttk.Frame):
         widget.grid(row=row, column=1, sticky="ew", pady=4)
 
     def _build_sidebar(self, sidebar):
-        ttk.Label(sidebar, text="Parameter Sweep", font=("Segoe UI", 12, "bold")).grid(
-            row=0, column=0, sticky="w", pady=(0, 6)
-        )
-
         # The stage connection itself (IP/group, Connect/Initialize/Home,
         # manual jog + Set Zero) lives on the Stage Control tab now -- see
         # stage_interface.StageInterface -- so a sweep just needs that
@@ -192,10 +188,10 @@ class SweepInterface(ttk.Frame):
             text="Uses the connection from the Stage Control tab -- connect/initialize/home there first.",
             font=("Segoe UI", 8), wraplength=260, justify="left",
         )
-        stage_note.grid(row=1, column=0, sticky="w", pady=(0, 8))
+        stage_note.grid(row=0, column=0, sticky="w", pady=(0, 8))
 
         positions = ttk.LabelFrame(sidebar, text="Positions")
-        positions.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        positions.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         positions.columnconfigure(1, weight=1)
         ttk.Radiobutton(
             positions, text="Range", value="range", variable=self.position_mode_var
@@ -217,7 +213,7 @@ class SweepInterface(ttk.Frame):
         )
 
         options = ttk.LabelFrame(sidebar, text="Sweep options")
-        options.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        options.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         options.columnconfigure(1, weight=1)
         self._add_row(options, 0, "Passes:", ttk.Entry(options, textvariable=self.passes_var, width=8))
         ttk.Label(
@@ -243,7 +239,7 @@ class SweepInterface(ttk.Frame):
         ttk.Label(options, text="Save folder:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
 
         meta = ttk.LabelFrame(sidebar, text="Metadata")
-        meta.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        meta.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         meta.columnconfigure(1, weight=1)
         self._add_row(meta, 0, "Target:", ttk.Entry(meta, textvariable=self.target_var))
         self._add_row(meta, 1, "Target Pressure:", ttk.Entry(meta, textvariable=self.target_pressure_var))
@@ -258,7 +254,7 @@ class SweepInterface(ttk.Frame):
         shared_state.wire_notes_widget(self.notes)
 
         live = ttk.LabelFrame(sidebar, text="Live collection")
-        live.grid(row=5, column=0, sticky="ew", pady=(0, 8))
+        live.grid(row=4, column=0, sticky="ew", pady=(0, 8))
         live.columnconfigure(1, weight=1)
         for row, (label, var) in enumerate([
             ("Est. frames needed (this visit):", self.position_estimate_var),
@@ -271,7 +267,7 @@ class SweepInterface(ttk.Frame):
             ttk.Label(live, textvariable=var).grid(row=row, column=1, sticky="w", pady=1)
 
         run_buttons = ttk.Frame(sidebar)
-        run_buttons.grid(row=6, column=0, sticky="ew", pady=(0, 6))
+        run_buttons.grid(row=5, column=0, sticky="ew", pady=(0, 6))
         ttk.Button(run_buttons, text="Start", command=self.start).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(run_buttons, text="Finish & Stop", command=self.finish_and_stop).grid(row=0, column=1, padx=(0, 8))
         ttk.Button(run_buttons, text="Stop", command=self.stop).grid(row=0, column=2)
@@ -281,10 +277,10 @@ class SweepInterface(ttk.Frame):
             text='"Finish & Stop" lets the current backlog fully process before stopping '
                  '(no half-done files); "Stop" cuts off immediately.',
             font=("Segoe UI", 8), wraplength=260, justify="left",
-        ).grid(row=7, column=0, sticky="w", pady=(0, 6))
+        ).grid(row=6, column=0, sticky="w", pady=(0, 6))
 
         status = ttk.Frame(sidebar)
-        status.grid(row=8, column=0, sticky="ew")
+        status.grid(row=7, column=0, sticky="ew")
         ttk.Label(status, textvariable=self.status_var, wraplength=220, justify="left").grid(row=0, column=0, sticky="w")
         ttk.Progressbar(status, variable=self._progress_var, maximum=100.0, mode="determinate", length=220).grid(
             row=1, column=0, sticky="ew", pady=(4, 0)

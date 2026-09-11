@@ -8,7 +8,6 @@ from acquisition_interface import AcquisitionInterface
 from collection_interface import CollectionInterface
 from diagnostics_interface import DiagnosticsInterface
 from power_supply_interface import PowerSupplyInterface
-from quick_monitor_interface import QuickMonitorInterface
 from serval_interface import ServalInterface
 from shared_state import make_plot_shared_vars, make_acquisition_shared_vars
 from stage_interface import StageInterface
@@ -62,18 +61,17 @@ class App(tk.Tk):
         acquisition_tab = ttk.Frame(acquisition)
         timewalk_tab = ttk.Frame(acquisition)
         sweep_tab = ttk.Frame(acquisition)
-        quick_monitor_tab = ttk.Frame(acquisition)
         acquisition.add(collection_tab, text="collection parameters")
         acquisition.add(diagnostics_tab, text="diagnostics")
         acquisition.add(acquisition_tab, text="monitored acquisition")
         acquisition.add(timewalk_tab, text="timewalk calibration")
         acquisition.add(sweep_tab, text="parameter sweep")
-        quick_monitor_index = acquisition.count()
-        acquisition.add(quick_monitor_tab, text="quick monitor")
 
         # Fill each tab with its interface. Stage must be built before
         # Sweep -- Sweep drives its moves through the stage connection
         # StageInterface owns (see stage_interface.py / sweep_interface.py).
+        # Quick Monitor (quick_monitor_interface.py) isn't wired in as a tab
+        # right now, but the module is left intact for later.
         self._build_serval_config(serval_tab)
         self._build_stage(stage_tab)
         self._build_power_supply(power_supply_tab)
@@ -82,10 +80,6 @@ class App(tk.Tk):
         self._build_acquisition(acquisition_tab)
         self._build_timewalk(timewalk_tab)
         self._build_sweep(sweep_tab)
-        self._build_quick_monitor(quick_monitor_tab)
-
-        # Disabled for now.
-        acquisition.setTabEnabled(quick_monitor_index, False)
 
     def _build_group_notebook(self, parent: ttk.Frame):
         parent.columnconfigure(0, weight=1)
@@ -159,18 +153,6 @@ class App(tk.Tk):
             coordinator=self._coordinator,
         )
         timewalk_ui.grid(row=0, column=0, sticky="nsew")
-
-    def _build_quick_monitor(self, parent: ttk.Frame):
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
-
-        server_var = getattr(self, "serval_ui", None)
-        quick_monitor_ui = QuickMonitorInterface(
-            parent,
-            server_var=server_var.server_var if server_var else None,
-            coordinator=self._coordinator,
-        )
-        quick_monitor_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_sweep(self, parent: ttk.Frame):
         parent.columnconfigure(0, weight=1)

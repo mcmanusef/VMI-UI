@@ -142,12 +142,8 @@ class AcquisitionInterface(ttk.Frame):
         self._plot_panel.grid(row=0, column=0, sticky="nsew")
 
     def _build_sidebar(self, sidebar):
-        ttk.Label(sidebar, text="Monitored Acquisition", font=("Segoe UI", 12, "bold")).grid(
-            row=0, column=0, sticky="w", pady=(0, 6)
-        )
-
         params = ttk.LabelFrame(sidebar, text="Acquisition parameters")
-        params.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        params.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         params.columnconfigure(1, weight=1)
 
         self._add_row(params, 0, "Frame time (s):", ttk.Entry(params, textvariable=self.frame_time_var, width=18))
@@ -191,7 +187,7 @@ class AcquisitionInterface(ttk.Frame):
         )
 
         meta = ttk.LabelFrame(sidebar, text="Metadata")
-        meta.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        meta.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         meta.columnconfigure(1, weight=1)
 
         self._add_row(meta, 0, "Target:", ttk.Entry(meta, textvariable=self.target_var))
@@ -208,7 +204,7 @@ class AcquisitionInterface(ttk.Frame):
         shared_state.wire_notes_widget(self.notes)
 
         buttons = ttk.Frame(sidebar)
-        buttons.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        buttons.grid(row=2, column=0, sticky="ew", pady=(0, 6))
         ttk.Button(buttons, text="Start", command=self.start).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(buttons, text="Finish & Stop", command=self.finish_and_stop).grid(row=0, column=1, padx=(0, 8))
         ttk.Button(buttons, text="Stop", command=self.stop).grid(row=0, column=2)
@@ -217,10 +213,10 @@ class AcquisitionInterface(ttk.Frame):
             text='"Finish & Stop" lets the current backlog fully process before stopping '
                  '(no half-done files); "Stop" cuts off immediately.',
             font=("Segoe UI", 8), wraplength=220, justify="left",
-        ).grid(row=4, column=0, sticky="w", pady=(0, 6))
+        ).grid(row=3, column=0, sticky="w", pady=(0, 6))
 
         status = ttk.Frame(sidebar)
-        status.grid(row=5, column=0, sticky="ew", pady=(0, 8))
+        status.grid(row=4, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(status, textvariable=self.status_var, wraplength=220, justify="left").grid(
             row=0, column=0, sticky="w"
         )
@@ -233,7 +229,7 @@ class AcquisitionInterface(ttk.Frame):
         )
 
         live = ttk.LabelFrame(sidebar, text="Live totals")
-        live.grid(row=6, column=0, sticky="ew")
+        live.grid(row=5, column=0, sticky="ew")
         live.columnconfigure(1, weight=1)
         stat_rows = [
             ("Frames collected:", self.collected_var),

@@ -93,13 +93,13 @@ class StageInterface(ttk.Frame):
 
     def _build_ui(self):
         self.columnconfigure(0, weight=1)
-
-        ttk.Label(self, text="Stage Control", font=("Segoe UI", 12, "bold")).grid(
-            row=0, column=0, sticky="w", padx=10, pady=(10, 6)
-        )
+        # A trailing empty row soaks up any leftover vertical space so the
+        # two LabelFrames below stay compact and top-anchored instead of
+        # spreading out to fill the tab.
+        self.rowconfigure(2, weight=1)
 
         stage = ttk.LabelFrame(self, text="Stage (Newport XPS-D)")
-        stage.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+        stage.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 8))
         stage.columnconfigure(1, weight=1)
 
         self._add_row(stage, 0, "IP:", ttk.Entry(stage, textvariable=self.stage_ip_var, width=18))
@@ -119,7 +119,7 @@ class StageInterface(ttk.Frame):
         self._add_row(stage, 5, "Group state:", ttk.Label(stage, textvariable=self.group_state_var))
 
         manual = ttk.LabelFrame(self, text="Manual control")
-        manual.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 8))
+        manual.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
         manual.columnconfigure(1, weight=1)
         self._add_row(manual, 0, "Position (rel. zero):", ttk.Label(manual, textvariable=self.current_position_var))
         zero_entry = ttk.Entry(manual, textvariable=self.zero_display_var, width=12)
