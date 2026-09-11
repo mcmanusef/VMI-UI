@@ -2,9 +2,10 @@
 
 Walks through, on a single shared plot:
 
-  1. xy center + axis  -- drag the X / the line (or type numbers) to set the
-     detector image's center of mass and its axis of greatest variation,
-     then Confirm centers + rotates both loaded datasets onto that axis.
+  1. xy center + axis  -- drag the X / the small round handle along the
+     line (or type numbers) to set the detector image's center of mass
+     and its axis of greatest variation, then Confirm centers + rotates
+     both loaded datasets onto that axis.
   2. e-ToF time zero    -- drag the X (position only) on an r-vs-e-ToF
      heatmap to set "time zero" (center_t), then Confirm offsets both
      datasets' e-ToF column by it.
@@ -21,30 +22,26 @@ the "xy calibration" file drives steps 1 and 3, the "e-ToF calibration"
 file drives steps 2 and 4, and step 5 combines both. See
 momentum_calibration.py's module docstring for the underlying physics.
 """
-import pathlib
-
 import numpy as np
 import pandas as pd
 import qtk as tk
 from qtk import ttk, filedialog, messagebox, grid_into
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
-from matplotlib.patches import Circle
-
-try:
-    import cmasher as cmr
-except Exception:
-    cmr = None
+import pyqtgraph as pg
+from PyQt5 import QtCore
 
 import app_settings
 import momentum_calibration as mc
-from plot_panel import build_log_norm
+from qt_plots import hist_to_rgba, mpl_color, circle_curve, ZoomFocusViewBox
 from scrollable_frame import ScrollableFrame
 
 _SELECTED_COLOR = "#39d353"
 _DESELECTED_COLOR = "#9aa0a6"
 _HIT_PIXELS = 8.0
+# Distance of the axis-rotation handle from the center, as a fraction of
+# the plot's extent span -- chosen once per xy_center draw so the handle
+# sits at a reasonable, fixed *data-space* radius from the center.
+_AXIS_HANDLE_FRACTION = 0.4
 
 
 class MomentumCalibrationInterface(ttk.Frame):
@@ -110,10 +107,14 @@ class MomentumCalibrationInterface(ttk.Frame):
         self._down_selected = {}
         self._down_scatter = None
 
-        self._drag_target = None
-        self._center_marker = None
+        # xy_center / t_center native draggable overlay items (see
+        # _draw_xy_center_plot / _draw_t_center_plot); rebuilt each time
+        # the plot is cleared for a new stage.
+        self._center_target = None
+        self._axis_handle = None
+        self._axis_handle_radius = 0.0
         self._axis_line = None
-        self._t_marker = None
+        self._t_target = None
         self._updating_fields = False
 
         self._build_ui()
@@ -166,14 +167,13 @@ class MomentumCalibrationInterface(ttk.Frame):
         plot_frame.rowconfigure(0, weight=1)
         plot_frame.columnconfigure(0, weight=1)
 
-        self._figure = Figure(figsize=(7, 6), tight_layout=True)
-        self._ax = self._figure.add_subplot(1, 1, 1)
-        self._canvas = FigureCanvasQTAgg(self._figure)
-        grid_into(self._canvas, plot_frame, row=0, column=0, sticky="nsew")
-        self._canvas.mpl_connect("button_press_event", self._on_press)
-        self._canvas.mpl_connect("motion_notify_event", self._on_motion)
-        self._canvas.mpl_connect("button_release_event", self._on_release)
-        self._canvas.mpl_connect("pick_event", self._on_pick)
+        self._plot_widget = pg.PlotWidget(viewBox=ZoomFocusViewBox())
+        self._plot_item = self._plot_widget.getPlotItem()
+        # Registered once; PlotItem.addItem() auto-adds any later item
+        # passed a `name=` to this same legend (radial/up-down peak
+        # stages), and clear() removes prior entries as their items go.
+        self._plot_item.addLegend()
+        grid_into(self._plot_widget, plot_frame, row=0, column=0, sticky="nsew")
 
         stage_container = ScrollableFrame(self, width=900)
         stage_container.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
@@ -183,8 +183,7 @@ class MomentumCalibrationInterface(ttk.Frame):
         self.stage_status_label = ttk.Label(self, textvariable=self.stage_status_var, wraplength=900, justify="left")
         self.stage_status_label.grid(row=3, column=0, sticky="w", padx=10, pady=(0, 10))
 
-        self._ax.set_title("Load a dataset to begin.")
-        self._canvas.draw_idle()
+        self._plot_item.setTitle("Load a dataset to begin.")
 
     def default_fields(self):
         return {
@@ -307,7 +306,7 @@ class MomentumCalibrationInterface(ttk.Frame):
 
         ttk.Label(
             frame,
-            text="Drag the red X to move the center, drag along the white line to rotate the axis "
+            text="Drag the red X to move the center, drag the white round handle to rotate the axis "
                  "-- or type numbers directly.",
             font=("Segoe UI", 8),
         ).grid(row=1, column=0, columnspan=6, sticky="w", padx=6, pady=(0, 4))
@@ -317,39 +316,74 @@ class MomentumCalibrationInterface(ttk.Frame):
         )
 
     def _draw_xy_center_plot(self):
-        self._ax.clear()
+        self._plot_item.clear()
         hist, _, _ = mc.xy_heatmap(
             self._xy_df["x"].to_numpy(), self._xy_df["y"].to_numpy(), bins=200, extent=self._xy_extent
         )
-        cmap = cmr.rainforest if cmr is not None else "viridis"
-        self._ax.imshow(
-            hist.T,
-            origin="lower",
-            extent=(*self._xy_extent, *self._xy_extent),
-            cmap=cmap,
-            norm=build_log_norm(hist),
-            aspect="equal",
+        low, high = self._xy_extent
+        img = pg.ImageItem(hist_to_rgba(hist, log=True))
+        img.setRect(QtCore.QRectF(low, low, high - low, high - low))
+        self._plot_item.addItem(img)
+
+        self._axis_handle_radius = _AXIS_HANDLE_FRACTION * (high - low)
+
+        self._axis_line = pg.InfiniteLine(pos=(self._cx, self._cy), angle=0, pen=pg.mkPen("w", width=1.5), movable=False)
+        self._plot_item.addItem(self._axis_line)
+
+        self._center_target = pg.TargetItem(
+            pos=(self._cx, self._cy), size=16, symbol="x", pen=pg.mkPen("r", width=2.5), movable=True,
         )
-        (self._axis_line,) = self._ax.plot([], [], color="white", linewidth=1.5)
-        (self._center_marker,) = self._ax.plot(
-            [self._cx], [self._cy], marker="x", markersize=14, markeredgewidth=2.5, color="red"
+        self._center_target.sigPositionChanged.connect(self._on_center_target_moved)
+        self._plot_item.addItem(self._center_target)
+
+        self._axis_handle = pg.TargetItem(
+            pos=(0, 0), size=12, symbol="o", pen=pg.mkPen("w", width=2), movable=True,
         )
-        self._ax.set_title("XY heatmap")
-        self._ax.set_xlabel("x (px)")
-        self._ax.set_ylabel("y (px)")
-        self._ax.set_xlim(*self._xy_extent)
-        self._ax.set_ylim(*self._xy_extent)
+        self._axis_handle.sigPositionChanged.connect(self._on_axis_handle_moved)
+        self._plot_item.addItem(self._axis_handle)
+
+        self._plot_item.setTitle("XY heatmap")
+        self._plot_item.setLabel("bottom", "x (px)")
+        self._plot_item.setLabel("left", "y (px)")
+        self._plot_item.getViewBox().setAspectLocked(True)
+        self._plot_item.getViewBox().setRange(xRange=self._xy_extent, yRange=self._xy_extent, padding=0)
         self._update_xy_overlay()
 
     def _update_xy_overlay(self):
-        xlim, ylim = self._ax.get_xlim(), self._ax.get_ylim()
-        length = np.hypot(xlim[1] - xlim[0], ylim[1] - ylim[0])
-        dx, dy = np.cos(self._angle) * length, np.sin(self._angle) * length
-        self._axis_line.set_data([self._cx - dx, self._cx + dx], [self._cy - dy, self._cy + dy])
-        self._center_marker.set_data([self._cx], [self._cy])
-        self._ax.set_xlim(xlim)
-        self._ax.set_ylim(ylim)
-        self._canvas.draw_idle()
+        handle_x = self._cx + self._axis_handle_radius * np.cos(self._angle)
+        handle_y = self._cy + self._axis_handle_radius * np.sin(self._angle)
+
+        self._center_target.blockSignals(True)
+        self._center_target.setPos(self._cx, self._cy)
+        self._center_target.blockSignals(False)
+
+        self._axis_handle.blockSignals(True)
+        self._axis_handle.setPos(handle_x, handle_y)
+        self._axis_handle.blockSignals(False)
+
+        self._axis_line.setAngle(np.degrees(self._angle))
+        self._axis_line.setPos((self._cx, self._cy))
+
+    def _on_center_target_moved(self, target):
+        if self._stage != "xy_center":
+            return
+        pos = target.pos()
+        self._cx, self._cy = float(pos.x()), float(pos.y())
+        self._sync_xy_fields()
+        self._update_xy_overlay()
+
+    def _on_axis_handle_moved(self, target):
+        if self._stage != "xy_center":
+            return
+        pos = target.pos()
+        angle = np.arctan2(pos.y() - self._cy, pos.x() - self._cx)
+        if angle < -np.pi / 2:
+            angle += np.pi
+        elif angle >= np.pi / 2:
+            angle -= np.pi
+        self._angle = float(angle)
+        self._sync_xy_fields()
+        self._update_xy_overlay()
 
     def _on_xy_fields_changed(self, *_):
         if self._updating_fields or self._stage != "xy_center":
@@ -417,7 +451,7 @@ class MomentumCalibrationInterface(ttk.Frame):
 
         ttk.Label(
             frame,
-            text="Drag the red X (position only) or type numbers -- this sets time zero (pz = 0).",
+            text="Drag the red X or type numbers -- this sets time zero (pz = 0).",
             font=("Segoe UI", 8),
         ).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 4))
 
@@ -475,7 +509,7 @@ class MomentumCalibrationInterface(ttk.Frame):
         self._draw_t_center_plot()
 
     def _draw_t_center_plot(self):
-        self._ax.clear()
+        self._plot_item.clear()
         hist, _, _ = mc.x_etof_heatmap(
             self._etof_df["x"].to_numpy(),
             self._etof_df["etof"].to_numpy(),
@@ -484,24 +518,30 @@ class MomentumCalibrationInterface(ttk.Frame):
             t_bins=self._etof_bins,
             t_range=self._etof_range,
         )
-        cmap = cmr.rainforest if cmr is not None else "viridis"
-        self._ax.imshow(
-            hist.T,
-            origin="lower",
-            extent=(*self._t_x_range, self._etof_range[0], self._etof_range[1]),
-            cmap=cmap,
-            norm=build_log_norm(hist),
-            aspect="auto",
+        x0, x1 = self._t_x_range
+        y0, y1 = self._etof_range
+        img = pg.ImageItem(hist_to_rgba(hist, log=True))
+        img.setRect(QtCore.QRectF(x0, y0, x1 - x0, y1 - y0))
+        self._plot_item.addItem(img)
+
+        self._t_target = pg.TargetItem(
+            pos=(self._t_center_x, self._t_center_t), size=16, symbol="x", pen=pg.mkPen("r", width=2.5), movable=True,
         )
-        (self._t_marker,) = self._ax.plot(
-            [self._t_center_x], [self._t_center_t], marker="x", markersize=14, markeredgewidth=2.5, color="red"
-        )
-        self._ax.set_title("x vs e-ToF -- find time zero")
-        self._ax.set_xlabel("x (px, centered/rotated)")
-        self._ax.set_ylabel("e-ToF (ns)")
-        self._ax.set_xlim(*self._t_x_range)
-        self._ax.set_ylim(*self._etof_range)
-        self._canvas.draw_idle()
+        self._t_target.sigPositionChanged.connect(self._on_t_target_moved)
+        self._plot_item.addItem(self._t_target)
+
+        self._plot_item.setTitle("x vs e-ToF -- find time zero")
+        self._plot_item.setLabel("bottom", "x (px, centered/rotated)")
+        self._plot_item.setLabel("left", "e-ToF (ns)")
+        self._plot_item.getViewBox().setAspectLocked(False)
+        self._plot_item.getViewBox().setRange(xRange=self._t_x_range, yRange=self._etof_range, padding=0)
+
+    def _on_t_target_moved(self, target):
+        if self._stage != "t_center":
+            return
+        pos = target.pos()
+        self._t_center_x, self._t_center_t = float(pos.x()), float(pos.y())
+        self._sync_t_fields()
 
     def _on_t_fields_changed(self, *_):
         if self._updating_fields or self._stage != "t_center":
@@ -511,8 +551,10 @@ class MomentumCalibrationInterface(ttk.Frame):
             self._t_center_t = float(self.t_center_t_var.get())
         except ValueError:
             return
-        self._t_marker.set_data([self._t_center_x], [self._t_center_t])
-        self._canvas.draw_idle()
+        if self._t_target is not None:
+            self._t_target.blockSignals(True)
+            self._t_target.setPos(self._t_center_x, self._t_center_t)
+            self._t_target.blockSignals(False)
 
     def _sync_t_fields(self):
         self._updating_fields = True
@@ -607,25 +649,38 @@ class MomentumCalibrationInterface(ttk.Frame):
         self._radial_peak_idx = peak_idx
         self._radial_selected = {i: True for i in range(len(peak_idx))}
 
-        self._ax.clear()
-        self._ax.plot(centers, counts, color="lightgray", linewidth=1.0, label="raw")
-        self._ax.plot(centers, smoothed, color="tab:blue", linewidth=1.5, label="smoothed")
-        self._radial_scatter = self._ax.scatter(
-            centers[peak_idx], smoothed[peak_idx], s=90, zorder=5, picker=True,
-            edgecolors="black", facecolors=_SELECTED_COLOR,
+        self._plot_item.clear()
+        self._plot_item.addItem(pg.PlotDataItem(centers, counts, pen=pg.mkPen("lightgray", width=1.0), name="raw"))
+        self._plot_item.addItem(
+            pg.PlotDataItem(centers, smoothed, pen=pg.mkPen(mpl_color("tab:blue"), width=1.5), name="smoothed")
         )
-        self._radial_scatter.set_pickradius(_HIT_PIXELS)
-        self._ax.set_title("Radial intensity distribution")
-        self._ax.set_xlabel("r (px)")
-        self._ax.set_ylabel("counts")
-        self._ax.legend(loc="upper right", fontsize=8)
-        self._canvas.draw_idle()
+
+        self._radial_scatter = pg.ScatterPlotItem(
+            x=centers[peak_idx], y=smoothed[peak_idx], size=12,
+            pen=pg.mkPen("k"), brush=pg.mkBrush(_SELECTED_COLOR),
+        )
+        self._radial_scatter.sigClicked.connect(self._on_radial_scatter_clicked)
+        self._plot_item.addItem(self._radial_scatter)
+
+        self._plot_item.setTitle("Radial intensity distribution")
+        self._plot_item.setLabel("bottom", "r (px)")
+        self._plot_item.setLabel("left", "counts")
+        self._plot_item.getViewBox().setAspectLocked(False)
+        self._plot_item.autoRange()
 
     def _update_radial_scatter_colors(self):
-        colors = [_SELECTED_COLOR if self._radial_selected.get(i, False) else _DESELECTED_COLOR
-                  for i in range(len(self._radial_peak_idx))]
-        self._radial_scatter.set_facecolors(colors)
-        self._canvas.draw_idle()
+        colors = [
+            pg.mkBrush(_SELECTED_COLOR if self._radial_selected.get(i, False) else _DESELECTED_COLOR)
+            for i in range(len(self._radial_peak_idx))
+        ]
+        self._radial_scatter.setBrush(colors)
+
+    def _on_radial_scatter_clicked(self, _scatter, points, _ev):
+        if self._stage != "radial_peaks" or not points:
+            return
+        idx = points[0].index()
+        self._radial_selected[idx] = not self._radial_selected.get(idx, False)
+        self._update_radial_scatter_colors()
 
     def _confirm_radial_peaks(self):
         selected = [i for i in range(len(self._radial_peak_idx)) if self._radial_selected.get(i, False)]
@@ -724,33 +779,59 @@ class MomentumCalibrationInterface(ttk.Frame):
         self._down_peak_idx = down_peak_idx
         self._down_selected = {i: True for i in range(len(down_peak_idx))}
 
-        self._ax.clear()
-        self._ax.plot(centers, up_smoothed, color="tab:blue", linewidth=1.5, label="up (t < t0)")
-        self._ax.plot(centers, down_smoothed, color="tab:orange", linewidth=1.5, label="down (t > t0)")
-        self._up_scatter = self._ax.scatter(
-            centers[up_peak_idx], up_smoothed[up_peak_idx], s=90, zorder=5, picker=True,
-            edgecolors="black", facecolors=_SELECTED_COLOR,
+        self._plot_item.clear()
+        self._plot_item.addItem(
+            pg.PlotDataItem(centers, up_smoothed, pen=pg.mkPen(mpl_color("tab:blue"), width=1.5), name="up (t < t0)")
         )
-        self._up_scatter.set_pickradius(_HIT_PIXELS)
-        self._down_scatter = self._ax.scatter(
-            centers[down_peak_idx], down_smoothed[down_peak_idx], s=90, zorder=5, picker=True,
-            edgecolors="black", facecolors=_SELECTED_COLOR, marker="s",
+        self._plot_item.addItem(
+            pg.PlotDataItem(centers, down_smoothed, pen=pg.mkPen(mpl_color("tab:orange"), width=1.5), name="down (t > t0)")
         )
-        self._down_scatter.set_pickradius(_HIT_PIXELS)
-        self._ax.set_title("Up / down e-ToF distributions (|t - t0|)")
-        self._ax.set_xlabel("|e-ToF - t0| (ns)")
-        self._ax.set_ylabel("counts")
-        self._ax.legend(loc="upper right", fontsize=8)
-        self._canvas.draw_idle()
+
+        self._up_scatter = pg.ScatterPlotItem(
+            x=centers[up_peak_idx], y=up_smoothed[up_peak_idx], size=12, symbol="o",
+            pen=pg.mkPen("k"), brush=pg.mkBrush(_SELECTED_COLOR),
+        )
+        self._up_scatter.sigClicked.connect(self._on_up_scatter_clicked)
+        self._plot_item.addItem(self._up_scatter)
+
+        self._down_scatter = pg.ScatterPlotItem(
+            x=centers[down_peak_idx], y=down_smoothed[down_peak_idx], size=12, symbol="s",
+            pen=pg.mkPen("k"), brush=pg.mkBrush(_SELECTED_COLOR),
+        )
+        self._down_scatter.sigClicked.connect(self._on_down_scatter_clicked)
+        self._plot_item.addItem(self._down_scatter)
+
+        self._plot_item.setTitle("Up / down e-ToF distributions (|t - t0|)")
+        self._plot_item.setLabel("bottom", "|e-ToF - t0| (ns)")
+        self._plot_item.setLabel("left", "counts")
+        self._plot_item.getViewBox().setAspectLocked(False)
+        self._plot_item.autoRange()
 
     def _update_updown_scatter_colors(self):
-        up_colors = [_SELECTED_COLOR if self._up_selected.get(i, False) else _DESELECTED_COLOR
-                     for i in range(len(self._up_peak_idx))]
-        down_colors = [_SELECTED_COLOR if self._down_selected.get(i, False) else _DESELECTED_COLOR
-                       for i in range(len(self._down_peak_idx))]
-        self._up_scatter.set_facecolors(up_colors)
-        self._down_scatter.set_facecolors(down_colors)
-        self._canvas.draw_idle()
+        up_colors = [
+            pg.mkBrush(_SELECTED_COLOR if self._up_selected.get(i, False) else _DESELECTED_COLOR)
+            for i in range(len(self._up_peak_idx))
+        ]
+        down_colors = [
+            pg.mkBrush(_SELECTED_COLOR if self._down_selected.get(i, False) else _DESELECTED_COLOR)
+            for i in range(len(self._down_peak_idx))
+        ]
+        self._up_scatter.setBrush(up_colors)
+        self._down_scatter.setBrush(down_colors)
+
+    def _on_up_scatter_clicked(self, _scatter, points, _ev):
+        if self._stage != "updown_peaks" or not points:
+            return
+        idx = points[0].index()
+        self._up_selected[idx] = not self._up_selected.get(idx, False)
+        self._update_updown_scatter_colors()
+
+    def _on_down_scatter_clicked(self, _scatter, points, _ev):
+        if self._stage != "updown_peaks" or not points:
+            return
+        idx = points[0].index()
+        self._down_selected[idx] = not self._down_selected.get(idx, False)
+        self._update_updown_scatter_colors()
 
     def _confirm_updown_peaks(self):
         up_idx = sorted(i for i in range(len(self._up_peak_idx)) if self._up_selected.get(i, False))
@@ -823,25 +904,26 @@ class MomentumCalibrationInterface(ttk.Frame):
         px_all = np.concatenate(px_parts)
         pz_all = np.concatenate(pz_parts)
 
-        self._ax.clear()
+        self._plot_item.clear()
         p_max = max(1e-6, float(np.percentile(np.abs(np.concatenate([px_all, pz_all])), 99.5)))
         bins = 200
         hist, xedges, yedges = np.histogram2d(
             px_all, pz_all, bins=bins, range=[[-p_max, p_max], [-p_max, p_max]]
         )
-        cmap = cmr.rainforest if cmr is not None else "viridis"
-        self._ax.imshow(
-            hist.T, origin="lower", extent=(-p_max, p_max, -p_max, p_max), cmap=cmap, norm=build_log_norm(hist),
-            aspect="equal",
-        )
+        img = pg.ImageItem(hist_to_rgba(hist, log=True))
+        img.setRect(QtCore.QRectF(-p_max, -p_max, 2 * p_max, 2 * p_max))
+        self._plot_item.addItem(img)
+
+        dash_pen = pg.mkPen("w", width=1.0, style=QtCore.Qt.DashLine)
         for radius in self._calibration.peak_momenta():
-            self._ax.add_patch(Circle((0, 0), radius, fill=False, edgecolor="white", linestyle="--", linewidth=1.0))
-        self._ax.set_title("Calibrated momentum: px vs pz (a.u.)")
-        self._ax.set_xlabel("px (a.u.)")
-        self._ax.set_ylabel("pz (a.u.)")
-        self._ax.set_xlim(-p_max, p_max)
-        self._ax.set_ylim(-p_max, p_max)
-        self._canvas.draw_idle()
+            cx_arr, cy_arr = circle_curve(radius)
+            self._plot_item.addItem(pg.PlotDataItem(cx_arr, cy_arr, pen=dash_pen))
+
+        self._plot_item.setTitle("Calibrated momentum: px vs pz (a.u.)")
+        self._plot_item.setLabel("bottom", "px (a.u.)")
+        self._plot_item.setLabel("left", "pz (a.u.)")
+        self._plot_item.getViewBox().setAspectLocked(True)
+        self._plot_item.getViewBox().setRange(xRange=(-p_max, p_max), yRange=(-p_max, p_max), padding=0)
 
     def _save_fit(self):
         if self._calibration is None:
@@ -887,79 +969,3 @@ class MomentumCalibrationInterface(ttk.Frame):
             self.stage_status_var.set(f"Save dataset failed: {exc}")
             return
         self.stage_status_var.set(f"Saved calibrated dataset ({len(combined)} events) to {chosen}")
-
-    # ===================================================================
-    # Mouse interaction (drag center/axis/point, click-to-select peaks)
-    # ===================================================================
-
-    def _to_pixels(self, x, y):
-        return self._ax.transData.transform((x, y))
-
-    def _pixel_dist(self, x0, y0, x1, y1):
-        p0 = self._to_pixels(x0, y0)
-        p1 = self._to_pixels(x1, y1)
-        return float(np.hypot(p0[0] - p1[0], p0[1] - p1[1]))
-
-    def _pixel_dist_to_axis_line(self, x, y):
-        p0 = self._to_pixels(self._cx, self._cy)
-        p1 = self._to_pixels(self._cx + np.cos(self._angle), self._cy + np.sin(self._angle))
-        direction = np.array([p1[0] - p0[0], p1[1] - p0[1]])
-        norm = np.hypot(*direction)
-        if norm < 1e-9:
-            return self._pixel_dist(x, y, self._cx, self._cy)
-        direction = direction / norm
-        p = self._to_pixels(x, y)
-        rel = np.array([p[0] - p0[0], p[1] - p0[1]])
-        perp = rel - np.dot(rel, direction) * direction
-        return float(np.hypot(*perp))
-
-    def _on_press(self, event):
-        if event.inaxes is not self._ax or event.button != 1 or event.xdata is None:
-            return
-        if self._stage == "xy_center":
-            if self._pixel_dist(event.xdata, event.ydata, self._cx, self._cy) <= _HIT_PIXELS:
-                self._drag_target = "center"
-            elif self._pixel_dist_to_axis_line(event.xdata, event.ydata) <= _HIT_PIXELS:
-                self._drag_target = "axis"
-        elif self._stage == "t_center":
-            if self._pixel_dist(event.xdata, event.ydata, self._t_center_x, self._t_center_t) <= _HIT_PIXELS:
-                self._drag_target = "point"
-
-    def _on_motion(self, event):
-        if self._drag_target is None or event.inaxes is not self._ax or event.xdata is None:
-            return
-        if self._stage == "xy_center":
-            if self._drag_target == "center":
-                self._cx, self._cy = float(event.xdata), float(event.ydata)
-            elif self._drag_target == "axis":
-                angle = np.arctan2(event.ydata - self._cy, event.xdata - self._cx)
-                if angle < -np.pi / 2:
-                    angle += np.pi
-                elif angle >= np.pi / 2:
-                    angle -= np.pi
-                self._angle = float(angle)
-            self._sync_xy_fields()
-            self._update_xy_overlay()
-        elif self._stage == "t_center":
-            self._t_center_x, self._t_center_t = float(event.xdata), float(event.ydata)
-            self._sync_t_fields()
-            self._t_marker.set_data([self._t_center_x], [self._t_center_t])
-            self._canvas.draw_idle()
-
-    def _on_release(self, _event):
-        self._drag_target = None
-
-    def _on_pick(self, event):
-        if self._stage == "radial_peaks" and event.artist is self._radial_scatter:
-            idx = int(event.ind[0])
-            self._radial_selected[idx] = not self._radial_selected.get(idx, False)
-            self._update_radial_scatter_colors()
-        elif self._stage == "updown_peaks":
-            if event.artist is self._up_scatter:
-                idx = int(event.ind[0])
-                self._up_selected[idx] = not self._up_selected.get(idx, False)
-                self._update_updown_scatter_colors()
-            elif event.artist is self._down_scatter:
-                idx = int(event.ind[0])
-                self._down_selected[idx] = not self._down_selected.get(idx, False)
-                self._update_updown_scatter_colors()
