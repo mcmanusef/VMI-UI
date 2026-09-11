@@ -143,6 +143,10 @@ class HistogramPlotPanel(ttk.Frame):
 
     def _build_ui(self):
         self.columnconfigure(0, weight=1)
+        # Qt's default QGridLayout margins would otherwise leave the plots
+        # and the "Plot options" divider rule inset from this panel's true
+        # edges.
+        self.layout().setContentsMargins(0, 0, 0, 0)
 
         # Log-scale/gamma/focus controls and the bins/bounds table are
         # secondary to the plots themselves, so they share one collapsible

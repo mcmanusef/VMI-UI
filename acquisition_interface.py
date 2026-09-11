@@ -4,6 +4,8 @@ import threading
 import time
 from queue import Queue, Empty
 
+from PyQt5 import QtCore, QtGui
+
 import qtk as tk
 from qtk import ttk, messagebox, filedialog
 
@@ -34,6 +36,20 @@ from tpx_processing import (
     summarize_records,
     merge_stats,
 )
+
+
+def _set_background(widget, color):
+    """Plain QWidgets (and QScrollArea/its viewport) don't paint a
+    background of their own by default -- they just show whatever's
+    behind them, which here is the tab's own light-grey window
+    background. Force a solid fill instead, e.g. so "Controls" reads as
+    a clean white sidebar rather than a grey strip next to the (white)
+    plots."""
+    widget.setAutoFillBackground(True)
+    palette = widget.palette()
+    palette.setColor(QtGui.QPalette.Window, color)
+    palette.setColor(QtGui.QPalette.Base, color)
+    widget.setPalette(palette)
 
 
 class AcquisitionInterface(ttk.Frame):
@@ -123,17 +139,24 @@ class AcquisitionInterface(ttk.Frame):
     def _build_ui(self):
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
+        # Qt's default QGridLayout margins would otherwise leave "Controls"
+        # (and its divider rule) inset from this tab's true edges.
+        self.layout().setContentsMargins(0, 0, 0, 0)
 
         # Collapsing this hands the whole sidebar's width back to the
         # plots -- Qt excludes hidden widgets from layout sizing, so the
         # column shrinks to just the "Controls" toggle. flush=True: a
         # plain sidebar reaching the tab's edges, set off from the plots
         # by a single rule on its right edge instead of sitting as an
-        # inset bordered box.
-        sidebar_section = CollapsibleFrame(self, text="Controls", flush=True, separator="right")
+        # inset bordered box; vertical_label=True: the toggle reads
+        # top-to-bottom as a narrow strip instead of a bar across the top.
+        sidebar_section = CollapsibleFrame(
+            self, text="Controls", flush=True, separator="right", vertical_label=True,
+        )
         sidebar_section.grid(row=0, column=0, sticky="nsew")
         sidebar_section.body.columnconfigure(0, weight=1)
         sidebar_section.body.rowconfigure(0, weight=1)
+        _set_background(sidebar_section, QtCore.Qt.white)
 
         # Wide enough for the sidebar's widest row (the button bar) plus the
         # vertical scrollbar that appears once every section is expanded --
@@ -141,6 +164,8 @@ class AcquisitionInterface(ttk.Frame):
         # horizontal scrollbar is intentionally off.
         sidebar = ScrollableFrame(sidebar_section.body, width=400)
         sidebar.grid(row=0, column=0, sticky="nsew")
+        _set_background(sidebar, QtCore.Qt.white)
+        _set_background(sidebar.viewport(), QtCore.Qt.white)
 
         main = ttk.Frame(self)
         main.grid(row=0, column=1, sticky="nsew", padx=(0, 10))

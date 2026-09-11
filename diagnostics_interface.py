@@ -76,6 +76,9 @@ class DiagnosticsInterface(ttk.Frame):
     def _build_ui(self):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
+        # Qt's default QGridLayout margins would otherwise stack with the
+        # padx/pady already used below, doubling up the inset.
+        self.layout().setContentsMargins(0, 0, 0, 0)
 
         controls = ttk.Frame(self)
         controls.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))

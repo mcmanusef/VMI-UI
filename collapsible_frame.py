@@ -20,42 +20,77 @@ Two looks, picked with `flush`:
     whole side of whatever it's next to (a plots area, typically) instead
     of floating as an inset panel; visually separated from that neighbor
     by a single rule on the given `separator` edge instead.
+
+`vertical_label=True` (only sensible for a flush, left/right-separated
+sidebar) draws the toggle's text rotated top-to-bottom, as a narrow
+labeled strip beside the panel instead of a horizontal bar above it.
 """
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from qtk import GridMixin, TkCompatMixin, ttk
 
 
+class _VerticalToolButton(QtWidgets.QToolButton):
+    """A QToolButton whose label is drawn rotated 90 degrees (reads
+    top-to-bottom), for a toggle that sits in a narrow vertical strip."""
+
+    def sizeHint(self):
+        size = super().sizeHint()
+        return QtCore.QSize(size.height(), size.width())
+
+    def paintEvent(self, _event):
+        painter = QtGui.QPainter(self)
+        painter.rotate(90)
+        painter.translate(0, -self.width())
+        painter.setFont(self.font())
+        painter.setPen(self.palette().buttonText().color())
+        rect = QtCore.QRect(0, 0, self.height(), self.width())
+        painter.drawText(rect, QtCore.Qt.AlignCenter, self.text())
+
+
 class CollapsibleFrame(TkCompatMixin, GridMixin, QtWidgets.QWidget):
-    def __init__(self, parent=None, text="", collapsed=False, flush=False, separator="top", **_kwargs):
+    def __init__(
+        self, parent=None, text="", collapsed=False, flush=False, separator="top",
+        vertical_label=False, **_kwargs,
+    ):
         super().__init__(parent)
         self._title = text
 
-        content = QtWidgets.QWidget(self)
-        content_layout = QtWidgets.QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(2)
-
-        self._toggle = QtWidgets.QToolButton(content)
+        toggle_cls = _VerticalToolButton if vertical_label else QtWidgets.QToolButton
+        self._toggle = toggle_cls(self)
         self._toggle.setCheckable(True)
         self._toggle.setChecked(not collapsed)
         self._toggle.setCursor(QtCore.Qt.PointingHandCursor)
         self._toggle.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
         self._toggle.clicked.connect(self._on_toggle)
-        content_layout.addWidget(self._toggle, 0, QtCore.Qt.AlignLeft)
 
-        self._panel = QtWidgets.QFrame(content)
+        self._panel = QtWidgets.QFrame(self)
         panel_layout = QtWidgets.QVBoxLayout(self._panel)
         if flush:
             self._panel.setFrameShape(QtWidgets.QFrame.NoFrame)
-            panel_layout.setContentsMargins(0, 6, 0, 0)
+            panel_layout.setContentsMargins(0, 0 if vertical_label else 6, 0, 0)
         else:
             self._panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
             panel_layout.setContentsMargins(6, 6, 6, 6)
         self.body = ttk.Frame(self._panel)
         panel_layout.addWidget(self.body)
-        content_layout.addWidget(self._panel)
         self._panel.setVisible(not collapsed)
+
+        content = QtWidgets.QWidget(self)
+        if vertical_label:
+            # Toggle is a narrow labeled strip beside the panel, not a
+            # horizontal bar above it.
+            content_layout = QtWidgets.QHBoxLayout(content)
+            content_layout.setContentsMargins(0, 0, 0, 0)
+            content_layout.setSpacing(4)
+            content_layout.addWidget(self._toggle, 0, QtCore.Qt.AlignTop)
+            content_layout.addWidget(self._panel)
+        else:
+            content_layout = QtWidgets.QVBoxLayout(content)
+            content_layout.setContentsMargins(0, 0, 0, 0)
+            content_layout.setSpacing(2)
+            content_layout.addWidget(self._toggle, 0, QtCore.Qt.AlignLeft)
+            content_layout.addWidget(self._panel)
 
         if flush:
             # A single rule on the edge that borders the neighbor (a plots
