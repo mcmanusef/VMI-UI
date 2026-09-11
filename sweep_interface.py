@@ -38,10 +38,10 @@ import time
 from queue import Queue, Empty
 
 import numpy as np
-import tkinter as tk
-from tkinter import ttk, filedialog
+import qtk as tk
+from qtk import ttk, filedialog, grid_into
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
 import app_settings
@@ -357,10 +357,7 @@ class SweepInterface(ttk.Frame):
         for col in columns:
             self._tree.heading(col, text=headers[col])
             self._tree.column(col, width=90 if col != "cv4" else 160, anchor="center")
-        self._tree.grid(row=0, column=0, sticky="ew")
-        tree_scroll = ttk.Scrollbar(main, orient="vertical", command=self._tree.yview)
-        tree_scroll.grid(row=0, column=1, sticky="ns")
-        self._tree.configure(yscrollcommand=tree_scroll.set)
+        self._tree.grid(row=0, column=0, columnspan=2, sticky="ew")
 
         plot_frame = ttk.Frame(main)
         plot_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
@@ -369,8 +366,8 @@ class SweepInterface(ttk.Frame):
 
         self._figure = Figure(figsize=(7, 5), tight_layout=True)
         self._ax = self._figure.add_subplot(1, 1, 1)
-        self._canvas = FigureCanvasTkAgg(self._figure, master=plot_frame)
-        self._canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self._canvas = FigureCanvasQTAgg(self._figure)
+        grid_into(self._canvas, plot_frame, row=0, column=0, sticky="nsew")
         self._redraw_plot()
 
     def _browse_folder(self):
