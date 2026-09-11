@@ -4,10 +4,10 @@ import time
 from queue import Queue, Empty
 
 import numpy as np
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import qtk as tk
+from qtk import ttk, filedialog, messagebox, grid_into
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.colors import LogNorm
 
@@ -156,8 +156,8 @@ class TimewalkInterface(ttk.Frame):
         self._figure = Figure(figsize=(9, 4.5), tight_layout=True)
         self._ax_hist = self._figure.add_subplot(1, 2, 1)
         self._ax_corr = self._figure.add_subplot(1, 2, 2)
-        self._canvas = FigureCanvasTkAgg(self._figure, master=plot_frame)
-        self._canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self._canvas = FigureCanvasQTAgg(self._figure)
+        grid_into(self._canvas, plot_frame, row=0, column=0, sticky="nsew")
 
     # ---- settings -----------------------------------------------------
 
