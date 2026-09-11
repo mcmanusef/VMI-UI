@@ -15,6 +15,19 @@ from sweep_interface import SweepInterface
 from tab_coordinator import TabCoordinator
 from timewalk_interface import TimewalkInterface
 
+def _prepare_tab(parent: ttk.Frame):
+    """Every tab page is just a single-cell grid holding one widget that
+    fills it -- factored out since qtk's GridMixin creates that grid with
+    Qt's default (non-zero) margins the first time anything's gridded into
+    it, which otherwise stacks with each interface's own padx/pady and
+    keeps its content (and, for Monitored Acquisition/Diagnostics, the
+    "Controls"/"Plot options" divider rules) from ever reaching the tab's
+    real edges."""
+    parent.columnconfigure(0, weight=1)
+    parent.rowconfigure(0, weight=1)
+    parent.layout().setContentsMargins(0, 0, 0, 0)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -24,6 +37,7 @@ class App(tk.Tk):
         # Top-level layout
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
+        self.layout().setContentsMargins(0, 0, 0, 0)
 
         # Shared, persisted state: same live Tk variables handed to every
         # tab that needs them, so editing e.g. frame time or histogram bins
@@ -37,7 +51,7 @@ class App(tk.Tk):
         # and Acquisition (things that collect or analyze data) -- each its
         # own inner tab bar.
         groups = ttk.Notebook(self)
-        groups.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        groups.grid(row=0, column=0, sticky="nsew")
 
         hardware_group = ttk.Frame(groups)
         acquisition_group = ttk.Frame(groups)
@@ -82,29 +96,25 @@ class App(tk.Tk):
         self._build_sweep(sweep_tab)
 
     def _build_group_notebook(self, parent: ttk.Frame):
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        _prepare_tab(parent)
         notebook = ttk.Notebook(parent)
         notebook.grid(row=0, column=0, sticky="nsew")
         return notebook
 
     def _build_serval_config(self, parent: ttk.Frame):
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        _prepare_tab(parent)
 
         self.serval_ui = ServalInterface(parent, coordinator=self._coordinator)
         self.serval_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_stage(self, parent: ttk.Frame):
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        _prepare_tab(parent)
 
         self.stage_ui = StageInterface(parent, coordinator=self._coordinator)
         self.stage_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_collection_params(self, parent: ttk.Frame):
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        _prepare_tab(parent)
 
         server_var = getattr(self, "serval_ui", None)
         collection_ui = CollectionInterface(
@@ -116,8 +126,7 @@ class App(tk.Tk):
         collection_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_diagnostics(self, parent: ttk.Frame):
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        _prepare_tab(parent)
 
         server_var = getattr(self, "serval_ui", None)
         diagnostics_ui = DiagnosticsInterface(
@@ -129,8 +138,7 @@ class App(tk.Tk):
         diagnostics_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_acquisition(self, parent: ttk.Frame):
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        _prepare_tab(parent)
 
         server_var = getattr(self, "serval_ui", None)
         acquisition_ui = AcquisitionInterface(
@@ -143,8 +151,7 @@ class App(tk.Tk):
         acquisition_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_timewalk(self, parent: ttk.Frame):
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        _prepare_tab(parent)
 
         server_var = getattr(self, "serval_ui", None)
         timewalk_ui = TimewalkInterface(
@@ -155,8 +162,7 @@ class App(tk.Tk):
         timewalk_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_sweep(self, parent: ttk.Frame):
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        _prepare_tab(parent)
 
         server_var = getattr(self, "serval_ui", None)
         sweep_ui = SweepInterface(
@@ -169,8 +175,7 @@ class App(tk.Tk):
         sweep_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_power_supply(self, parent: ttk.Frame):
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        _prepare_tab(parent)
 
         power_supply_ui = PowerSupplyInterface(parent, coordinator=self._coordinator)
         power_supply_ui.grid(row=0, column=0, sticky="nsew")

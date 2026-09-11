@@ -24,6 +24,14 @@ Two looks, picked with `flush`:
 `vertical_label=True` (only sensible for a flush, left/right-separated
 sidebar) draws the toggle's text rotated top-to-bottom, as a narrow
 labeled strip beside the panel instead of a horizontal bar above it.
+
+`toggle_last=True` (only sensible for a flush, top/bottom-separated
+footer) puts the toggle *after* the panel instead of before it, so it
+reads as a fixed-position bar pinned to the far edge (typically the
+bottom of the tab) with the panel opening/closing above it, rather than
+a header that itself moves every time something above it (typically a
+plots area sized to fill whatever's left) grows or shrinks to
+compensate.
 """
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -51,7 +59,7 @@ class _VerticalToolButton(QtWidgets.QToolButton):
 class CollapsibleFrame(TkCompatMixin, GridMixin, QtWidgets.QWidget):
     def __init__(
         self, parent=None, text="", collapsed=False, flush=False, separator="top",
-        vertical_label=False, **_kwargs,
+        vertical_label=False, toggle_last=False, **_kwargs,
     ):
         super().__init__(parent)
         self._title = text
@@ -68,7 +76,8 @@ class CollapsibleFrame(TkCompatMixin, GridMixin, QtWidgets.QWidget):
         panel_layout = QtWidgets.QVBoxLayout(self._panel)
         if flush:
             self._panel.setFrameShape(QtWidgets.QFrame.NoFrame)
-            panel_layout.setContentsMargins(0, 0 if vertical_label else 6, 0, 0)
+            top_margin = 0 if (vertical_label or toggle_last) else 6
+            panel_layout.setContentsMargins(0, top_margin, 0, 0)
         else:
             self._panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
             panel_layout.setContentsMargins(6, 6, 6, 6)
@@ -89,8 +98,12 @@ class CollapsibleFrame(TkCompatMixin, GridMixin, QtWidgets.QWidget):
             content_layout = QtWidgets.QVBoxLayout(content)
             content_layout.setContentsMargins(0, 0, 0, 0)
             content_layout.setSpacing(2)
-            content_layout.addWidget(self._toggle, 0, QtCore.Qt.AlignLeft)
-            content_layout.addWidget(self._panel)
+            if toggle_last:
+                content_layout.addWidget(self._panel)
+                content_layout.addWidget(self._toggle, 0, QtCore.Qt.AlignLeft)
+            else:
+                content_layout.addWidget(self._toggle, 0, QtCore.Qt.AlignLeft)
+                content_layout.addWidget(self._panel)
 
         if flush:
             # A single rule on the edge that borders the neighbor (a plots

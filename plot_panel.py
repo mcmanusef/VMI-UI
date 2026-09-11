@@ -154,8 +154,14 @@ class HistogramPlotPanel(ttk.Frame):
         # plots (Qt excludes hidden widgets from layout sizing). flush=True:
         # a plain footer reaching this panel's edges, set off from the
         # plots by a single rule instead of sitting as an inset box.
+        # toggle_last, when the plots (weight=1) sit above the footer,
+        # keeps the "Plot options" toggle itself pinned to the panel's far
+        # edge instead of sliding up/down as the plots grow to fill
+        # whatever the footer's panel isn't using.
         footer_separator = "top" if self._plots_first else "bottom"
-        self._footer = CollapsibleFrame(self, text="Plot options", flush=True, separator=footer_separator)
+        self._footer = CollapsibleFrame(
+            self, text="Plot options", flush=True, separator=footer_separator, toggle_last=self._plots_first,
+        )
         self._footer.body.columnconfigure(0, weight=1)
 
         self._opts_bar = ttk.Frame(self._footer.body)
