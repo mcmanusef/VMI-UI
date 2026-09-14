@@ -12,6 +12,7 @@ from qtk import filedialog, messagebox
 
 import app_settings
 import serval_client
+import ui_style
 from plot_panel import HistogramPlotPanel
 from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection, apply_timewalk_correction
 from tpx_processing import (
@@ -74,115 +75,88 @@ class DiagnosticsInterface(ttk.Frame):
         self._poll_queue()
 
     def _build_ui(self):
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
-        # Qt's default QGridLayout margins would otherwise stack with the
-        # padx/pady already used below, doubling up the inset.
-        self.layout().setContentsMargins(0, 0, 0, 0)
+        sidebar, main = ui_style.build_sidebar_layout(self)
+        main.rowconfigure(0, weight=1)
+        # Trailing empty row keeps content packed at the top as sections
+        # collapse (see Monitored Acquisition).
+        sidebar.rowconfigure(8, weight=1)
 
-        controls = ttk.Frame(self)
-        controls.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
-        controls.columnconfigure(12, weight=1)
+        ui_style.build_button_bar(sidebar, 0, [("Start", self.start), ("Stop", self.stop)])
+        self._status_block = ui_style.StatusBlock(sidebar, 1, self.status_var)
 
-        ttk.Label(controls, text="Frame rate (fps):").grid(row=0, column=0, sticky="w")
-        ttk.Entry(controls, textvariable=self.frame_rate_var, width=10).grid(row=0, column=1, padx=(6, 12))
-
-        ttk.Label(controls, text="Max packets:").grid(row=0, column=2, sticky="w")
-        ttk.Entry(controls, textvariable=self.max_packets_var, width=10).grid(row=0, column=3, padx=(6, 12))
-
+        params = ui_style.build_section(sidebar, 2, "Acquisition parameters")
+        ui_style.add_form_row(
+            params, 0, "Frame rate (fps):", ttk.Entry(params, textvariable=self.frame_rate_var, width=18)
+        )
+        ui_style.add_form_row(params, 1, "Max packets:", ttk.Entry(params, textvariable=self.max_packets_var, width=18))
         ttk.Checkbutton(
-            controls,
-            text="Accumulate",
-            variable=self.accumulate_var,
-            command=self._on_accumulate_toggle,
-        ).grid(row=0, column=4, padx=(0, 12))
-
+            params, text="Accumulate", variable=self.accumulate_var, command=self._on_accumulate_toggle,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ttk.Checkbutton(
-            controls,
-            text="Use test file",
-            variable=self.use_test_file_var,
-        ).grid(row=0, column=5, padx=(0, 6))
-        ttk.Entry(controls, textvariable=self.test_file_var, width=32).grid(row=0, column=6, padx=(0, 12))
-
-        ttk.Label(controls, text="Mask pixels >").grid(row=0, column=7, sticky="w")
-        ttk.Entry(controls, textvariable=self.mask_threshold_var, width=8).grid(row=0, column=8, padx=(6, 6))
-        ttk.Button(controls, text="Mask", command=self._mask_hot_pixels).grid(row=0, column=9, padx=(0, 6))
-        ttk.Button(controls, text="Mask Hottest Pixel", command=self._mask_max_pixel).grid(
-            row=0, column=10, padx=(0, 12)
+            params, text="Use test file", variable=self.use_test_file_var,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ui_style.build_path_field(params, self.test_file_var, self._browse_test_file).grid(
+            row=4, column=0, columnspan=2, sticky="ew", pady=(2, 4)
+        )
+        ttk.Checkbutton(
+            params, text="Apply timewalk correction before clustering", variable=self.timewalk_enabled_var
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ui_style.build_path_field(params, self.timewalk_path_var, self._browse_timewalk).grid(
+            row=6, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
 
-        ttk.Button(controls, text="Start", command=self.start).grid(row=0, column=11, padx=(0, 6))
-        ttk.Button(controls, text="Stop", command=self.stop).grid(row=0, column=12, padx=(0, 6))
-
-        ttk.Label(controls, textvariable=self.status_var).grid(row=0, column=13, sticky="w")
-
-        timewalk_row = ttk.Frame(controls)
-        timewalk_row.grid(row=1, column=0, columnspan=14, sticky="w", pady=(6, 0))
-        ttk.Checkbutton(
-            timewalk_row, text="Apply timewalk correction before clustering", variable=self.timewalk_enabled_var
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Entry(timewalk_row, textvariable=self.timewalk_path_var, width=40).grid(
-            row=0, column=1, padx=(6, 6)
+        # An occasional maintenance action, not an every-session one.
+        mask = ui_style.build_section(sidebar, 3, "Hot pixel masking", collapsed=True)
+        ui_style.add_form_row(
+            mask, 0, "Mask pixels above (counts):", ttk.Entry(mask, textvariable=self.mask_threshold_var, width=18)
         )
-        ttk.Button(timewalk_row, text="Browse...", command=self._browse_timewalk).grid(row=0, column=2)
-
-        stats = ttk.LabelFrame(self, text="Diagnostics")
-        stats.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
-        stats.columnconfigure(1, weight=1)
-        stats.columnconfigure(3, weight=1)
-        stats.columnconfigure(5, weight=1)
-        stats.columnconfigure(7, weight=1)
+        ui_style.build_button_bar(mask, 1, [
+            ("Mask", self._mask_hot_pixels),
+            ("Mask Hottest Pixel", self._mask_max_pixel),
+        ], pady=(4, 0), columnspan=2)
 
         self._stat_vars = {}
         stat_groups = [
             ("Rates", [
-                ("Laser Repetition Rate", "pulses_per_second"),
-                ("Analysis Speed", "analysis_speed"),
-                ("Analysis Frame Time", "analysis_time_last"),
-                ("Fraction Analyzed", "data_ratio"),
+                ("Laser repetition rate:", "pulses_per_second"),
+                ("Analysis speed:", "analysis_speed"),
+                ("Analysis frame time:", "analysis_time_last"),
+                ("Fraction analyzed:", "data_ratio"),
             ]),
-            ("Per-Shot Rates", [
-                ("Cluster Rate", "clusters_per_shot"),
-                ("e-ToF Rate", "electrons_per_shot"),
-                ("i-ToF Rate", "ions_per_shot"),
+            ("Per-shot rates", [
+                ("Cluster rate:", "clusters_per_shot"),
+                ("e-ToF rate:", "electrons_per_shot"),
+                ("i-ToF rate:", "ions_per_shot"),
             ]),
-            ("Per-Cluster Ratios", [
-                ("e-ToF : Cluster Ratio", "electrons_per_cluster"),
-                ("i-ToF : Cluster Ratio", "ions_per_cluster"),
-                ("Average Cluster Size", "avg_cluster_size"),
+            ("Per-cluster ratios", [
+                ("e-ToF : cluster ratio:", "electrons_per_cluster"),
+                ("i-ToF : cluster ratio:", "ions_per_cluster"),
+                ("Average cluster size:", "avg_cluster_size"),
             ]),
-            ("Event Fractions", [
-                ("Coincidence Rate", "shots_all_three"),
-                ("e-ToF Multi-Hit Rate", "shots_multi_electrons"),
-                ("i-ToF Multi-Hit Rate", "shots_multi_ions"),
-                ("Cluster Multi-Hit Rate", "shots_multi_clusters"),
+            ("Event fractions", [
+                ("Coincidence rate:", "shots_all_three"),
+                ("e-ToF multi-hit rate:", "shots_multi_electrons"),
+                ("i-ToF multi-hit rate:", "shots_multi_ions"),
+                ("Cluster multi-hit rate:", "shots_multi_clusters"),
             ]),
         ]
-
-        col_groups = [0, 2, 4, 6]
-        rows_per_col = [0, 0, 0, 0]
-        for group_idx, (group_label, items) in enumerate(stat_groups):
-            col = col_groups[group_idx % len(col_groups)]
-            row = rows_per_col[group_idx % len(col_groups)]
-            ttk.Label(stats, text=group_label, font=("Segoe UI", 10, "bold")).grid(
-                row=row, column=col, columnspan=2, sticky="w", padx=(6, 4), pady=(6, 2)
-            )
-            row += 1
+        for idx, (title, items) in enumerate(stat_groups):
+            last = idx == len(stat_groups) - 1
+            body = ui_style.build_section(sidebar, 4 + idx, title, pady=0 if last else (0, 8))
+            rows = []
             for label, key in items:
-                ttk.Label(stats, text=label + ":").grid(row=row, column=col, sticky="w", padx=(6, 4), pady=2)
                 var = tk.StringVar(self, value="--")
-                self._stat_vars[label] = var
-                ttk.Label(stats, textvariable=var).grid(row=row, column=col + 1, sticky="w", pady=2)
-                row += 1
-            rows_per_col[group_idx % len(col_groups)] = row
+                self._stat_vars[key] = var
+                rows.append((label, var))
+            ui_style.add_stat_rows(body, rows)
 
         self._plot_panel = HistogramPlotPanel(
-            self,
+            main,
             on_settings_changed=self._on_panel_settings_changed,
             plots_first=True,
             shared_vars=self._plot_shared_vars,
         )
-        self._plot_panel.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self._plot_panel.grid(row=0, column=0, sticky="nsew")
 
     def _on_panel_settings_changed(self):
         self._reset_accumulation = True
@@ -292,6 +266,17 @@ class DiagnosticsInterface(ttk.Frame):
         )
         if chosen:
             self.timewalk_path_var.set(chosen)
+
+    def _browse_test_file(self):
+        initial = self.test_file_var.get().strip()
+        chosen = filedialog.askopenfilename(
+            title="Choose test file",
+            initialdir=str(pathlib.Path(initial).parent) if initial else None,
+            filetypes=[("TPX3", "*.tpx3")],
+            parent=self,
+        )
+        if chosen:
+            self.test_file_var.set(chosen)
 
     def _configure_server(self, frame_rate):
         # One frame per trigger, restarted every frame (see _worker_loop) --
@@ -509,24 +494,13 @@ class DiagnosticsInterface(ttk.Frame):
             return f"{value:.3f}" if isinstance(value, float) else str(value)
 
         analysis_speed = (stats["real_time"] / stats["analysis_time"]) if stats["analysis_time"] > 0 else 0
-
-        self._stat_vars["Laser Repetition Rate"].set(fmt(stats["pulses_per_second"]))
-        self._stat_vars["Analysis Speed"].set(fmt(analysis_speed))
-        self._stat_vars["Analysis Frame Time"].set(fmt(stats.get("analysis_time_last", 0)))
-        self._stat_vars["Fraction Analyzed"].set(fmt(stats["data_ratio"]))
-
-        self._stat_vars["Cluster Rate"].set(fmt(stats["clusters_per_shot"]))
-        self._stat_vars["e-ToF Rate"].set(fmt(stats["electrons_per_shot"]))
-        self._stat_vars["i-ToF Rate"].set(fmt(stats["ions_per_shot"]))
-
-        self._stat_vars["e-ToF : Cluster Ratio"].set(fmt(stats["electrons_per_cluster"]))
-        self._stat_vars["i-ToF : Cluster Ratio"].set(fmt(stats["ions_per_cluster"]))
-        self._stat_vars["Average Cluster Size"].set(fmt(stats["avg_cluster_size"]))
-
-        self._stat_vars["Coincidence Rate"].set(fmt(stats["shots_all_three"]))
-        self._stat_vars["e-ToF Multi-Hit Rate"].set(fmt(stats["shots_multi_electrons"]))
-        self._stat_vars["i-ToF Multi-Hit Rate"].set(fmt(stats["shots_multi_ions"]))
-        self._stat_vars["Cluster Multi-Hit Rate"].set(fmt(stats["shots_multi_clusters"]))
+        # Every other stat var is keyed by its own summarize_records key.
+        derived = {
+            "analysis_speed": analysis_speed,
+            "analysis_time_last": stats.get("analysis_time_last", 0),
+        }
+        for key, var in self._stat_vars.items():
+            var.set(fmt(derived[key] if key in derived else stats[key]))
 
     def _mask_hot_pixels(self):
         was_running = self.is_running()

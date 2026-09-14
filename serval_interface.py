@@ -3,11 +3,12 @@ import pathlib
 import tempfile
 import time
 import qtk as tk
-from qtk import ttk
+from qtk import ttk, filedialog
 
 import requests
 
 import serval_client
+import ui_style
 
 
 class ServalInterface(ttk.Frame):
@@ -32,60 +33,56 @@ class ServalInterface(ttk.Frame):
         self._schedule_dashboard_refresh()
 
     def _build_ui(self):
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
+        sidebar, main = ui_style.build_sidebar_layout(self)
+        main.rowconfigure(0, weight=2)
+        main.rowconfigure(1, weight=1)
+        # Trailing empty row keeps content packed at the top.
+        sidebar.rowconfigure(3, weight=1)
 
-        layout = ttk.Frame(self)
-        layout.grid(row=0, column=0, sticky="nsew")
-        layout.columnconfigure(0, weight=3)
-        layout.columnconfigure(1, weight=2)
-        layout.rowconfigure(1, weight=1)
+        ui_style.build_button_bar(sidebar, 0, [("Ping", self.ping), ("Initialize", self.initialize)])
+        self._status_block = ui_style.StatusBlock(sidebar, 1, self.status_var)
 
-        left = ttk.Frame(layout)
-        left.grid(row=0, column=0, rowspan=2, sticky="nsew")
-        left.columnconfigure(0, weight=1)
-        left.rowconfigure(1, weight=1)
-
-        form = ttk.Frame(left)
-        form.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 0))
-        form.columnconfigure(1, weight=1)
-
-        self._add_row(form, 0, "Server URL:", ttk.Entry(form, textvariable=self.server_var))
-        self._add_row(form, 1, "BPC file:", ttk.Entry(form, textvariable=self.bpc_var))
-        self._add_row(form, 2, "DACS file:", ttk.Entry(form, textvariable=self.dacs_var))
-        self._add_row(form, 3, "Bias voltage:", ttk.Entry(form, textvariable=self.bias_voltage_var))
-
-        buttons = ttk.Frame(form)
-        buttons.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Button(buttons, text="Ping", command=self.ping).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(buttons, text="Initialize", command=self.initialize).grid(row=0, column=1, padx=(0, 8))
-
-        status = ttk.Frame(left)
-        status.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
-        status.columnconfigure(1, weight=1)
-        status.rowconfigure(1, weight=1)
-
-        ttk.Label(status, text="Status:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Label(status, textvariable=self.status_var).grid(row=0, column=1, sticky="w")
-
-        self.log = tk.Text(status, wrap="word", height=8)
-        self.log.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
-
-        right = ttk.Frame(layout)
-        right.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(0, 10), pady=10)
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(1, weight=1)
-
-        ttk.Label(right, text="Dashboard", font=("Segoe UI", 12, "bold")).grid(
-            row=0, column=0, sticky="w", pady=(0, 6)
+        server = ui_style.build_section(sidebar, 2, "Detector setup", pady=0)
+        ui_style.add_form_row(server, 0, "Server URL:", ttk.Entry(server, textvariable=self.server_var))
+        ui_style.add_form_row(
+            server, 1, "BPC file:", ui_style.build_path_field(server, self.bpc_var, self._browse_bpc)
         )
-        self.dashboard = tk.Text(right, wrap="word", height=12)
-        self.dashboard.grid(row=1, column=0, sticky="nsew")
+        ui_style.add_form_row(
+            server, 2, "DACS file:", ui_style.build_path_field(server, self.dacs_var, self._browse_dacs)
+        )
+        ui_style.add_form_row(
+            server, 3, "Bias voltage (V):", ttk.Entry(server, textvariable=self.bias_voltage_var, width=18)
+        )
+
+        dashboard = ui_style.build_card(main, 0, "Dashboard")
+        dashboard.columnconfigure(0, weight=1)
+        dashboard.rowconfigure(0, weight=1)
+        self.dashboard = tk.Text(dashboard, wrap="word", height=12)
+        self.dashboard.grid(row=0, column=0, sticky="nsew")
         self.dashboard.configure(state="disabled")
 
-    def _add_row(self, parent, row, label, widget):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        widget.grid(row=row, column=1, sticky="ew", pady=4)
+        log = ui_style.build_card(main, 1, "Log", pady=8)
+        log.columnconfigure(0, weight=1)
+        log.rowconfigure(0, weight=1)
+        self.log = tk.Text(log, wrap="word", height=8)
+        self.log.grid(row=0, column=0, sticky="nsew")
+
+    def _browse_bpc(self):
+        self._browse_config_file(self.bpc_var, "Choose pixel config (BPC) file", [("BPC", "*.bpc")])
+
+    def _browse_dacs(self):
+        self._browse_config_file(self.dacs_var, "Choose DACS file", [("DACS", "*.dacs")])
+
+    def _browse_config_file(self, var, title, filetypes):
+        initial = var.get().strip()
+        chosen = filedialog.askopenfilename(
+            title=title,
+            initialdir=str(pathlib.Path(initial).parent) if initial else None,
+            filetypes=filetypes + [("All files", "*.*")],
+            parent=self,
+        )
+        if chosen:
+            var.set(chosen)
 
     def _load_defaults(self):
         defaults = {
@@ -155,7 +152,7 @@ class ServalInterface(ttk.Frame):
     def ping(self):
         try:
             resp = serval_client.SESSION.get(self._server_url(), timeout=5)
-            self._set_status(f"Ping ok ({resp.status_code})")
+            self._set_status(f"Ping OK ({resp.status_code}).")
         except Exception as exc:
             self._set_status(f"Ping failed: {exc}")
 

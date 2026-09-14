@@ -47,10 +47,9 @@ import app_settings
 import cv4_writer
 import serval_client
 from qt_plots import mpl_color, ZoomFocusViewBox
-import shared_state
 import time_estimate
 from cv4_writer import Cv4Writer
-from scrollable_frame import ScrollableFrame
+import ui_style
 from stage_interface import describe_move_failure
 from tpx_processing import (
     decode_tpx3,
@@ -160,134 +159,94 @@ class SweepInterface(ttk.Frame):
     # ---- UI construction --------------------------------------------------
 
     def _build_ui(self):
-        self.columnconfigure(1, weight=1)
-        self.rowconfigure(0, weight=1)
-
-        sidebar = ScrollableFrame(self)
-        sidebar.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-
-        main = ttk.Frame(self)
-        main.grid(row=0, column=1, sticky="nsew", pady=10, padx=(0, 10))
-        main.columnconfigure(0, weight=1)
+        sidebar, main = ui_style.build_sidebar_layout(self)
         main.rowconfigure(1, weight=1)
 
-        self._build_sidebar(sidebar.body)
+        self._build_sidebar(sidebar)
         self._build_main(main)
 
-    def _add_row(self, parent, row, label, widget):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        widget.grid(row=row, column=1, sticky="ew", pady=4)
-
     def _build_sidebar(self, sidebar):
+        # Trailing empty row keeps content packed at the top as sections
+        # collapse (see Monitored Acquisition).
+        sidebar.rowconfigure(7, weight=1)
+
+        # Same Stop / Force Stop pair as Monitored Acquisition: "Force Stop"
+        # can abandon a backlog mid-drain, hence the danger styling.
+        ui_style.build_button_bar(
+            sidebar, 0, [("Start", self.start), ("Stop", self.finish_and_stop)], danger=("Force Stop", self.stop),
+        )
+        # "Position 3/10 done (...)" is mid-sweep progress, not idle.
+        self._status_block = ui_style.StatusBlock(
+            sidebar, 1, self.status_var, progress_var=self._progress_var, eta_var=self.eta_var,
+            is_running=lambda text: "done (measured" in text or any(k in text for k in ui_style.STATUS_GREEN_KEYWORDS),
+        )
         # The stage connection itself (IP/group, Connect/Initialize/Home,
-        # manual jog + Set Zero) lives on the Stage Control tab now -- see
+        # manual jog + Set Zero) lives on the Stage Control tab -- see
         # stage_interface.StageInterface -- so a sweep just needs that
         # connection to already be up before Start.
-        stage_note = ttk.Label(
-            sidebar,
-            text="Uses the connection from the Stage Control tab -- connect/initialize/home there first.",
-            font=("Segoe UI", 8), wraplength=260, justify="left",
+        ui_style.add_note(
+            sidebar, 2,
+            '"Stop" lets the current backlog fully process before stopping (no half-done files); '
+            '"Force Stop" cuts off immediately. Uses the connection from the Stage Control tab -- '
+            "connect/initialize/home there first.",
+            columnspan=1, pady=(0, 8),
         )
-        stage_note.grid(row=0, column=0, sticky="w", pady=(0, 8))
 
-        positions = ttk.LabelFrame(sidebar, text="Positions")
-        positions.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        positions.columnconfigure(1, weight=1)
+        positions = ui_style.build_section(sidebar, 3, "Positions")
         ttk.Radiobutton(
             positions, text="Range", value="range", variable=self.position_mode_var
-        ).grid(row=0, column=0, sticky="w", padx=(6, 4))
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
         range_row = ttk.Frame(positions)
-        range_row.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(6, 4))
-        ttk.Label(range_row, text="Low:").grid(row=0, column=0)
-        ttk.Entry(range_row, textvariable=self.range_low_var, width=7).grid(row=0, column=1, padx=(2, 8))
-        ttk.Label(range_row, text="High:").grid(row=0, column=2)
-        ttk.Entry(range_row, textvariable=self.range_high_var, width=7).grid(row=0, column=3, padx=(2, 8))
-        ttk.Label(range_row, text="Count:").grid(row=0, column=4)
-        ttk.Entry(range_row, textvariable=self.range_count_var, width=6).grid(row=0, column=5, padx=(2, 0))
-
+        range_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 4))
+        # Three label+entry pairs on one line only fit the 400px sidebar
+        # without the row frame's own default margins on top of the
+        # section's, and with small minimum entry widths -- the entries
+        # stretch to share whatever width the row actually has.
+        ui_style.zero_margins(range_row)
+        for idx, (label, var) in enumerate([
+            ("Low:", self.range_low_var),
+            ("High:", self.range_high_var),
+            ("Count:", self.range_count_var),
+        ]):
+            ttk.Label(range_row, text=label).grid(row=0, column=2 * idx, sticky="w", padx=(0 if idx == 0 else 8, 4))
+            ttk.Entry(range_row, textvariable=var, width=5).grid(row=0, column=2 * idx + 1, sticky="ew")
+            range_row.columnconfigure(2 * idx + 1, weight=1)
         ttk.Radiobutton(
             positions, text="List (comma-separated)", value="list", variable=self.position_mode_var
-        ).grid(row=2, column=0, sticky="w", padx=(6, 4), pady=(6, 0))
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ttk.Entry(positions, textvariable=self.position_list_var).grid(
-            row=3, column=0, columnspan=2, sticky="ew", padx=(6, 6), pady=(0, 4)
+            row=3, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
 
-        options = ttk.LabelFrame(sidebar, text="Sweep options")
-        options.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        options.columnconfigure(1, weight=1)
-        self._add_row(options, 0, "Passes:", ttk.Entry(options, textvariable=self.passes_var, width=8))
-        ttk.Label(
-            options, text="(1 = forward only; >1 alternates forward/backward)", font=("Segoe UI", 8)
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=(0, 4))
-
+        options = ui_style.build_section(sidebar, 4, "Sweep options")
+        ui_style.add_form_row(options, 0, "Passes:", ttk.Entry(options, textvariable=self.passes_var, width=18))
+        ui_style.add_note(options, 1, "1 = forward only; more than 1 alternates forward/backward.")
         dwell_row = ttk.Frame(options)
-        dwell_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        dwell_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ttk.Radiobutton(
             dwell_row, text="Dwell for clusters:", value="clusters", variable=self.dwell_mode_var
         ).grid(row=0, column=0, sticky="w")
         ttk.Radiobutton(
             dwell_row, text="Dwell for seconds:", value="time", variable=self.dwell_mode_var
         ).grid(row=1, column=0, sticky="w")
-        ttk.Entry(dwell_row, textvariable=self.dwell_value_var, width=10).grid(row=0, column=1, rowspan=2, padx=(6, 0))
+        ttk.Entry(dwell_row, textvariable=self.dwell_value_var, width=10).grid(row=0, column=1, rowspan=2, padx=(8, 0))
+        ui_style.add_form_row(
+            options, 3, "Frame time (s):", ttk.Entry(options, textvariable=self.frame_time_var, width=18)
+        )
+        ui_style.add_form_row(
+            options, 4, "Save folder:", ui_style.build_path_field(options, self.save_folder_var, self._browse_folder)
+        )
 
-        self._add_row(options, 3, "Frame time (s):", ttk.Entry(options, textvariable=self.frame_time_var, width=10))
-        folder_row = ttk.Frame(options)
-        folder_row.grid(row=4, column=1, sticky="ew", pady=4)
-        folder_row.columnconfigure(0, weight=1)
-        ttk.Entry(folder_row, textvariable=self.save_folder_var).grid(row=0, column=0, sticky="ew")
-        ttk.Button(folder_row, text="...", width=3, command=self._browse_folder).grid(row=0, column=1, padx=(4, 0))
-        ttk.Label(options, text="Save folder:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.notes = ui_style.build_metadata_section(sidebar, 5, self)
 
-        meta = ttk.LabelFrame(sidebar, text="Metadata")
-        meta.grid(row=3, column=0, sticky="ew", pady=(0, 8))
-        meta.columnconfigure(1, weight=1)
-        self._add_row(meta, 0, "Target:", ttk.Entry(meta, textvariable=self.target_var))
-        self._add_row(meta, 1, "Target Pressure:", ttk.Entry(meta, textvariable=self.target_pressure_var))
-        self._add_row(meta, 2, "Background Pressure:", ttk.Entry(meta, textvariable=self.background_pressure_var))
-        self._add_row(meta, 3, "Power:", ttk.Entry(meta, textvariable=self.power_var))
-        self._add_row(meta, 4, "Spot Size:", ttk.Entry(meta, textvariable=self.spot_size_var))
-        self._add_row(meta, 5, "Polarization:", ttk.Entry(meta, textvariable=self.polarization_var))
-        self._add_row(meta, 6, "Wavelength:", ttk.Entry(meta, textvariable=self.wavelength_var))
-        ttk.Label(meta, text="Notes:").grid(row=7, column=0, sticky="nw", padx=(0, 8), pady=4)
-        self.notes = tk.Text(meta, wrap="word", height=4, width=24)
-        self.notes.grid(row=7, column=1, sticky="nsew", pady=4)
-        shared_state.wire_notes_widget(self.notes)
-
-        live = ttk.LabelFrame(sidebar, text="Live collection")
-        live.grid(row=4, column=0, sticky="ew", pady=(0, 8))
-        live.columnconfigure(1, weight=1)
-        for row, (label, var) in enumerate([
+        live = ui_style.build_section(sidebar, 6, "Live collection", pady=0)
+        ui_style.add_stat_rows(live, [
             ("Est. frames needed (this visit):", self.position_estimate_var),
             ("Frames collected (this visit):", self.position_collected_var),
             ("Frames processed (sweep total):", self.position_processed_var),
             ("Pending (sweep backlog):", self.position_pending_var),
             ("Dead time (this visit):", self.position_dead_time_var),
-        ]):
-            ttk.Label(live, text=label).grid(row=row, column=0, sticky="w", padx=(6, 4), pady=1)
-            ttk.Label(live, textvariable=var).grid(row=row, column=1, sticky="w", pady=1)
-
-        run_buttons = ttk.Frame(sidebar)
-        run_buttons.grid(row=5, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(run_buttons, text="Start", command=self.start).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(run_buttons, text="Finish & Stop", command=self.finish_and_stop).grid(row=0, column=1, padx=(0, 8))
-        ttk.Button(run_buttons, text="Stop", command=self.stop).grid(row=0, column=2)
-
-        ttk.Label(
-            sidebar,
-            text='"Finish & Stop" lets the current backlog fully process before stopping '
-                 '(no half-done files); "Stop" cuts off immediately.',
-            font=("Segoe UI", 8), wraplength=260, justify="left",
-        ).grid(row=6, column=0, sticky="w", pady=(0, 6))
-
-        status = ttk.Frame(sidebar)
-        status.grid(row=7, column=0, sticky="ew")
-        ttk.Label(status, textvariable=self.status_var, wraplength=220, justify="left").grid(row=0, column=0, sticky="w")
-        ttk.Progressbar(status, variable=self._progress_var, maximum=100.0, mode="determinate", length=220).grid(
-            row=1, column=0, sticky="ew", pady=(4, 0)
-        )
-        ttk.Label(status, textvariable=self.eta_var, wraplength=220, justify="left", font=("Segoe UI", 8)).grid(
-            row=2, column=0, sticky="w", pady=(4, 0)
-        )
+        ])
 
     def _build_main(self, main):
         columns = ("pass", "direction", "requested", "measured", "clusters", "etof", "itof", "files", "cv4")
@@ -300,12 +259,13 @@ class SweepInterface(ttk.Frame):
         for col in columns:
             self._tree.heading(col, text=headers[col])
             self._tree.column(col, width=90 if col != "cv4" else 160, anchor="center")
-        self._tree.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self._tree.grid(row=0, column=0, sticky="ew")
 
         plot_frame = ttk.Frame(main)
-        plot_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        plot_frame.grid(row=1, column=0, sticky="nsew")
         plot_frame.rowconfigure(0, weight=1)
         plot_frame.columnconfigure(0, weight=1)
+        ui_style.zero_margins(plot_frame)
 
         self._plot_widget = pg.PlotWidget(viewBox=ZoomFocusViewBox())
         self._plot_item = self._plot_widget.getPlotItem()
@@ -1280,3 +1240,6 @@ class SweepInterface(ttk.Frame):
         self._plot_item.setLabel("bottom", "Position (relative to zero)")
         self._plot_item.setLabel("left", "Rate per shot")
         self._plot_item.autoRange()
+        # clear() above removes the placeholder too, so it's re-added here.
+        placeholder = ui_style.add_empty_placeholder(self._plot_item, "No data — press Start to sweep")
+        ui_style.show_empty_placeholder(self._plot_item, placeholder, not self._points)

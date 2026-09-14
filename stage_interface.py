@@ -14,6 +14,7 @@ import qtk as tk
 from qtk import ttk
 
 import app_settings
+import ui_style
 import xps_client
 
 
@@ -58,7 +59,7 @@ class StageInterface(ttk.Frame):
         self.group_state_var = tk.StringVar(self, value="--")
         self.move_target_var = tk.StringVar(self, value="0")
         self.stage_status_var = tk.StringVar(self, value="Not connected.")
-        self.objects_var = tk.StringVar(self, value="")
+        self.objects_var = tk.StringVar(self, value="--")
 
         self._stage = None
         self._queue: Queue = Queue()
@@ -87,58 +88,50 @@ class StageInterface(ttk.Frame):
 
     # ---- UI construction --------------------------------------------------
 
-    def _add_row(self, parent, row, label, widget):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        widget.grid(row=row, column=1, sticky="ew", pady=4)
-
     def _build_ui(self):
-        self.columnconfigure(0, weight=1)
-        # A trailing empty row soaks up any leftover vertical space so the
-        # two LabelFrames below stay compact and top-anchored instead of
-        # spreading out to fill the tab.
-        self.rowconfigure(2, weight=1)
+        # No data view on this tab, so its controls get the whole tab as a
+        # page instead of a sidebar next to an empty main area.
+        page = ui_style.build_page_layout(self)
 
-        stage = ttk.LabelFrame(self, text="Stage (Newport XPS-D)")
-        stage.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 8))
-        stage.columnconfigure(1, weight=1)
-
-        self._add_row(stage, 0, "IP:", ttk.Entry(stage, textvariable=self.stage_ip_var, width=18))
-        self._add_row(stage, 1, "Group name:", ttk.Entry(stage, textvariable=self.group_var, width=18))
-        buttons = ttk.Frame(stage)
-        buttons.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 4))
-        ttk.Button(buttons, text="Connect", command=self._connect_stage).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(buttons, text="Initialize", command=self._initialize_stage).grid(row=0, column=1, padx=(0, 6))
-        ttk.Button(buttons, text="Home", command=self._home_stage).grid(row=0, column=2, padx=(0, 6))
-        ttk.Label(stage, textvariable=self.stage_status_var, wraplength=500, justify="left").grid(
-            row=3, column=0, columnspan=2, sticky="w", padx=(0, 4)
+        ui_style.build_button_bar(page, 0, [
+            ("Connect", self._connect_stage),
+            ("Initialize", self._initialize_stage),
+            ("Home", self._home_stage),
+        ])
+        # Green for as long as a connection is up, not just while a status
+        # word like "Moving..." happens to be showing.
+        self._status_block = ui_style.StatusBlock(
+            page, 1, self.stage_status_var,
+            is_running=lambda text: "connecting" in text or bool(self._stage and self._stage.connected),
         )
-        ttk.Label(stage, text="Objects:", font=("Segoe UI", 8)).grid(row=4, column=0, sticky="nw", pady=(4, 0))
-        ttk.Label(stage, textvariable=self.objects_var, wraplength=500, justify="left", font=("Segoe UI", 8)).grid(
-            row=4, column=1, sticky="w", pady=(4, 0)
-        )
-        self._add_row(stage, 5, "Group state:", ttk.Label(stage, textvariable=self.group_state_var))
 
-        manual = ttk.LabelFrame(self, text="Manual control")
-        manual.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
-        manual.columnconfigure(1, weight=1)
-        self._add_row(manual, 0, "Position (rel. zero):", ttk.Label(manual, textvariable=self.current_position_var))
+        stage = ui_style.build_section(page, 2, "Stage (Newport XPS-D)")
+        ui_style.add_form_row(stage, 0, "IP:", ttk.Entry(stage, textvariable=self.stage_ip_var, width=18))
+        ui_style.add_form_row(stage, 1, "Group name:", ttk.Entry(stage, textvariable=self.group_var, width=18))
+        objects_row = ui_style.add_stat_rows(stage, [("Group state:", self.group_state_var)], start_row=2)
+        ttk.Label(stage, text="Objects:", font=ui_style.SMALL_FONT).grid(
+            row=objects_row, column=0, sticky="nw", pady=(6, 0)
+        )
+        ui_style.add_note(stage, objects_row + 1, textvariable=self.objects_var, pady=0)
+
+        manual = ui_style.build_section(page, 3, "Manual control", pady=0)
+        ui_style.add_stat_rows(manual, [("Position (rel. zero):", self.current_position_var)])
         zero_entry = ttk.Entry(manual, textvariable=self.zero_display_var, width=12)
         zero_entry.bind("<Return>", self._commit_zero_edit)
         zero_entry.bind("<FocusOut>", self._commit_zero_edit)
-        self._add_row(manual, 1, "Saved zero (raw):", zero_entry)
-        self._add_row(manual, 2, "Move to:", ttk.Entry(manual, textvariable=self.move_target_var, width=12))
-        move_buttons = ttk.Frame(manual)
-        move_buttons.grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 4))
-        ttk.Button(move_buttons, text="Move", command=self._move_stage).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(move_buttons, text="Refresh", command=self._refresh_position).grid(row=0, column=1, padx=(0, 6))
-        ttk.Button(move_buttons, text="Set current as Zero", command=self._set_zero).grid(row=0, column=2)
-        ttk.Label(
-            manual,
-            text='A Move failing with "Not allowed action" usually means the stage '
-                 "hasn't been initialized/homed yet -- try Initialize, then Home. This "
-                 "connection is shared with Parameter Sweep.",
-            font=("Segoe UI", 8), wraplength=500, justify="left",
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=(0, 4), pady=(0, 4))
+        ui_style.add_form_row(manual, 1, "Saved zero (raw):", zero_entry)
+        ui_style.add_form_row(manual, 2, "Move to:", ttk.Entry(manual, textvariable=self.move_target_var, width=12))
+        ui_style.build_button_bar(manual, 3, [
+            ("Move", self._move_stage),
+            ("Refresh", self._refresh_position),
+            ("Set Current as Zero", self._set_zero),
+        ], pady=(4, 6), columnspan=2)
+        ui_style.add_note(
+            manual, 4,
+            'A Move failing with "Not allowed action" usually means the stage '
+            "hasn't been initialized/homed yet -- try Initialize, then Home. This "
+            "connection is shared with Parameter Sweep.",
+        )
 
     # ---- stage connection / manual control (background threads) ----------
 
@@ -264,7 +257,7 @@ class StageInterface(ttk.Frame):
 
     def _commit_zero_edit(self, _event=None):
         """The "Saved zero" field is directly editable (not just settable
-        via "Set current as Zero") -- commits on Enter or losing focus.
+        via "Set Current as Zero") -- commits on Enter or losing focus.
         Invalid text just reverts to the last valid value rather than
         raising, same as every other numeric field in this app."""
         try:

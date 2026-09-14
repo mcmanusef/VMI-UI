@@ -4,13 +4,13 @@ import shutil
 import time
 from datetime import date
 import qtk as tk
-from qtk import ttk
+from qtk import ttk, filedialog
 
 import requests
 
 import serval_client
-import shared_state
 import time_estimate
+import ui_style
 
 
 class CollectionInterface(ttk.Frame):
@@ -55,60 +55,34 @@ class CollectionInterface(ttk.Frame):
         return rf"C:\DATA\{date.today().strftime('%Y%m%d')}\test"
 
     def _build_ui(self):
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        # No data view on this tab, so its controls get the whole tab as a
+        # page instead of a sidebar next to an empty main area.
+        page = ui_style.build_page_layout(self)
 
-        form = ttk.Frame(self)
-        form.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 0))
-        form.columnconfigure(1, weight=1)
-
-        self._add_row(form, 0, "Frame time (s):", ttk.Entry(form, textvariable=self.frame_time_var))
-        self._add_row(form, 1, "Run duration (s):", ttk.Entry(form, textvariable=self.run_duration_var))
-        self._add_row(form, 2, "Save folder:", ttk.Entry(form, textvariable=self.save_folder_var))
-
-        meta = ttk.LabelFrame(self, text="Metadata")
-        meta.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
-        meta.columnconfigure(1, weight=1)
-
-        self._add_row(meta, 0, "Target:", ttk.Entry(meta, textvariable=self.target_var))
-        self._add_row(meta, 1, "Target Pressure:", ttk.Entry(meta, textvariable=self.target_pressure_var))
-        self._add_row(meta, 2, "Background Pressure:", ttk.Entry(meta, textvariable=self.background_pressure_var))
-        self._add_row(meta, 3, "Power:", ttk.Entry(meta, textvariable=self.power_var))
-        self._add_row(meta, 4, "Spot Size:", ttk.Entry(meta, textvariable=self.spot_size_var))
-        self._add_row(meta, 5, "Polarization:", ttk.Entry(meta, textvariable=self.polarization_var))
-        self._add_row(meta, 6, "Wavelength:", ttk.Entry(meta, textvariable=self.wavelength_var))
-
-        ttk.Label(meta, text="Notes:").grid(row=7, column=0, sticky="nw", padx=(0, 8), pady=4)
-        self.notes = tk.Text(meta, wrap="word", height=5)
-        self.notes.grid(row=7, column=1, sticky="nsew", pady=4)
-        meta.rowconfigure(7, weight=1)
-        shared_state.wire_notes_widget(self.notes)
-
-        buttons = ttk.Frame(self)
-        buttons.grid(row=2, column=0, sticky="w", padx=10, pady=(0, 10))
-        ttk.Button(buttons, text="Start Run", command=self.start_run).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(buttons, text="Stop Run", command=self.stop_run).grid(row=0, column=1)
-
-        status = ttk.Frame(self)
-        status.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 10))
-        status.columnconfigure(1, weight=1)
-        ttk.Label(status, text="Status:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Label(status, textvariable=self.status_var).grid(row=0, column=1, sticky="w")
-        self._progress = ttk.Progressbar(
-            status,
-            variable=self._progress_var,
-            maximum=100.0,
-            mode="determinate",
-            length=240,
-        )
-        self._progress.grid(row=0, column=2, sticky="e", padx=(12, 0))
-        ttk.Label(status, textvariable=self.eta_var, font=("Segoe UI", 8)).grid(
-            row=1, column=0, columnspan=3, sticky="w", pady=(4, 0)
+        ui_style.build_button_bar(page, 0, [("Start", self.start_run), ("Stop", self.stop_run)])
+        self._status_block = ui_style.StatusBlock(
+            page, 1, self.status_var, progress_var=self._progress_var, eta_var=self.eta_var
         )
 
-    def _add_row(self, parent, row, label, widget):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        widget.grid(row=row, column=1, sticky="ew", pady=4)
+        params = ui_style.build_section(page, 2, "Acquisition parameters")
+        ui_style.add_form_row(params, 0, "Frame time (s):", ttk.Entry(params, textvariable=self.frame_time_var, width=18))
+        ui_style.add_form_row(
+            params, 1, "Run duration (s):", ttk.Entry(params, textvariable=self.run_duration_var, width=18)
+        )
+        ui_style.add_form_row(
+            params, 2, "Save folder:", ui_style.build_path_field(params, self.save_folder_var, self._browse_folder)
+        )
+
+        self.notes = ui_style.build_metadata_section(page, 3, self, pady=0)
+
+    def _browse_folder(self):
+        chosen = filedialog.askdirectory(
+            initialdir=self.save_folder_var.get().strip() or ".",
+            title="Choose save folder",
+            parent=self,
+        )
+        if chosen:
+            self.save_folder_var.set(chosen)
 
     def _server_url(self):
         url = ""

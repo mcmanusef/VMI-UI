@@ -241,7 +241,6 @@ class HistogramPlotPanel(ttk.Frame):
         focus_box.grid(row=0, column=9, padx=(6, 6))
         focus_box.bind("<<ComboboxSelected>>", self._on_focus_choice)
         ttk.Button(plot_opts, textvariable=self.focus_button_var, command=self._toggle_focus).grid(row=0, column=10)
-        ttk.Label(plot_opts, text="(double-click a plot to focus / restore)").grid(row=0, column=11, padx=(10, 0))
 
         # A full horizontal rule sets the gamma cluster apart from the
         # log-scale/single-plot row above it, so the bar reads as three
@@ -264,9 +263,6 @@ class HistogramPlotPanel(ttk.Frame):
         gamma_scale.grid(row=2, column=2, columnspan=3, sticky="w", padx=(6, 6))
         ttk.Label(plot_opts, textvariable=self.gamma_label_var, width=5).grid(row=2, column=5, sticky="w")
         ttk.Button(plot_opts, text="Reset", command=self._reset_gamma).grid(row=2, column=6, sticky="w", padx=(6, 0))
-        ttk.Label(
-            plot_opts, text="(1.0 = linear; applies when log scale is off)"
-        ).grid(row=2, column=7, columnspan=4, sticky="w", padx=(10, 0))
 
     def _build_hist_frame(self, container):
         # Two separate titled/bordered tables (QGroupBox via ttk.LabelFrame)
@@ -276,38 +272,25 @@ class HistogramPlotPanel(ttk.Frame):
         # table's Min/Max headers can carry the right unit for its rows.
         px_frame = ttk.LabelFrame(container, text="Pixel/Cluster histograms")
         px_frame.grid(row=0, column=0, sticky="ew")
-        self._build_hist_table(
-            px_frame, PLOT_SPECS[:3], unit="px",
-            note="Bounds apply to both axes. Counts/pixel: max <= min autoscales range; "
-                 "bins <= 0 autoscales bin count.",
-        )
+        self._build_hist_table(px_frame, PLOT_SPECS[:3], unit="px")
 
         time_frame = ttk.LabelFrame(container, text="Time histograms")
         time_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        self._build_hist_table(
-            time_frame, PLOT_SPECS[3:], unit="ns",
-            note="Cluster t bounds also gate which clusters enter the cluster map. "
-                 "Changes apply on the next frame.",
-        )
+        self._build_hist_table(time_frame, PLOT_SPECS[3:], unit="ns")
 
-    def _build_hist_table(self, frame, specs, unit, note):
+    def _build_hist_table(self, frame, specs, unit):
         ttk.Label(frame, text="Plot").grid(row=0, column=0, sticky="w", padx=(6, 4), pady=(4, 2))
         ttk.Label(frame, text="Bins").grid(row=0, column=1, pady=(4, 2))
         ttk.Label(frame, text=f"Min ({unit})").grid(row=0, column=2, pady=(4, 2))
         ttk.Label(frame, text=f"Max ({unit})").grid(row=0, column=3, pady=(4, 2))
-        row_idx = 0
+        last_row = len(specs)
         for row_idx, (key, label) in enumerate(specs, start=1):
-            ttk.Label(frame, text=label).grid(row=row_idx, column=0, sticky="w", padx=(6, 4), pady=1)
+            bottom_pad = 4 if row_idx == last_row else 1
+            ttk.Label(frame, text=label).grid(row=row_idx, column=0, sticky="w", padx=(6, 4), pady=(1, bottom_pad))
             for offset, field in enumerate(("bins", "min", "max"), start=1):
                 ttk.Entry(frame, textvariable=self._hist_vars[key][field], width=9).grid(
-                    row=row_idx, column=offset, padx=2, pady=1
+                    row=row_idx, column=offset, padx=2, pady=(1, bottom_pad)
                 )
-        # Deliberately not word-wrapped (Qt's QGridLayout doesn't reliably
-        # give a wrapped QLabel enough row height through this many nested
-        # custom containers) -- kept short enough to read as one line.
-        ttk.Label(frame, text=note, justify="left").grid(
-            row=row_idx + 1, column=0, columnspan=4, sticky="w", padx=6, pady=(4, 4)
-        )
 
     def _build_axes(self):
         self._glw.clear()  # destroys child items, so the old TextItems go with it
@@ -358,7 +341,7 @@ class HistogramPlotPanel(ttk.Frame):
         self._focus_key = key
         if key is not None:
             self.focus_choice_var.set(PLOT_LABELS[key])
-            self.focus_button_var.set("Show all")
+            self.focus_button_var.set("Show All")
         else:
             self.focus_button_var.set("Focus")
         self._build_axes()

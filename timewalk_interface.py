@@ -12,6 +12,7 @@ from PyQt5 import QtCore
 
 import app_settings
 import serval_client
+import ui_style
 from qt_plots import hist_to_rgba, mpl_color, ZoomFocusViewBox
 from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection, generate_correction
 from tpx_processing import decode_tpx3, sort_tdcs, group_pixels_by_pulse
@@ -78,81 +79,72 @@ class TimewalkInterface(ttk.Frame):
     # ---- UI construction --------------------------------------------------
 
     def _build_ui(self):
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
+        sidebar, main = ui_style.build_sidebar_layout(self)
+        main.rowconfigure(0, weight=1)
+        # Trailing empty row keeps content packed at the top as sections
+        # collapse (see Monitored Acquisition).
+        sidebar.rowconfigure(5, weight=1)
 
-        controls = ttk.Frame(self)
-        controls.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
-        controls.columnconfigure(11, weight=1)
+        ui_style.build_button_bar(sidebar, 0, [
+            ("Start", self.start),
+            ("Stop", self.stop),
+            ("Reset Accumulation", self.reset_accumulation),
+        ])
+        self._status_block = ui_style.StatusBlock(sidebar, 1, self.status_var)
 
-        ttk.Label(controls, text="Frame rate (fps):").grid(row=0, column=0, sticky="w")
-        ttk.Entry(controls, textvariable=self.frame_rate_var, width=10).grid(row=0, column=1, padx=(6, 12))
-
-        ttk.Label(controls, text="Max packets:").grid(row=0, column=2, sticky="w")
-        ttk.Entry(controls, textvariable=self.max_packets_var, width=10).grid(row=0, column=3, padx=(6, 12))
-
-        ttk.Checkbutton(controls, text="Use test file", variable=self.use_test_file_var).grid(
-            row=0, column=4, padx=(0, 6)
+        params = ui_style.build_section(sidebar, 2, "Acquisition parameters")
+        ui_style.add_form_row(
+            params, 0, "Frame rate (fps):", ttk.Entry(params, textvariable=self.frame_rate_var, width=18)
         )
-        ttk.Entry(controls, textvariable=self.test_file_var, width=32).grid(row=0, column=5, padx=(0, 12))
-
-        ttk.Button(controls, text="Start", command=self.start).grid(row=0, column=6, padx=(0, 6))
-        ttk.Button(controls, text="Stop", command=self.stop).grid(row=0, column=7, padx=(0, 6))
-        ttk.Button(controls, text="Reset accumulation", command=self.reset_accumulation).grid(
-            row=0, column=8, padx=(0, 12)
+        ui_style.add_form_row(params, 1, "Max packets:", ttk.Entry(params, textvariable=self.max_packets_var, width=18))
+        ttk.Checkbutton(params, text="Use test file", variable=self.use_test_file_var).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
-
-        ttk.Label(controls, textvariable=self.status_var).grid(row=0, column=9, sticky="w")
-
-        settings = ttk.LabelFrame(self, text="Histogram settings / correction fit")
-        settings.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
-
-        ttk.Label(settings, text="ToT bins").grid(row=0, column=1, padx=2, pady=(4, 2))
-        ttk.Label(settings, text="ToT min").grid(row=0, column=2, padx=2, pady=(4, 2))
-        ttk.Label(settings, text="ToT max").grid(row=0, column=3, padx=2, pady=(4, 2))
-        ttk.Label(settings, text="t bins").grid(row=0, column=4, padx=2, pady=(4, 2))
-        ttk.Label(settings, text="t min").grid(row=0, column=5, padx=2, pady=(4, 2))
-        ttk.Label(settings, text="t max").grid(row=0, column=6, padx=2, pady=(4, 2))
-        ttk.Label(settings, text="ToT vs t (ns)").grid(row=1, column=0, sticky="w", padx=(6, 4))
-        ttk.Entry(settings, textvariable=self.tot_bins_var, width=8).grid(row=1, column=1, padx=2)
-        ttk.Entry(settings, textvariable=self.tot_min_var, width=8).grid(row=1, column=2, padx=2)
-        ttk.Entry(settings, textvariable=self.tot_max_var, width=8).grid(row=1, column=3, padx=2)
-        ttk.Entry(settings, textvariable=self.t_bins_var, width=8).grid(row=1, column=4, padx=2)
-        ttk.Entry(settings, textvariable=self.t_min_var, width=8).grid(row=1, column=5, padx=2)
-        ttk.Entry(settings, textvariable=self.t_max_var, width=8).grid(row=1, column=6, padx=2)
-        ttk.Checkbutton(settings, text="Log color", variable=self.log_color_var, command=self._redraw).grid(
-            row=1, column=7, padx=(12, 6)
+        ui_style.build_path_field(params, self.test_file_var, self._browse_test_file).grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
 
-        ttk.Label(settings, text="Min counts/column:").grid(row=2, column=0, sticky="w", padx=(6, 4), pady=(6, 2))
-        ttk.Entry(settings, textvariable=self.min_counts_var, width=8).grid(row=2, column=1, pady=(6, 2))
-        ttk.Label(settings, text="Anchor top % of ToT:").grid(row=2, column=2, sticky="w", padx=(12, 4), pady=(6, 2))
-        ttk.Entry(settings, textvariable=self.anchor_frac_var, width=8).grid(row=2, column=3, pady=(6, 2))
-        ttk.Button(settings, text="Generate Correction", command=self.generate_correction).grid(
-            row=2, column=4, columnspan=2, padx=(12, 6), pady=(6, 2)
+        # Set-once bins/bounds start collapsed, same as the plot panel's.
+        hist = ui_style.build_section(sidebar, 3, "Histogram bins / bounds", collapsed=True, columns_stretch=None)
+        ttk.Label(hist, text="Axis").grid(row=0, column=0, sticky="w", padx=(6, 4), pady=(4, 2))
+        ttk.Label(hist, text="Bins").grid(row=0, column=1, pady=(4, 2))
+        ttk.Label(hist, text="Min").grid(row=0, column=2, pady=(4, 2))
+        ttk.Label(hist, text="Max").grid(row=0, column=3, pady=(4, 2))
+        axes = [
+            ("ToT", self.tot_bins_var, self.tot_min_var, self.tot_max_var),
+            ("t (ns)", self.t_bins_var, self.t_min_var, self.t_max_var),
+        ]
+        for row_idx, (label, *field_vars) in enumerate(axes, start=1):
+            bottom_pad = 4 if row_idx == len(axes) else 1
+            ttk.Label(hist, text=label).grid(row=row_idx, column=0, sticky="w", padx=(6, 4), pady=(1, bottom_pad))
+            for col, var in enumerate(field_vars, start=1):
+                ttk.Entry(hist, textvariable=var, width=9).grid(row=row_idx, column=col, padx=2, pady=(1, bottom_pad))
+        ttk.Checkbutton(hist, text="Log color scale", variable=self.log_color_var, command=self._redraw).grid(
+            row=len(axes) + 1, column=0, columnspan=4, sticky="w", padx=(6, 0), pady=(4, 0)
         )
 
-        ttk.Label(settings, text="Correction file:").grid(row=3, column=0, sticky="w", padx=(6, 4), pady=(2, 6))
-        ttk.Entry(settings, textvariable=self.correction_path_var, width=40).grid(
-            row=3, column=1, columnspan=4, sticky="ew", pady=(2, 6)
+        fit = ui_style.build_section(sidebar, 4, "Correction fit", pady=0)
+        ui_style.add_form_row(
+            fit, 0, "Min counts per column:", ttk.Entry(fit, textvariable=self.min_counts_var, width=18)
         )
-        ttk.Button(settings, text="Save As...", command=self.save_correction).grid(row=3, column=5, padx=4, pady=(2, 6))
-        ttk.Button(settings, text="Load...", command=self.load_correction).grid(row=3, column=6, padx=4, pady=(2, 6))
-
-        ttk.Label(settings, textvariable=self.correction_info_var, wraplength=900, justify="left").grid(
-            row=4, column=0, columnspan=8, sticky="w", padx=6, pady=(0, 4)
+        ui_style.add_form_row(
+            fit, 1, "Anchor top % of ToT:", ttk.Entry(fit, textvariable=self.anchor_frac_var, width=18)
         )
-
-        plot_frame = ttk.Frame(self)
-        plot_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 10))
-        plot_frame.rowconfigure(0, weight=1)
-        plot_frame.columnconfigure(0, weight=1)
+        ui_style.build_button_bar(
+            fit, 2, [("Generate Correction", self.generate_correction)], pady=(4, 6), columnspan=2
+        )
+        ui_style.add_form_row(fit, 3, "Correction file:", ui_style.build_path_field(fit, self.correction_path_var))
+        ui_style.build_button_bar(
+            fit, 4, [("Save As...", self.save_correction), ("Load...", self.load_correction)],
+            pady=(4, 6), columnspan=2,
+        )
+        ui_style.add_note(fit, 5, textvariable=self.correction_info_var)
 
         self._glw = pg.GraphicsLayoutWidget()
         self._plot_hist = self._glw.addPlot(row=0, col=0, viewBox=ZoomFocusViewBox())
         self._plot_hist.addLegend()
         self._plot_corr = self._glw.addPlot(row=0, col=1, viewBox=ZoomFocusViewBox())
-        grid_into(self._glw, plot_frame, row=0, column=0, sticky="nsew")
+        grid_into(self._glw, main, row=0, column=0, sticky="nsew")
 
     # ---- settings -----------------------------------------------------
 
@@ -174,6 +166,17 @@ class TimewalkInterface(ttk.Frame):
         self._correction = None
         self.correction_info_var.set("No correction generated yet.")
         self._redraw()
+
+    def _browse_test_file(self):
+        initial = self.test_file_var.get().strip()
+        chosen = filedialog.askopenfilename(
+            title="Choose test file",
+            initialdir=str(pathlib.Path(initial).parent) if initial else None,
+            filetypes=[("TPX3", "*.tpx3")],
+            parent=self,
+        )
+        if chosen:
+            self.test_file_var.set(chosen)
 
     # ---- server / worker (mirrors the Diagnostics tab's file-per-exposure loop) --
 
@@ -461,7 +464,8 @@ class TimewalkInterface(ttk.Frame):
         self._plot_hist.clear()
         self._plot_corr.clear()
 
-        if self._hist2d is not None and self._hist2d.sum() > 0:
+        has_hist = self._hist2d is not None and self._hist2d.sum() > 0
+        if has_hist:
             x0, x1 = self._tot_edges[0], self._tot_edges[-1]
             y0, y1 = self._t_edges[0], self._t_edges[-1]
             img = pg.ImageItem(hist_to_rgba(self._hist2d, log=self.log_color_var.get()))
@@ -486,13 +490,20 @@ class TimewalkInterface(ttk.Frame):
             self._plot_corr.addItem(
                 pg.InfiniteLine(pos=0.0, angle=0, pen=pg.mkPen("gray", width=0.8, style=QtCore.Qt.DashLine))
             )
-            self._plot_corr.setTitle("Fitted correction")
-            self._plot_corr.setLabel("bottom", "ToT")
-            self._plot_corr.setLabel("left", "Correction subtracted from t (ns)")
-        else:
-            self._plot_corr.setTitle("Fitted correction (none yet)")
-            self._plot_corr.setLabel("bottom", "ToT")
-            self._plot_corr.setLabel("left", "Correction subtracted from t (ns)")
+        self._plot_corr.setTitle("Fitted correction")
+        self._plot_corr.setLabel("bottom", "ToT")
+        self._plot_corr.setLabel("left", "Correction subtracted from t (ns)")
 
         self._plot_hist.autoRange()
         self._plot_corr.autoRange()
+
+        # clear() above removes the placeholders too, so they're re-added
+        # on every redraw.
+        ui_style.show_empty_placeholder(
+            self._plot_hist, ui_style.add_empty_placeholder(self._plot_hist), not has_hist
+        )
+        ui_style.show_empty_placeholder(
+            self._plot_corr,
+            ui_style.add_empty_placeholder(self._plot_corr, "No correction yet — press Generate Correction"),
+            self._correction is None,
+        )

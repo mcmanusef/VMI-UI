@@ -4,20 +4,16 @@ import threading
 import time
 from queue import Queue, Empty
 
-from PyQt5 import QtCore, QtGui, QtWidgets
-
 import qtk as tk
 from qtk import ttk, messagebox, filedialog
 
 import app_settings
 import cv4_writer
 import serval_client
-import shared_state
 import time_estimate
-from collapsible_frame import CollapsibleFrame, FLUSH_BACKGROUND, set_background
+import ui_style
 from cv4_writer import Cv4Writer
 from plot_panel import HistogramPlotPanel
-from scrollable_frame import ScrollableFrame
 from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection, apply_timewalk_correction
 from tpx_processing import (
     decode_tpx3,
@@ -36,42 +32,6 @@ from tpx_processing import (
     summarize_records,
     merge_stats,
 )
-
-
-class _PathEntryFilter(QtCore.QObject):
-    """Shows the full path while its entry has focus (for editing/reading
-    exactly), and a middle-elided version -- plus the full path as a
-    tooltip -- once focus leaves. Middle-eliding rather than the naive
-    start/end truncation a plain QLineEdit does keeps both the
-    informative filename/leaf tail and the drive/share head visible."""
-
-    def __init__(self, entry, var):
-        super().__init__(entry)
-        self._entry = entry
-        self._var = var
-        var.trace_add("write", self._refresh)
-        entry.installEventFilter(self)
-        self._refresh()
-
-    def eventFilter(self, _obj, event):
-        et = event.type()
-        if et == QtCore.QEvent.FocusIn:
-            self._entry.setText(str(self._var.get()))
-        elif et in (QtCore.QEvent.FocusOut, QtCore.QEvent.Resize):
-            self._refresh()
-        return False
-
-    def _refresh(self, *_args):
-        entry, var = self._entry, self._var
-        full = str(var.get())
-        entry.setToolTip(full)
-        if entry.hasFocus():
-            return
-        metrics = QtGui.QFontMetrics(entry.font())
-        width = max(entry.width() - 8, 20)
-        elided = metrics.elidedText(full, QtCore.Qt.ElideMiddle, width)
-        if entry.text() != elided:
-            entry.setText(elided)
 
 
 class AcquisitionInterface(ttk.Frame):
@@ -159,51 +119,10 @@ class AcquisitionInterface(ttk.Frame):
     # ---- UI construction --------------------------------------------------
 
     def _build_ui(self):
-        self.columnconfigure(1, weight=1)
-        self.rowconfigure(0, weight=1)
-        # Qt's default QGridLayout margins would otherwise leave "Controls"
-        # (and its divider rule) inset from this tab's true edges; the
-        # default column *spacing* (separate from margins) would otherwise
-        # leave a small gap between "Controls" and the plots next to it.
-        self.layout().setContentsMargins(0, 0, 0, 0)
-        self.layout().setSpacing(0)
-
-        # Collapsing this hands the whole sidebar's width back to the
-        # plots -- Qt excludes hidden widgets from layout sizing, so the
-        # column shrinks to just the "Controls" toggle. flush=True: a
-        # plain sidebar reaching the tab's edges, set off from the plots
-        # by a single rule on its right edge instead of sitting as an
-        # inset bordered box; vertical_label=True: the toggle reads
-        # top-to-bottom as a narrow strip instead of a bar across the top.
-        sidebar_section = CollapsibleFrame(
-            self, text="Controls", flush=True, separator="right", vertical_label=True,
-        )
-        sidebar_section.grid(row=0, column=0, sticky="nsew")
-        sidebar_section.body.columnconfigure(0, weight=1)
-        sidebar_section.body.rowconfigure(0, weight=1)
-
-        # Wide enough for the sidebar's widest row (the button bar) plus the
-        # vertical scrollbar that appears once every section is expanded --
-        # the default 300 clips content with no way to reach it, since the
-        # horizontal scrollbar is intentionally off.
-        sidebar = ScrollableFrame(sidebar_section.body, width=400)
-        sidebar.grid(row=0, column=0, sticky="nsew")
-        # CollapsibleFrame colors itself; the ScrollableFrame nested inside
-        # it needs the same light grey explicitly, same reason as always --
-        # QScrollArea/its viewport don't inherit a background on their own.
-        set_background(sidebar, FLUSH_BACKGROUND)
-        set_background(sidebar.viewport(), FLUSH_BACKGROUND)
-
-        main = ttk.Frame(self)
-        main.grid(row=0, column=1, sticky="nsew")
-        main.columnconfigure(0, weight=1)
+        sidebar, main = ui_style.build_sidebar_layout(self)
         main.rowconfigure(0, weight=1)
-        # Same default-QGridLayout-margin issue as everywhere else -- left
-        # the plot panel (and "Plot options"' divider rule) inset from
-        # main's own true bounds.
-        main.layout().setContentsMargins(0, 0, 0, 0)
 
-        self._build_sidebar(sidebar.body)
+        self._build_sidebar(sidebar)
 
         self._plot_panel = HistogramPlotPanel(
             main,
@@ -220,123 +139,37 @@ class AcquisitionInterface(ttk.Frame):
         # than leftover space landing inside one of the rows above.
         sidebar.rowconfigure(5, weight=1)
 
-        buttons = ttk.Frame(sidebar)
-        buttons.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(buttons, text="Start", command=self.start).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(buttons, text="Stop", command=self.finish_and_stop).grid(row=0, column=1, padx=(0, 8))
-        # A separator plus extra padding sets "Force Stop" apart from the
-        # normal Start/Stop pair, so a misaimed click on Stop doesn't land
-        # on the button that aborts in-flight frames instead of finishing
-        # them cleanly.
-        ttk.Separator(buttons, orient="vertical").grid(row=0, column=2, sticky="ns", padx=(0, 10))
-        force_stop_btn = ttk.Button(buttons, text="Force Stop", command=self.stop)
-        force_stop_btn.grid(row=0, column=3)
-        force_stop_btn.setStyleSheet(
-            "QPushButton {"
-            "  background-color: #c62828; color: white; font-weight: bold;"
-            "  border: 1px solid #8e0000; border-radius: 3px; padding: 4px 10px;"
-            "}"
-            "QPushButton:hover { background-color: #d32f2f; }"
-            "QPushButton:pressed { background-color: #8e0000; }"
+        # "Force Stop" aborts in-flight frames; the normal Stop lets them
+        # finish processing cleanly -- hence the danger styling/separation.
+        ui_style.build_button_bar(
+            sidebar, 0, [("Start", self.start), ("Stop", self.finish_and_stop)], danger=("Force Stop", self.stop),
+        )
+        self._status_block = ui_style.StatusBlock(
+            sidebar, 1, self.status_var, progress_var=self._progress_var, eta_var=self.eta_var
         )
 
-        status = ttk.Frame(sidebar)
-        status.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        status_head = ttk.Frame(status)
-        status_head.grid(row=0, column=0, sticky="w")
-        head_layout = status_head._own_layout()
-        self._status_badge = QtWidgets.QLabel(status_head)
-        self._status_badge.setFixedSize(10, 10)
-        head_layout.addWidget(self._status_badge, 0, 0, QtCore.Qt.AlignVCenter)
-        ttk.Label(status_head, textvariable=self.status_var, wraplength=210, justify="left").grid(
-            row=0, column=1, sticky="w", padx=(6, 0)
-        )
-        self._progress = ttk.Progressbar(
-            status, variable=self._progress_var, maximum=100.0, mode="determinate", length=220
-        )
-        self._progress.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        eta_row = ttk.Frame(status)
-        eta_row.grid(row=2, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(eta_row, text="ETA:", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            eta_row, textvariable=self.eta_var, wraplength=190, justify="left", font=("Segoe UI", 8)
-        ).grid(row=0, column=1, sticky="w", padx=(4, 0))
-
-        self.status_var.trace_add("write", self._update_status_badge)
-        self._update_status_badge()
-
-        params_section = CollapsibleFrame(sidebar, text="Acquisition parameters")
-        params_section.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        params = params_section.body
-        params.columnconfigure(1, weight=1)
-
-        self._add_row(params, 0, "Frame time (s):", ttk.Entry(params, textvariable=self.frame_time_var, width=18))
-        self._add_row(
+        params = ui_style.build_section(sidebar, 2, "Acquisition parameters")
+        ui_style.add_form_row(params, 0, "Frame time (s):", ttk.Entry(params, textvariable=self.frame_time_var, width=18))
+        ui_style.add_form_row(
             params, 1, "Run duration (s):", ttk.Entry(params, textvariable=self.run_duration_var, width=18)
         )
-        ttk.Label(
-            params,
-            text="(0 = run until stopped; otherwise collects\nround(duration / frame time) frames, "
-                 "not just\nuntil that much wall time has passed)",
-            font=("Segoe UI", 8),
-            justify="left",
-        ).grid(row=2, column=1, sticky="w", pady=(0, 4))
-
-        folder_row = ttk.Frame(params)
-        folder_row.grid(row=3, column=1, sticky="ew", pady=4)
-        folder_row.columnconfigure(0, weight=1)
-        folder_entry = ttk.Entry(folder_row, textvariable=self.save_folder_var)
-        folder_entry.grid(row=0, column=0, sticky="ew")
-        ttk.Button(folder_row, text="...", width=3, command=self._browse_folder).grid(row=0, column=1, padx=(4, 0))
-        ttk.Label(params, text="Save folder:").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
-        self._wire_path_entry(folder_entry, self.save_folder_var)
-
+        ui_style.add_form_row(
+            params, 2, "Save folder:", ui_style.build_path_field(params, self.save_folder_var, self._browse_folder)
+        )
         ttk.Checkbutton(
             params, text="Keep raw TPX3 files", variable=self.keep_raw_var
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        ttk.Label(
-            params,
-            text="Unchecked: each raw file is deleted once it's\nclustered and appended to the .cv4 file.",
-            font=("Segoe UI", 8),
-            justify="left",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 4))
-
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ttk.Checkbutton(
             params, text="Apply timewalk correction before clustering", variable=self.timewalk_enabled_var
-        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        timewalk_row = ttk.Frame(params)
-        timewalk_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(2, 4))
-        timewalk_row.columnconfigure(0, weight=1)
-        timewalk_entry = ttk.Entry(timewalk_row, textvariable=self.timewalk_path_var)
-        timewalk_entry.grid(row=0, column=0, sticky="ew")
-        ttk.Button(timewalk_row, text="...", width=3, command=self._browse_timewalk).grid(
-            row=0, column=1, padx=(4, 0)
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ui_style.build_path_field(params, self.timewalk_path_var, self._browse_timewalk).grid(
+            row=5, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
-        self._wire_path_entry(timewalk_entry, self.timewalk_path_var)
 
-        meta_section = CollapsibleFrame(sidebar, text="Metadata")
-        meta_section.grid(row=3, column=0, sticky="ew", pady=(0, 8))
-        meta = meta_section.body
-        meta.columnconfigure(1, weight=1)
+        self.notes = ui_style.build_metadata_section(sidebar, 3, self)
 
-        self._add_row(meta, 0, "Target:", ttk.Entry(meta, textvariable=self.target_var))
-        self._add_row(meta, 1, "Target Pressure:", ttk.Entry(meta, textvariable=self.target_pressure_var))
-        self._add_row(meta, 2, "Background Pressure:", ttk.Entry(meta, textvariable=self.background_pressure_var))
-        self._add_row(meta, 3, "Power:", ttk.Entry(meta, textvariable=self.power_var))
-        self._add_row(meta, 4, "Spot Size:", ttk.Entry(meta, textvariable=self.spot_size_var))
-        self._add_row(meta, 5, "Polarization:", ttk.Entry(meta, textvariable=self.polarization_var))
-        self._add_row(meta, 6, "Wavelength:", ttk.Entry(meta, textvariable=self.wavelength_var))
-
-        ttk.Label(meta, text="Notes:").grid(row=7, column=0, sticky="nw", padx=(0, 8), pady=4)
-        self.notes = tk.Text(meta, wrap="word", height=4, width=24)
-        self.notes.grid(row=7, column=1, sticky="nsew", pady=4)
-        shared_state.wire_notes_widget(self.notes)
-
-        live_section = CollapsibleFrame(sidebar, text="Live totals")
-        live_section.grid(row=4, column=0, sticky="ew")
-        live = live_section.body
-        live.columnconfigure(1, weight=1)
-        stat_rows = [
+        live = ui_style.build_section(sidebar, 4, "Live totals", pady=0)
+        cv4_row = ui_style.add_stat_rows(live, [
             ("Frames collected:", self.collected_var),
             ("Frames processed:", self.frames_var),
             ("Pending (backlog):", self.pending_var),
@@ -346,44 +179,9 @@ class AcquisitionInterface(ttk.Frame):
             ("Clusters:", self.clusters_var),
             ("e-ToF events:", self.etof_var),
             ("i-ToF events:", self.itof_var),
-        ]
-        row = 0
-        for row, (label, var) in enumerate(stat_rows):
-            ttk.Label(live, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=1)
-            ttk.Label(live, textvariable=var).grid(row=row, column=1, sticky="w", pady=1)
-        cv4_row = row + 1
-        ttk.Label(live, text="cv4 file:", font=("Segoe UI", 8)).grid(row=cv4_row, column=0, sticky="nw", pady=(6, 0))
-        ttk.Label(
-            live, textvariable=self.cv4_path_var, font=("Segoe UI", 8), wraplength=220, justify="left"
-        ).grid(row=cv4_row + 1, column=0, columnspan=2, sticky="w")
-
-    def _add_row(self, parent, row, label, widget):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        widget.grid(row=row, column=1, sticky="ew", pady=4)
-
-    # Status text is free-form (set from ~15 call sites across start/stop/
-    # progress handling) rather than a structured state enum, so the badge
-    # color is inferred from keywords in the current text instead of
-    # threading a separate "state" value through every one of those sites.
-    _BADGE_RED_KEYWORDS = (
-        "error", "failed", "invalid", "required", "could not", "stopped", "canceled", "cancelled",
-    )
-    _BADGE_GREEN_KEYWORDS = ("collecting", "finishing", "processing", "stopping")
-
-    def _update_status_badge(self, *_args):
-        text = self.status_var.get().lower()
-        if any(k in text for k in self._BADGE_RED_KEYWORDS):
-            color = "#c62828"  # error / stopped
-        elif any(k in text for k in self._BADGE_GREEN_KEYWORDS):
-            color = "#2e7d32"  # running
-        else:
-            color = "#9e9e9e"  # idle / finished
-        self._status_badge.setStyleSheet(
-            f"background-color: {color}; border-radius: 5px; border: 1px solid rgba(0, 0, 0, 40);"
-        )
-
-    def _wire_path_entry(self, entry, var):
-        entry._path_filter = _PathEntryFilter(entry, var)
+        ])
+        ttk.Label(live, text="cv4 file:", font=ui_style.SMALL_FONT).grid(row=cv4_row, column=0, sticky="nw", pady=(6, 0))
+        ui_style.add_note(live, cv4_row + 1, textvariable=self.cv4_path_var, pady=0)
 
     def _browse_folder(self):
         chosen = filedialog.askdirectory(
