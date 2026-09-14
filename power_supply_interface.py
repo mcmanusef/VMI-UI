@@ -36,6 +36,7 @@ except ImportError:  # pyserial not installed -- tab loads but can't connect
     serial = None
 
 import app_settings
+import ui_style
 
 
 # Default channels to show; overridable from the connection bar.
@@ -310,14 +311,20 @@ class SY127Worker:
         self.sy.read_screen(settle=0.3, max_wait=2.0)
 
 
+def _format_setpoint(value):
+    """A V0 value as typed into the SY127: at most one decimal place, no
+    trailing zeros (1500.0 -> "1500", 742.25 -> "742.2")."""
+    return f"{round(value, 1):g}"
+
+
 # --- GUI: a single channel row ---------------------------------------------
 
 class ChannelRow:
     """One row in the channel table."""
 
     STATUS_COLORS = {
-        "ON": "#0a7", "OFF": "#888", "OVC": "#c80",
-        "OVV": "#c00", "UVV": "#c00", "UNV": "#c00", "TRIP": "#c00",
+        "ON": ui_style.RUNNING, "OFF": ui_style.IDLE, "OVC": ui_style.WARNING,
+        "OVV": ui_style.DANGER, "UVV": ui_style.DANGER, "UNV": ui_style.DANGER, "TRIP": ui_style.DANGER,
     }
 
     # Channel is effectively powered up (toggle turns it off) vs off
@@ -334,73 +341,92 @@ class ChannelRow:
         # (used at connect time and after each Apply).
         self._refresh_setpoints_pending = True
 
-        self.vmon_var = tk.StringVar(value="—")
-        self.imon_var = tk.StringVar(value="—")
+        self.vmon_var = tk.StringVar(value="--")
+        self.imon_var = tk.StringVar(value="--")
         self.v0_var = tk.StringVar()
         self.i0_var = tk.StringVar()
         self.rup_var = tk.StringVar()
         self.rdw_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="—")
+        self.status_var = tk.StringVar(value="--")
+
+        # Operator-facing name and move-together group, saved per channel ID
+        # so they survive reconnects, channel-list edits and restarts.
+        self.name_var = app_settings.persistent_var(None, tk.StringVar, f"power_supply.name.{channel}", "")
+        self.group_name_var = app_settings.persistent_var(
+            None, tk.StringVar, f"power_supply.group.{channel}", ""
+        )
 
         col = 0
-        ttk.Label(parent, text=channel, font=("TkDefaultFont", 10, "bold"),
-                  width=6, anchor="w").grid(row=row_index, column=col, padx=4, pady=3, sticky="w")
+        ttk.Label(parent, text=channel, width=6, anchor="w").grid(
+            row=row_index, column=col, padx=(6, 4), pady=1, sticky="w"
+        )
         col += 1
 
-        ttk.Label(parent, textvariable=self.vmon_var, width=8, anchor="e",
-                  foreground="#0a7", font=("TkFixedFont", 10, "bold")
-                  ).grid(row=row_index, column=col, padx=4, sticky="e")
+        ttk.Entry(parent, textvariable=self.name_var, width=10).grid(row=row_index, column=col, padx=2, pady=1)
         col += 1
 
-        self.v0_entry = ttk.Entry(parent, textvariable=self.v0_var, width=8, justify="right")
-        self.v0_entry.grid(row=row_index, column=col, padx=4)
+        ttk.Entry(parent, textvariable=self.group_name_var, width=5).grid(row=row_index, column=col, padx=2, pady=1)
+        col += 1
+
+        # Monitor readouts in a fixed-width font so digits line up.
+        ttk.Label(parent, textvariable=self.vmon_var, width=6, anchor="e",
+                  font=("TkFixedFont", 10)).grid(row=row_index, column=col, padx=2, pady=1, sticky="e")
+        col += 1
+
+        self.v0_entry = ttk.Entry(parent, textvariable=self.v0_var, width=6, justify="right")
+        self.v0_entry.grid(row=row_index, column=col, padx=2, pady=1)
         self.v0_entry.bind("<Return>", lambda e: self.apply())
         col += 1
 
-        ttk.Label(parent, textvariable=self.imon_var, width=8, anchor="e",
-                  foreground="#0a7", font=("TkFixedFont", 10, "bold")
-                  ).grid(row=row_index, column=col, padx=4, sticky="e")
+        ttk.Label(parent, textvariable=self.imon_var, width=6, anchor="e",
+                  font=("TkFixedFont", 10)).grid(row=row_index, column=col, padx=2, pady=1, sticky="e")
         col += 1
 
-        self.i0_entry = ttk.Entry(parent, textvariable=self.i0_var, width=8, justify="right")
-        self.i0_entry.grid(row=row_index, column=col, padx=4)
+        self.i0_entry = ttk.Entry(parent, textvariable=self.i0_var, width=6, justify="right")
+        self.i0_entry.grid(row=row_index, column=col, padx=2, pady=1)
         self.i0_entry.bind("<Return>", lambda e: self.apply())
         col += 1
 
-        self.rup_entry = ttk.Entry(parent, textvariable=self.rup_var, width=8, justify="right")
-        self.rup_entry.grid(row=row_index, column=col, padx=4)
+        self.rup_entry = ttk.Entry(parent, textvariable=self.rup_var, width=6, justify="right")
+        self.rup_entry.grid(row=row_index, column=col, padx=2, pady=1)
         self.rup_entry.bind("<Return>", lambda e: self.apply())
         col += 1
 
-        self.rdw_entry = ttk.Entry(parent, textvariable=self.rdw_var, width=8, justify="right")
-        self.rdw_entry.grid(row=row_index, column=col, padx=4)
+        self.rdw_entry = ttk.Entry(parent, textvariable=self.rdw_var, width=6, justify="right")
+        self.rdw_entry.grid(row=row_index, column=col, padx=2, pady=1)
         self.rdw_entry.bind("<Return>", lambda e: self.apply())
         col += 1
 
-        self.status_label = ttk.Label(parent, textvariable=self.status_var, width=8,
-                                      anchor="center", font=("TkDefaultFont", 10, "bold"))
-        self.status_label.grid(row=row_index, column=col, padx=4)
+        self.status_label = ttk.Label(parent, textvariable=self.status_var, width=6, anchor="center")
+        self.status_label.grid(row=row_index, column=col, padx=2, pady=1)
         col += 1
 
         ttk.Button(parent, text="ON", width=4,
                    command=lambda: self._request_status_change("ON")
-                   ).grid(row=row_index, column=col, padx=1)
+                   ).grid(row=row_index, column=col, padx=2, pady=1)
         col += 1
 
         ttk.Button(parent, text="OFF", width=4,
                    command=lambda: self._request_status_change("OFF")
-                   ).grid(row=row_index, column=col, padx=1)
+                   ).grid(row=row_index, column=col, padx=2, pady=1)
         col += 1
 
         ttk.Button(parent, text="Apply", width=6, command=self.apply
-                   ).grid(row=row_index, column=col, padx=8)
+                   ).grid(row=row_index, column=col, padx=(8, 6), pady=1)
+
+    @property
+    def label(self):
+        """Channel ID plus its name, if it has one -- for logs and the
+        Groups card."""
+        name = self.name_var.get().strip()
+        return f"{self.channel} ({name})" if name else self.channel
 
     def _request_status_change(self, desired):
         """The SY127 only knows how to toggle, so check the last-known status
         and only fire a toggle if it would move the channel toward the desired
         state -- avoids clicking 'ON' on an already-ON channel toggling it OFF."""
         current = self.status_var.get().split("/")[0]
-        if current in ("—", ""):
+        if current in ("--", ""):
             return  # no status seen yet; don't act blindly
         will_toggle = (
             (desired == "ON" and current in self._OFF_LIKE) or
@@ -411,10 +437,10 @@ class ChannelRow:
 
     def update(self, data):
         """Apply a fresh status snapshot to this row."""
-        self.vmon_var.set(data.get("vmon", "—"))
-        self.imon_var.set(data.get("imon", "—"))
+        self.vmon_var.set(data.get("vmon", "--"))
+        self.imon_var.set(data.get("imon", "--"))
 
-        st = data.get("status", "—")
+        st = data.get("status", "--")
         ramp = data.get("ramp", "")
         display_status = f"{st}/{ramp}" if ramp in ("RUP", "RDW") else st
         self.status_var.set(display_status)
@@ -479,9 +505,10 @@ class PowerSupplyInterface(ttk.Frame):
             self, value=app_settings.get("power_supply.channels", DEFAULT_CHANNELS)
         )
 
-        self.hv_enable_var = tk.StringVar(self, value="HV-ENABLE: ?")
-        self.active_var = tk.StringVar(self, value="")
-        self.status_var = tk.StringVar(self, value="Disconnected")
+        self.hv_enable_var = tk.StringVar(self, value="--")
+        self.active_var = tk.StringVar(self, value="--")
+        self.group_var = tk.StringVar(self, value="--")
+        self.status_var = tk.StringVar(self, value="Disconnected.")
 
         self._build_ui()
         self.after(self.POLL_MS, self._poll_queues)
@@ -511,93 +538,100 @@ class PowerSupplyInterface(ttk.Frame):
     # -- layout --
 
     def _build_ui(self):
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
+        sidebar, main = ui_style.build_sidebar_layout(self)
+        main.rowconfigure(2, weight=1)
+        # Trailing empty row keeps content packed at the top.
+        sidebar.rowconfigure(4, weight=1)
 
-        self._build_connection_bar()
-        self._build_channel_grid()
-        self._build_log()
-        self._build_status_bar()
+        self.connect_btn = ui_style.build_button_bar(sidebar, 0, [("Connect", self._toggle_connect)])[0]
+        # Green for as long as the serial connection is open, not just while
+        # a status word happens to be showing.
+        self._status_block = ui_style.StatusBlock(
+            sidebar, 1, self.status_var, is_running=lambda _text: self.sy is not None
+        )
+
+        connection = ui_style.build_section(sidebar, 2, "Connection")
+        for row, (label, var) in enumerate([
+            ("Port:", self.port_var),
+            ("Baud:", self.baud_var),
+            ("Parity (N/E/O):", self.parity_var),
+            ("Data bits:", self.bits_var),
+            ("Stop bits:", self.stop_var),
+        ]):
+            ui_style.add_form_row(connection, row, label, ttk.Entry(connection, textvariable=var, width=18))
+        ui_style.add_form_row(connection, 5, "Channels:", ttk.Entry(connection, textvariable=self.channels_var))
+
+        crate = ui_style.build_section(sidebar, 3, "Crate", pady=0)
+        ttk.Label(crate, text="HV enable:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=1)
+        self.hv_enable_label = ttk.Label(crate, textvariable=self.hv_enable_var)
+        self.hv_enable_label.grid(row=0, column=1, sticky="w", pady=1)
+        ui_style.add_stat_rows(crate, [
+            ("Active setpoint:", self.active_var),
+            ("Group:", self.group_var),
+        ], start_row=1)
+
+        self._grid_card = ui_style.build_card(main, 0, "Channels", sticky="new")
+        self._group_card = ui_style.build_card(main, 1, "Groups", sticky="new")
+        self._group_card.columnconfigure(0, weight=1)
+        self._grid = None
+        self._group_grid = None
+        self._group_lead_vars = {}
+        self._populate_channel_grid()
+
+        log_card = ui_style.build_card(main, 2, "Activity", pady=8)
+        log_card.rowconfigure(0, weight=1)
+        log_card.columnconfigure(0, weight=1)
+        self.log = tk.Text(log_card, height=6, wrap="word", font=("TkFixedFont", 9))
+        self.log.grid(row=0, column=0, sticky="nsew")
 
         if serial is None:
             self._log("pyserial is not installed -- 'pip install pyserial' to enable connecting.")
-            self.status_var.set("pyserial not installed")
-
-    def _build_connection_bar(self):
-        bar = ttk.LabelFrame(self, text="Connection")
-        bar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
-
-        for label, var, width in [
-            ("Port", self.port_var, 8),
-            ("Baud", self.baud_var, 6),
-            ("Parity", self.parity_var, 3),
-            ("Bits", self.bits_var, 3),
-            ("Stop", self.stop_var, 3),
-        ]:
-            ttk.Label(bar, text=f"{label}:").pack(side="left", padx=(8, 2))
-            ttk.Entry(bar, textvariable=var, width=width).pack(side="left")
-
-        ttk.Label(bar, text="Channels:").pack(side="left", padx=(8, 2))
-        ttk.Entry(bar, textvariable=self.channels_var, width=32).pack(side="left")
-
-        self.connect_btn = ttk.Button(bar, text="Connect", command=self._toggle_connect)
-        self.connect_btn.pack(side="left", padx=12)
-
-        self.hv_enable_label = ttk.Label(bar, textvariable=self.hv_enable_var,
-                                         font=("TkDefaultFont", 10, "bold"))
-        self.hv_enable_label.pack(side="left", padx=12)
-        ttk.Label(bar, textvariable=self.active_var, foreground="#666").pack(side="left", padx=4)
+            self.status_var.set("pyserial not installed.")
 
     def _parse_channels(self):
         return [c.strip().upper() for c in self.channels_var.get().replace(";", ",").split(",") if c.strip()]
 
-    def _build_channel_grid(self):
-        self._grid = ttk.LabelFrame(self, text="Channels")
-        self._grid.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
-        self._populate_channel_grid()
-
     def _populate_channel_grid(self):
-        for child in self._grid.winfo_children():
-            child.destroy()
+        # Rebuilt (e.g. after the channel list is edited) by swapping in a
+        # fresh inner frame, rather than destroying the old rows' widgets
+        # (and their padding containers) one by one.
+        if self._grid is not None:
+            self._grid.destroy()
+        self._grid = ttk.Frame(self._grid_card)
+        self._grid.grid(row=0, column=0, sticky="ew")
+        # 13 columns barely fit next to the sidebar; the card already
+        # insets the table, so the frame's own default margins would only
+        # push it past the main area's width.
+        ui_style.zero_margins(self._grid)
         self.rows = {}
 
-        headers = ["Channel", "V mon", "V0 set", "I mon", "I0 set",
-                   "Ramp Up", "Ramp Dn", "Status", "", "", ""]
+        headers = ["Channel", "Name", "Group", "V mon", "V0 set", "I mon", "I0 set",
+                   "Ramp up", "Ramp down", "Status", "", "", ""]
         for i, h in enumerate(headers):
-            ttk.Label(self._grid, text=h, font=("TkDefaultFont", 9, "bold"),
-                      anchor="center").grid(row=0, column=i, padx=4, pady=4, sticky="ew")
+            ttk.Label(self._grid, text=h, anchor="center").grid(
+                row=0, column=i, padx=(6, 4) if i == 0 else 2, pady=(4, 2), sticky="ew"
+            )
         ttk.Separator(self._grid, orient="horizontal").grid(
             row=1, column=0, columnspan=len(headers), sticky="ew", pady=2)
 
         channels = self._parse_channels()
         for i, ch in enumerate(channels):
-            self.rows[ch] = ChannelRow(
+            row = ChannelRow(
                 self._grid, i + 2, ch,
                 on_apply_cb=self._on_apply_params,
                 on_status_cb=self._on_toggle_status,
             )
+            row.name_var.trace_add("write", self._on_group_config_changed)
+            row.group_name_var.trace_add("write", self._on_group_config_changed)
+            self.rows[ch] = row
 
-        # Was overlaid on top of the channel grid (same cell, stacked via
-        # lift()) under tkinter; Qt's grid layout doesn't stack widgets in
-        # a cell, so this is its own row inside the "Channels" box instead.
-        ttk.Label(
-            self._grid,
-            text=("Edit V0 / I0 / Ramp values then click Apply (or press Enter "
-                  "in any field). ON / OFF buttons act immediately."),
-            foreground="#666", font=("TkDefaultFont", 9, "italic"),
-        ).grid(row=len(channels) + 2, column=0, columnspan=len(headers), sticky="w", padx=4, pady=(6, 2))
-
-    def _build_log(self):
-        log_frame = ttk.LabelFrame(self, text="Activity")
-        log_frame.grid(row=2, column=0, sticky="nsew", padx=8, pady=4)
-        log_frame.rowconfigure(0, weight=1)
-        log_frame.columnconfigure(0, weight=1)
-        self.log = tk.Text(log_frame, height=6, wrap="word", font=("TkFixedFont", 9))
-        self.log.grid(row=0, column=0, sticky="nsew")
-
-    def _build_status_bar(self):
-        ttk.Label(self, textvariable=self.status_var, anchor="w",
-                  relief="sunken", padding=(6, 2)).grid(row=3, column=0, sticky="ew")
+        ui_style.add_note(
+            self._grid, len(channels) + 2,
+            "Edit V0 / I0 / ramp values, then click Apply (or press Enter in any field). "
+            "ON / OFF act immediately. Name and Group are saved per channel.",
+            columnspan=len(headers), pady=(6, 4),
+        )
+        self._populate_group_grid()
 
     # -- connection management --
 
@@ -640,7 +674,7 @@ class PowerSupplyInterface(ttk.Frame):
         self.worker.start()
 
         self.connect_btn.config(text="Disconnect")
-        self.status_var.set(f"Connected to {self.port_var.get()} — initializing…")
+        self.status_var.set(f"Connected to {self.port_var.get()}. Initializing...")
         self._log(f"Connected to {self.port_var.get()}")
 
     def _disconnect(self):
@@ -654,27 +688,180 @@ class PowerSupplyInterface(ttk.Frame):
                 pass
             self.sy = None
         self.connect_btn.config(text="Connect")
-        self.status_var.set("Disconnected")
-        self.hv_enable_var.set("HV-ENABLE: ?")
+        self.status_var.set("Disconnected.")
+        self.hv_enable_var.set("--")
         self.hv_enable_label.config(foreground="#000")
-        self.active_var.set("")
+        self.active_var.set("--")
+        self.group_var.set("--")
         self._log("Disconnected")
 
     # -- callbacks from rows --
+
+    def _channel_label(self, channel):
+        row = self.rows.get(channel)
+        return row.label if row is not None else channel
 
     def _on_apply_params(self, channel, params):
         if self.worker is None:
             self._log("Not connected -- connect first.")
             return
         self.worker.queue_write(channel, params)
-        self._log(f"{channel}: queued {params}")
+        self._log(f"{self._channel_label(channel)}: queued {params}")
 
     def _on_toggle_status(self, channel):
         if self.worker is None:
             self._log("Not connected -- connect first.")
             return
         self.worker.queue_status_toggle(channel)
-        self._log(f"{channel}: queued status toggle")
+        self._log(f"{self._channel_label(channel)}: queued status toggle")
+
+    # -- channel groups --
+    #
+    # Channels sharing a Group name move together: "Capture Ratios" records
+    # each member's V0 as a ratio to the group's lead channel (its first
+    # member in table order), and Apply sets the lead to a new V0 and every
+    # other member to that value times its ratio. Ratios are stored rather
+    # than re-derived from the current setpoints on every Apply, so repeated
+    # moves (and one-decimal rounding) never drift the proportions.
+
+    GROUP_RATIOS_KEY = "power_supply.group_ratios"
+
+    def _groups(self):
+        """Group name -> member channel IDs, in table order (first = lead)."""
+        groups = {}
+        for ch, row in self.rows.items():
+            name = row.group_name_var.get().strip()
+            if name:
+                groups.setdefault(name, []).append(ch)
+        return groups
+
+    def _stored_ratios(self, group, members):
+        """The captured ratios for `group` as {channel: ratio}, or None if
+        none were captured or they were captured for a different lead or
+        set of channels than the group has now."""
+        stored = (app_settings.get(self.GROUP_RATIOS_KEY) or {}).get(group)
+        if not stored or stored.get("lead") != members[0] or set(stored.get("ratios", {})) != set(members):
+            return None
+        return stored["ratios"]
+
+    def _on_group_config_changed(self, *_args):
+        self._populate_group_grid()
+
+    def _populate_group_grid(self):
+        # Rebuilt on every Name/Group edit; typed Lead V0 values carry over.
+        lead_text = {group: var.get() for group, var in self._group_lead_vars.items()}
+        if self._group_grid is not None:
+            self._group_grid.destroy()
+        grid = self._group_grid = ttk.Frame(self._group_card)
+        grid.grid(row=0, column=0, sticky="ew")
+        grid.columnconfigure(1, weight=1)
+        self._group_lead_vars = {}
+
+        groups = self._groups()
+        if not groups:
+            ui_style.add_note(
+                grid, 0,
+                "No groups yet — type the same name into the Group column of two or more channels.",
+                columnspan=6, pady=(4, 4),
+            )
+            return
+
+        headers = ["Group", "Channels", "V0 ratios", "Lead V0", "", ""]
+        for i, header in enumerate(headers):
+            ttk.Label(grid, text=header).grid(
+                row=0, column=i, sticky="w", padx=(6, 4) if i == 0 else 2, pady=(4, 2)
+            )
+        ttk.Separator(grid, orient="horizontal").grid(
+            row=1, column=0, columnspan=len(headers), sticky="ew", pady=2)
+
+        for r, (group, members) in enumerate(groups.items(), start=2):
+            ttk.Label(grid, text=group).grid(row=r, column=0, sticky="w", padx=(6, 4), pady=1)
+            ui_style.make_wrapping_label(grid, ", ".join(self.rows[ch].label for ch in members)).grid(
+                row=r, column=1, sticky="ew", padx=2, pady=1
+            )
+
+            ratios = self._stored_ratios(group, members)
+            if ratios is not None:
+                ratio_label = ttk.Label(grid, text=" : ".join(f"{ratios[ch]:.4g}" for ch in members))
+            elif (app_settings.get(self.GROUP_RATIOS_KEY) or {}).get(group):
+                ratio_label = ttk.Label(grid, text="Out of date — capture again", foreground=ui_style.WARNING)
+            else:
+                ratio_label = ttk.Label(grid, text="Not captured", foreground=ui_style.WARNING)
+            ratio_label.grid(row=r, column=2, sticky="w", padx=2, pady=1)
+
+            lead_var = tk.StringVar(self, value=lead_text.get(group, self.rows[members[0]].v0_var.get()))
+            self._group_lead_vars[group] = lead_var
+            lead_entry = ttk.Entry(grid, textvariable=lead_var, width=6, justify="right")
+            lead_entry.grid(row=r, column=3, padx=2, pady=1)
+            lead_entry.bind("<Return>", lambda _e, g=group: self._apply_group(g))
+
+            ttk.Button(grid, text="Capture Ratios", command=lambda g=group: self._capture_group_ratios(g)).grid(
+                row=r, column=4, padx=2, pady=1
+            )
+            ttk.Button(grid, text="Apply", width=6, command=lambda g=group: self._apply_group(g)).grid(
+                row=r, column=5, padx=(8, 6), pady=1
+            )
+
+        ui_style.add_note(
+            grid, len(groups) + 2,
+            "Capture Ratios records each member's V0 set value as a ratio to the group's first channel. "
+            "Apply sets the first channel's V0 to Lead V0 and scales the others by those ratios. "
+            "Each channel still ramps at its own rate, so the ratio holds exactly once ramping finishes.",
+            columnspan=len(headers), pady=(6, 4),
+        )
+
+    def _capture_group_ratios(self, group):
+        members = self._groups().get(group)
+        if not members:
+            return
+        try:
+            values = {ch: float(self.rows[ch].v0_var.get()) for ch in members}
+        except ValueError:
+            self._log(f"Group {group}: every channel needs a numeric V0 set value to capture ratios.")
+            return
+        lead = members[0]
+        if values[lead] <= 0:
+            self._log(f"Group {group}: lead channel {self.rows[lead].label} needs a V0 above 0 to capture ratios.")
+            return
+
+        stored = dict(app_settings.get(self.GROUP_RATIOS_KEY) or {})
+        stored[group] = {"lead": lead, "ratios": {ch: values[ch] / values[lead] for ch in members}}
+        app_settings.set(self.GROUP_RATIOS_KEY, stored)
+        self._group_lead_vars[group].set(_format_setpoint(values[lead]))
+        self._log(
+            f"Group {group}: captured V0 ratios "
+            + ", ".join(f"{self.rows[ch].label} {values[ch] / values[lead]:.4g}" for ch in members)
+        )
+        self._populate_group_grid()
+
+    def _apply_group(self, group):
+        members = self._groups().get(group)
+        if not members:
+            return
+        if self.worker is None:
+            self._log("Not connected -- connect first.")
+            return
+        ratios = self._stored_ratios(group, members)
+        if ratios is None:
+            self._log(f"Group {group}: capture ratios first (none captured for its current channels).")
+            return
+        try:
+            lead_v0 = float(self._group_lead_vars[group].get())
+        except ValueError:
+            self._log(f"Group {group}: invalid Lead V0.")
+            return
+        if lead_v0 < 0:
+            self._log(f"Group {group}: Lead V0 can't be negative.")
+            return
+
+        self._log(f"Group {group}: moving to lead V0 {_format_setpoint(lead_v0)}")
+        for ch in members:
+            value = _format_setpoint(lead_v0 * ratios[ch])
+            row = self.rows[ch]
+            row.v0_var.set(value)
+            self._on_apply_params(ch, {"v0": value})
+            # After the write the device's value is truth again.
+            row.request_setpoint_refresh()
 
     # -- queue draining (Tk main thread) --
 
@@ -697,15 +884,12 @@ class PowerSupplyInterface(ttk.Frame):
     def _apply_status(self, header, data):
         if "hv_enable" in header:
             state = header["hv_enable"]
-            self.hv_enable_var.set(f"HV-ENABLE: {state}")
-            self.hv_enable_label.config(foreground="#0a7" if state == "ON" else "#888")
-
-        bits = []
+            self.hv_enable_var.set(state)
+            self.hv_enable_label.config(foreground=ui_style.RUNNING if state == "ON" else ui_style.IDLE)
         if "active_v" in header:
-            bits.append(f"Active: {header['active_v']}")
+            self.active_var.set(header["active_v"])
         if "group" in header:
-            bits.append(f"Group: {header['group']}")
-        self.active_var.set(" | ".join(bits))
+            self.group_var.set(header["group"])
 
         for ch, row in self.rows.items():
             if ch in data:
