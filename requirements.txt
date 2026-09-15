@@ -15,3 +15,5 @@ pyserial>=3.5
 requests>=2.32.5
 ruff==0.15.0
 scipy>=1.13.0
+# PyTables: pandas' HDF5 backend, for the apply calibration tab's output.
+tables>=3.10

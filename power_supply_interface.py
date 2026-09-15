@@ -317,6 +317,94 @@ def _format_setpoint(value):
     return f"{round(value, 1):g}"
 
 
+class PowerSupplyUnavailable(RuntimeError):
+    """A channel group can't be driven right now -- not connected, no such
+    group, or its V0 ratios were never captured."""
+
+
+class GroupVoltageControl:
+    """Drives one channel group's V0 from another thread (the parameter
+    sweep lowering the voltages while the stage moves), using the same lead
+    V0 + captured ratios scheme as the Groups card's Apply button.
+
+    It never touches a widget: the writes go through the SY127 worker's
+    command queue, log lines through the log queue, and the readback comes
+    from the status snapshot the GUI thread keeps up to date (see
+    PowerSupplyInterface._apply_status). Build it on the GUI thread, with
+    PowerSupplyInterface.group_control(), and use it from anywhere.
+    """
+
+    # How far VMON may sit from its target and still count as "the ramp has
+    # finished" -- the SY127 reports whole volts and hovers a little either
+    # side of V0 rather than landing on it exactly.
+    SETTLE_TOLERANCE_V = 5.0
+    SETTLE_TOLERANCE_FRAC = 0.02
+
+    def __init__(self, ui, group, members, ratios):
+        self._ui = ui
+        self.group = group
+        self.members = list(members)
+        self.ratios = dict(ratios)
+
+    def targets(self, lead_v0):
+        """{channel: V0} for a given lead voltage -- rounded exactly the way
+        the values actually written to the device are, so the readback
+        check below compares against what was really asked for."""
+        return {ch: float(_format_setpoint(lead_v0 * self.ratios[ch])) for ch in self.members}
+
+    def set_lead_v0(self, lead_v0):
+        """Queue the V0 write for every member. Returns (targets,
+        requested_at) for wait_until_settled()."""
+        worker = self._ui.worker
+        if worker is None:
+            raise PowerSupplyUnavailable("Power Supply tab isn't connected to the crate.")
+        targets = self.targets(lead_v0)
+        requested_at = time.monotonic()
+        for ch in self.members:
+            worker.queue_write(ch, {"v0": _format_setpoint(targets[ch])})
+            row = self._ui.rows.get(ch)
+            if row is not None:
+                # After the write the device's value is truth again. This
+                # only sets a flag -- no widget is touched -- so it is safe
+                # off the GUI thread; the entry itself is refreshed by the
+                # next status update.
+                row.request_setpoint_refresh()
+        self._ui.log_q.put(f"Group {self.group}: moving to lead V0 {_format_setpoint(lead_v0)}")
+        return targets, requested_at
+
+    def wait_until_settled(self, targets, requested_at, timeout=120.0, stop_event=None, poll=0.25):
+        """Block until every member's VMON has reached its target, judged
+        only on status snapshots read after requested_at -- an older one
+        still shows the voltage the group is ramping away from. Returns
+        True once it's there, False if the timeout ran out or stop_event
+        was set first."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                return False
+            stamp, channels = self._ui.status_snapshot()
+            if stamp > requested_at and self._all_reached(channels, targets):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(poll)
+
+    def _all_reached(self, channels, targets):
+        for ch, target in targets.items():
+            data = channels.get(ch)
+            if not data:
+                return False
+            if data.get("ramp") in ("RUP", "RDW"):
+                return False
+            try:
+                vmon = float(data.get("vmon", ""))
+            except ValueError:
+                return False
+            if abs(vmon - target) > max(self.SETTLE_TOLERANCE_V, abs(target) * self.SETTLE_TOLERANCE_FRAC):
+                return False
+        return True
+
+
 # --- GUI: a single channel row ---------------------------------------------
 
 class ChannelRow:
@@ -493,6 +581,10 @@ class PowerSupplyInterface(ttk.Frame):
         self.status_q = queue.Queue()
         self.log_q = queue.Queue()
         self.rows = {}
+        # Last DISPLAY STATUS read, as (monotonic timestamp, {channel:
+        # fields}). Replaced wholesale, never mutated, so other threads can
+        # read it through status_snapshot() -- see GroupVoltageControl.
+        self._status_snapshot = (float("-inf"), {})
 
         # Connection settings, persisted via the global "Save current as
         # default" button (see default_fields).
@@ -678,6 +770,9 @@ class PowerSupplyInterface(ttk.Frame):
         self._log(f"Connected to {self.port_var.get()}")
 
     def _disconnect(self):
+        # Drop the last reading so a reconnect can't settle a group against
+        # whatever the crate showed before the port was closed.
+        self._status_snapshot = (float("-inf"), {})
         if self.worker is not None:
             self.worker.stop_now()
             self.worker = None
@@ -835,15 +930,10 @@ class PowerSupplyInterface(ttk.Frame):
         self._populate_group_grid()
 
     def _apply_group(self, group):
-        members = self._groups().get(group)
-        if not members:
-            return
-        if self.worker is None:
-            self._log("Not connected -- connect first.")
-            return
-        ratios = self._stored_ratios(group, members)
-        if ratios is None:
-            self._log(f"Group {group}: capture ratios first (none captured for its current channels).")
+        try:
+            control = self.group_control(group)
+        except PowerSupplyUnavailable as exc:
+            self._log(str(exc))
             return
         try:
             lead_v0 = float(self._group_lead_vars[group].get())
@@ -854,14 +944,52 @@ class PowerSupplyInterface(ttk.Frame):
             self._log(f"Group {group}: Lead V0 can't be negative.")
             return
 
-        self._log(f"Group {group}: moving to lead V0 {_format_setpoint(lead_v0)}")
-        for ch in members:
-            value = _format_setpoint(lead_v0 * ratios[ch])
-            row = self.rows[ch]
-            row.v0_var.set(value)
-            self._on_apply_params(ch, {"v0": value})
-            # After the write the device's value is truth again.
-            row.request_setpoint_refresh()
+        targets, _ = control.set_lead_v0(lead_v0)
+        for ch, value in targets.items():
+            self.rows[ch].v0_var.set(_format_setpoint(value))
+
+    # -- driving a group from another thread --
+
+    def group_names(self):
+        """Every configured group name, in table order."""
+        return list(self._groups())
+
+    def group_control(self, group):
+        """A GroupVoltageControl for `group`: the handle other tabs use to
+        set its voltages off the GUI thread (the parameter sweep lowering
+        them while the stage moves). Raises PowerSupplyUnavailable if this
+        tab isn't connected, there is no such group, or its ratios haven't
+        been captured -- the same three things Apply refuses on."""
+        groups = self._groups()
+        members = groups.get(group)
+        if not members:
+            known = ", ".join(groups) or "none configured"
+            raise PowerSupplyUnavailable(
+                f"No channel group named {group!r} on the Power Supply tab (groups: {known})."
+            )
+        if self.worker is None:
+            raise PowerSupplyUnavailable("Power Supply tab isn't connected to the crate.")
+        ratios = self._stored_ratios(group, members)
+        if ratios is None:
+            raise PowerSupplyUnavailable(
+                f"Group {group}: capture ratios first (none captured for its current channels)."
+            )
+        return GroupVoltageControl(self, group, members, ratios)
+
+    def group_lead_v0(self, group):
+        """`group`'s lead channel V0 set value, as the text shown in the
+        channel table (the device's own value, refreshed on every status
+        read), or None if there's no such group or no value read yet."""
+        members = self._groups().get(group)
+        if not members:
+            return None
+        return self.rows[members[0]].v0_var.get().strip() or None
+
+    def status_snapshot(self):
+        """(monotonic timestamp, {channel: status fields}) of the last
+        DISPLAY STATUS read -- safe to call from any thread; the tuple is
+        replaced on every read rather than mutated in place."""
+        return self._status_snapshot
 
     # -- queue draining (Tk main thread) --
 
@@ -882,6 +1010,7 @@ class PowerSupplyInterface(ttk.Frame):
         self.after(self.POLL_MS, self._poll_queues)
 
     def _apply_status(self, header, data):
+        self._status_snapshot = (time.monotonic(), data)
         if "hv_enable" in header:
             state = header["hv_enable"]
             self.hv_enable_var.set(state)

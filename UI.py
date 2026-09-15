@@ -5,9 +5,13 @@ import qtk as tk
 from qtk import ttk
 
 from acquisition_interface import AcquisitionInterface
-from analysis_interface import ConversionInterface, PlaceholderInterface
+from analysis_interface import ConversionInterface
+from coincidence_interface import CoincidenceInterface
+from calibration_apply_interface import CalibrationApplyInterface
+from calibration_interface import CalibrationHub, MassCalibrationInterface, MomentumCalibrationInterface
 from collection_interface import CollectionInterface
 from diagnostics_interface import DiagnosticsInterface
+from parameter_grouping_interface import ParameterGroupingInterface
 from power_supply_interface import PowerSupplyInterface
 from serval_interface import ServalInterface
 from shared_state import make_plot_shared_vars, make_acquisition_shared_vars
@@ -47,6 +51,9 @@ class App(tk.Tk):
         self._coordinator = TabCoordinator()
         self._plot_shared_vars = make_plot_shared_vars(self)
         self._acq_shared_vars = make_acquisition_shared_vars(self)
+        # The calibration tabs publish their latest calibration here, and
+        # the apply calibration tab picks it up.
+        self._calibration_hub = CalibrationHub()
 
         # Three top-level groups -- Hardware (things you connect to/operate),
         # Acquisition (things that collect data) and Analysis (offline work
@@ -87,17 +94,24 @@ class App(tk.Tk):
 
         # Analysis tabs
         conversion_tab = ttk.Frame(analysis)
+        momentum_calibration_tab = ttk.Frame(analysis)
+        mq_calibration_tab = ttk.Frame(analysis)
+        apply_calibration_tab = ttk.Frame(analysis)
         grouping_tab = ttk.Frame(analysis)
-        calibration_tab = ttk.Frame(analysis)
         coincidence_tab = ttk.Frame(analysis)
         analysis.add(conversion_tab, text="conversion")
+        analysis.add(momentum_calibration_tab, text="momentum calibration")
+        analysis.add(mq_calibration_tab, text="m/q calibration")
+        analysis.add(apply_calibration_tab, text="apply calibration")
         analysis.add(grouping_tab, text="parameter grouping")
-        analysis.add(calibration_tab, text="calibration")
         analysis.add(coincidence_tab, text="coincidence")
 
-        # Fill each tab with its interface. Stage must be built before
-        # Sweep -- Sweep drives its moves through the stage connection
-        # StageInterface owns (see stage_interface.py / sweep_interface.py).
+        # Fill each tab with its interface. Stage and Power Supply must be
+        # built before Sweep -- Sweep drives its moves through the stage
+        # connection StageInterface owns, and (optionally) ramps a Power
+        # Supply channel group down around each move (see
+        # stage_interface.py / power_supply_interface.py /
+        # sweep_interface.py).
         # Quick Monitor (quick_monitor_interface.py) isn't wired in as a tab
         # right now, but the module is left intact for later.
         self._build_serval_config(serval_tab)
@@ -109,9 +123,11 @@ class App(tk.Tk):
         self._build_timewalk(timewalk_tab)
         self._build_sweep(sweep_tab)
         self._build_conversion(conversion_tab)
-        self._build_placeholder(grouping_tab, "Parameter grouping")
-        self._build_placeholder(calibration_tab, "Calibration")
-        self._build_placeholder(coincidence_tab, "Coincidence")
+        self._build_momentum_calibration(momentum_calibration_tab)
+        self._build_mq_calibration(mq_calibration_tab)
+        self._build_apply_calibration(apply_calibration_tab)
+        self._build_parameter_grouping(grouping_tab)
+        self._build_coincidence(coincidence_tab)
 
     def _build_group_notebook(self, parent: ttk.Frame):
         _prepare_tab(parent)
@@ -188,6 +204,7 @@ class App(tk.Tk):
             server_var=server_var.server_var if server_var else None,
             acq_shared_vars=self._acq_shared_vars,
             stage_ui=getattr(self, "stage_ui", None),
+            power_supply_ui=getattr(self, "power_supply_ui", None),
             coordinator=self._coordinator,
         )
         sweep_ui.grid(row=0, column=0, sticky="nsew")
@@ -202,17 +219,41 @@ class App(tk.Tk):
         )
         conversion_ui.grid(row=0, column=0, sticky="nsew")
 
-    def _build_placeholder(self, parent: ttk.Frame, name: str):
+    def _build_momentum_calibration(self, parent: ttk.Frame):
         _prepare_tab(parent)
 
-        placeholder = PlaceholderInterface(parent, name)
-        placeholder.grid(row=0, column=0, sticky="nsew")
+        momentum_ui = MomentumCalibrationInterface(parent, hub=self._calibration_hub)
+        momentum_ui.grid(row=0, column=0, sticky="nsew")
+
+    def _build_mq_calibration(self, parent: ttk.Frame):
+        _prepare_tab(parent)
+
+        mq_ui = MassCalibrationInterface(parent, hub=self._calibration_hub)
+        mq_ui.grid(row=0, column=0, sticky="nsew")
+
+    def _build_apply_calibration(self, parent: ttk.Frame):
+        _prepare_tab(parent)
+
+        apply_ui = CalibrationApplyInterface(parent, hub=self._calibration_hub)
+        apply_ui.grid(row=0, column=0, sticky="nsew")
+
+    def _build_parameter_grouping(self, parent: ttk.Frame):
+        _prepare_tab(parent)
+
+        grouping_ui = ParameterGroupingInterface(parent)
+        grouping_ui.grid(row=0, column=0, sticky="nsew")
+
+    def _build_coincidence(self, parent: ttk.Frame):
+        _prepare_tab(parent)
+
+        coincidence_ui = CoincidenceInterface(parent)
+        coincidence_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_power_supply(self, parent: ttk.Frame):
         _prepare_tab(parent)
 
-        power_supply_ui = PowerSupplyInterface(parent, coordinator=self._coordinator)
-        power_supply_ui.grid(row=0, column=0, sticky="nsew")
+        self.power_supply_ui = PowerSupplyInterface(parent, coordinator=self._coordinator)
+        self.power_supply_ui.grid(row=0, column=0, sticky="nsew")
 
 
 if __name__ == "__main__":

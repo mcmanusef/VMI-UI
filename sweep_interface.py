@@ -28,6 +28,10 @@ processing (see _finish_visit).
 
 The stage is never homed or moved except by an explicit button here --
 Connect only logs in and reads firmware/object info.
+
+Optionally (the "HV during moves" section), one of the Power Supply tab's
+channel groups is ramped down to a safe voltage before every move and back
+up before anything is collected at the new position -- see HVMoveGuard.
 """
 import datetime
 import json
@@ -46,6 +50,7 @@ import pyqtgraph as pg
 import app_settings
 import cv4_writer
 import serval_client
+from power_supply_interface import PowerSupplyUnavailable
 from qt_plots import mpl_color, ZoomFocusViewBox
 import time_estimate
 from cv4_writer import Cv4Writer
@@ -76,8 +81,82 @@ _RATE_COLORS = {
 }
 
 
+class HVRampFailed(Exception):
+    """An HV ramp around a stage move didn't finish (or the sweep was
+    stopped while it was still ramping). Raised by HVMoveGuard, which has
+    already reported why to the status line."""
+
+
+class HVMoveGuard:
+    """The sweep's "lower the HV while moving" option: ramps one power
+    supply channel group (power_supply_interface.GroupVoltageControl) down
+    to a safe voltage before every stage move and back up before any frame
+    is collected at the new position.
+
+    Both directions wait for the ramp to actually finish: moving while the
+    voltage is still on its way down defeats the point of lowering it, and
+    a frame taken mid-ramp was taken at the wrong voltage. A ramp that
+    doesn't get there within the timeout raises HVRampFailed rather than
+    moving (or collecting) at an unknown voltage -- that stops the sweep,
+    leaving the group wherever the ramp reached.
+    """
+
+    def __init__(self, control, moving_v0, collect_v0, timeout, report, stop_event):
+        self._control = control
+        self._moving_v0 = moving_v0
+        self._collect_v0 = collect_v0
+        self._timeout = timeout
+        self._report = report  # self._queue.put -- the GUI thread drains it
+        self._stop_event = stop_event
+        # Whether the group is, as far as this guard knows, at the
+        # collecting voltage. It starts there: a sweep is started with the
+        # group already set up for data collection.
+        self.at_collect_voltage = True
+
+    @property
+    def group(self):
+        return self._control.group
+
+    def metadata(self):
+        """What this guard did, for the cv4 files' attributes."""
+        return {
+            "HV Group": self.group,
+            "HV Lead V0 While Moving": self._moving_v0,
+            "HV Lead V0 While Collecting": self._collect_v0,
+        }
+
+    def lower(self):
+        """Ramp down to the moving voltage. Call before every stage move."""
+        self._ramp_to(self._moving_v0, "Lowering", False)
+
+    def restore(self):
+        """Ramp back up to the collecting voltage. Call after every stage
+        move, before anything is triggered."""
+        self._ramp_to(self._collect_v0, "Raising", True)
+
+    def _ramp_to(self, lead_v0, what, reached_collect_voltage):
+        self._report({"status": f"{what} HV group {self.group} to lead V0 {lead_v0:g}..."})
+        try:
+            targets, requested_at = self._control.set_lead_v0(lead_v0)
+        except Exception as exc:
+            self._report({"error": f"HV group {self.group}: {exc}"})
+            raise HVRampFailed(str(exc))
+        # The write is out, so where the group actually sits is unknown
+        # until the ramp is confirmed finished below.
+        self.at_collect_voltage = False
+        if not self._control.wait_until_settled(targets, requested_at, self._timeout, self._stop_event):
+            if not self._stop_event.is_set():
+                self._report({
+                    "error": f"HV group {self.group} didn't reach lead V0 {lead_v0:g} "
+                             f"within {self._timeout:g}s -- sweep stopped."
+                })
+            raise HVRampFailed(f"{self.group} didn't reach {lead_v0:g}")
+        self.at_collect_voltage = reached_collect_voltage
+
+
 class SweepInterface(ttk.Frame):
-    def __init__(self, parent, server_var=None, acq_shared_vars=None, stage_ui=None, coordinator=None, **kwargs):
+    def __init__(self, parent, server_var=None, acq_shared_vars=None, stage_ui=None,
+                 power_supply_ui=None, coordinator=None, **kwargs):
         super().__init__(parent, **kwargs)
 
         self._server_var = server_var
@@ -88,6 +167,9 @@ class SweepInterface(ttk.Frame):
         # tab opening its own separate connection to the same physical
         # stage.
         self._stage_ui = stage_ui
+        # Optional: the Power Supply tab, whose channel groups this tab can
+        # ramp down around each move (see HVMoveGuard).
+        self._power_supply_ui = power_supply_ui
         self._coordinator = coordinator
         if coordinator is not None:
             coordinator.register(self)
@@ -116,6 +198,14 @@ class SweepInterface(ttk.Frame):
         self.passes_var = app_settings.persistent_var(self, tk.StringVar, "sweep.passes", "1")
         self.dwell_mode_var = app_settings.persistent_var(self, tk.StringVar, "sweep.dwell_mode", "clusters")
         self.dwell_value_var = app_settings.persistent_var(self, tk.StringVar, "sweep.dwell_value", "10000")
+
+        # Lower a power supply channel group's voltages while the stage
+        # moves, raise them again before collecting -- see HVMoveGuard.
+        self.hv_enabled_var = app_settings.persistent_var(self, tk.BooleanVar, "sweep.hv_lower_enabled", False)
+        self.hv_group_var = app_settings.persistent_var(self, tk.StringVar, "sweep.hv_group", "")
+        self.hv_moving_v0_var = app_settings.persistent_var(self, tk.StringVar, "sweep.hv_moving_v0", "0")
+        self.hv_collect_v0_var = app_settings.persistent_var(self, tk.StringVar, "sweep.hv_collect_v0", "")
+        self.hv_timeout_var = app_settings.persistent_var(self, tk.StringVar, "sweep.hv_ramp_timeout", "120")
 
         self.status_var = tk.StringVar(self, value="Idle")
         self._progress_var = tk.DoubleVar(self, value=0.0)
@@ -168,7 +258,7 @@ class SweepInterface(ttk.Frame):
     def _build_sidebar(self, sidebar):
         # Trailing empty row keeps content packed at the top as sections
         # collapse (see Monitored Acquisition).
-        sidebar.rowconfigure(7, weight=1)
+        sidebar.rowconfigure(8, weight=1)
 
         # Same Stop / Force Stop pair as Monitored Acquisition: "Force Stop"
         # can abandon a backlog mid-drain, hence the danger styling.
@@ -178,7 +268,11 @@ class SweepInterface(ttk.Frame):
         # "Position 3/10 done (...)" is mid-sweep progress, not idle.
         self._status_block = ui_style.StatusBlock(
             sidebar, 1, self.status_var, progress_var=self._progress_var, eta_var=self.eta_var,
-            is_running=lambda text: "done (measured" in text or any(k in text for k in ui_style.STATUS_GREEN_KEYWORDS),
+            is_running=lambda text: (
+                "done (measured" in text
+                or text.startswith(("Lowering HV", "Raising HV"))
+                or any(k in text for k in ui_style.STATUS_GREEN_KEYWORDS)
+            ),
         )
         # The stage connection itself (IP/group, Connect/Initialize/Home,
         # manual jog + Set Zero) lives on the Stage Control tab -- see
@@ -237,9 +331,42 @@ class SweepInterface(ttk.Frame):
             options, 4, "Save folder:", ui_style.build_path_field(options, self.save_folder_var, self._browse_folder)
         )
 
-        self.notes = ui_style.build_metadata_section(sidebar, 5, self)
+        hv = ui_style.build_section(
+            sidebar, 5, "HV during moves", collapsed=not self.hv_enabled_var.get()
+        )
+        ttk.Checkbutton(
+            hv, text="Lower a power supply group while moving", variable=self.hv_enabled_var,
+            command=self._refresh_hv_groups,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        self._hv_group_box = ttk.Combobox(
+            hv, textvariable=self.hv_group_var, values=self._power_supply_groups(), width=18
+        )
+        ui_style.add_form_row(hv, 1, "Group:", self._hv_group_box)
+        self.hv_group_var.trace_add("write", self._prefill_hv_collect_v0)
+        ui_style.add_form_row(
+            hv, 2, "Lead V0 while moving (V):", ttk.Entry(hv, textvariable=self.hv_moving_v0_var, width=18)
+        )
+        ui_style.add_form_row(
+            hv, 3, "Lead V0 while collecting (V):", ttk.Entry(hv, textvariable=self.hv_collect_v0_var, width=18)
+        )
+        ui_style.add_form_row(
+            hv, 4, "Ramp timeout (s):", ttk.Entry(hv, textvariable=self.hv_timeout_var, width=18)
+        )
+        ui_style.add_note(
+            hv, 5,
+            "Before each move (calibration moves included) the group's lead V0 goes to the moving value; "
+            "after the move it goes back to the collecting value. Each ramp is waited out -- VMON has to "
+            "reach the new setpoint -- so nothing moves mid-ramp and no frame is collected mid-ramp. "
+            "Needs the Power Supply tab connected with the group's V0 ratios captured; the other members "
+            "follow the lead by those ratios, exactly as the Groups card's Apply does. The collecting "
+            "value is filled in from the group's lead V0 when a group is picked -- keep it in step if "
+            "that voltage changes. If a ramp doesn't finish within the timeout the sweep stops, leaving "
+            "the group where the ramp got to.",
+        )
 
-        live = ui_style.build_section(sidebar, 6, "Live collection", pady=0)
+        self.notes = ui_style.build_metadata_section(sidebar, 6, self)
+
+        live = ui_style.build_section(sidebar, 7, "Live collection", pady=0)
         ui_style.add_stat_rows(live, [
             ("Est. frames needed (this visit):", self.position_estimate_var),
             ("Frames collected (this visit):", self.position_collected_var),
@@ -272,6 +399,29 @@ class SweepInterface(ttk.Frame):
         self._plot_item.addLegend()
         grid_into(self._plot_widget, plot_frame, row=0, column=0, sticky="nsew")
         self._redraw_plot()
+
+    def _power_supply_groups(self):
+        """Group names offered in the HV section's combobox -- whatever the
+        Power Supply tab has configured right now (it's still a free-text
+        combobox: a group can be named there after this tab was built)."""
+        if self._power_supply_ui is None:
+            return []
+        return self._power_supply_ui.group_names()
+
+    def _refresh_hv_groups(self):
+        self._hv_group_box.configure(values=self._power_supply_groups())
+
+    def _prefill_hv_collect_v0(self, *_args):
+        """Offer the group's current lead V0 as the collecting voltage the
+        first time a group is picked -- that's what the sweep has to get
+        back up to before collecting, and the Power Supply tab already
+        knows it. Never overwrites a value that's already there: from then
+        on the typed value is what the sweep uses."""
+        if self._power_supply_ui is None or self.hv_collect_v0_var.get().strip():
+            return
+        lead_v0 = self._power_supply_ui.group_lead_v0(self.hv_group_var.get().strip())
+        if lead_v0 is not None:
+            self.hv_collect_v0_var.set(lead_v0)
 
     def _browse_folder(self):
         chosen = filedialog.askdirectory(
@@ -330,6 +480,39 @@ class SweepInterface(ttk.Frame):
             "Start Time (UTC)": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
 
+    def _build_hv_guard(self):
+        """The HVMoveGuard for this sweep, or None if the option is off.
+        Raises ValueError, with a message for the status line, if the
+        option is on but can't be honored -- refusing to start is better
+        than sweeping with the voltages left wherever they happen to be."""
+        if not self.hv_enabled_var.get():
+            return None
+        if self._power_supply_ui is None:
+            raise ValueError("there's no Power Supply tab to drive.")
+        group = self.hv_group_var.get().strip()
+        if not group:
+            raise ValueError("pick the channel group to lower.")
+        try:
+            moving_v0 = float(self.hv_moving_v0_var.get())
+            collect_v0 = float(self.hv_collect_v0_var.get())
+        except ValueError:
+            raise ValueError("lead V0 while moving and while collecting must both be numbers.") from None
+        if moving_v0 < 0 or collect_v0 < 0:
+            raise ValueError("lead V0 can't be negative.")
+        if moving_v0 > collect_v0:
+            raise ValueError("lead V0 while moving is higher than while collecting.")
+        try:
+            timeout = float(self.hv_timeout_var.get())
+            if timeout <= 0:
+                raise ValueError
+        except ValueError:
+            raise ValueError("invalid ramp timeout.") from None
+        try:
+            control = self._power_supply_ui.group_control(group)
+        except PowerSupplyUnavailable as exc:
+            raise ValueError(str(exc)) from None
+        return HVMoveGuard(control, moving_v0, collect_v0, timeout, self._queue.put, self._stop_event)
+
     def start(self):
         if self._coordinator is not None:
             self._coordinator.stop_others(self)
@@ -378,6 +561,12 @@ class SweepInterface(ttk.Frame):
             self.status_var.set("Invalid frame time.")
             return
 
+        try:
+            hv = self._build_hv_guard()
+        except ValueError as exc:
+            self.status_var.set(f"HV during moves: {exc}")
+            return
+
         folder_text = self.save_folder_var.get().strip()
         if not folder_text:
             self.status_var.set("Save folder is required.")
@@ -388,6 +577,8 @@ class SweepInterface(ttk.Frame):
         raw_root.mkdir(parents=True, exist_ok=True)
 
         metadata_base = self._collect_metadata(frame_time, dwell_mode, dwell_value, passes)
+        if hv is not None:
+            metadata_base.update(hv.metadata())
         server = self._server_url()
         zero_offset = self._stage_ui.zero_offset_var.get()
 
@@ -417,7 +608,7 @@ class SweepInterface(ttk.Frame):
             target=self._sweep_loop,
             args=(
                 stage, server, group_name, zero_offset, positions, passes,
-                dwell_mode, dwell_value, frame_time, raw_root, save_folder, metadata_base,
+                dwell_mode, dwell_value, frame_time, raw_root, save_folder, metadata_base, hv,
             ),
             daemon=True,
         )
@@ -739,7 +930,8 @@ class SweepInterface(ttk.Frame):
             **entry,
         })
 
-    def _calibrate_frame_counts(self, stage, server, group_name, zero_offset, positions, frame_time, dwell_value, raw_root):
+    def _calibrate_frame_counts(self, stage, server, group_name, zero_offset, positions, frame_time,
+                                dwell_value, raw_root, hv=None):
         """Cluster-dwell mode only, run once before the real sweep starts:
         visit every distinct requested position, collect and process
         _CALIBRATION_FRAME_COUNT frames there, and use the average cluster
@@ -764,7 +956,10 @@ class SweepInterface(ttk.Frame):
         Returns {requested_position: frame_count}. A position where
         calibration itself fails (bad move, no frames, processing error) is
         simply left out of the dict; the caller falls back to the median of
-        whatever positions did calibrate successfully.
+        whatever positions did calibrate successfully. An HV ramp that
+        doesn't finish (hv, when the "lower the HV while moving" option is
+        on) is not per-position like that -- it raises HVRampFailed out of
+        here and stops the whole sweep.
         """
         calib_root = raw_root / "calibration"
         calib_root.mkdir(parents=True, exist_ok=True)
@@ -785,6 +980,8 @@ class SweepInterface(ttk.Frame):
             })
             target = zero_offset + requested
 
+            if hv is not None:
+                hv.lower()
             try:
                 stage.move_absolute(group_name, target)
                 stage.wait_for_settle(group_name, timeout=120.0)
@@ -794,6 +991,11 @@ class SweepInterface(ttk.Frame):
                              f"{describe_move_failure(stage, group_name, exc)}"
                 })
                 continue
+            # Calibration frames are real exposures whose cluster rate sets
+            # every position's frame count, so they need the collecting
+            # voltage just as much as the sweep itself does.
+            if hv is not None:
+                hv.restore()
 
             calib_dir = calib_root / f"calib_{idx:03d}_{requested:+.4f}"
             calib_dir.mkdir(parents=True, exist_ok=True)
@@ -872,7 +1074,7 @@ class SweepInterface(ttk.Frame):
 
     def _sweep_loop(
         self, stage, server, group_name, zero_offset, positions, passes,
-        dwell_mode, dwell_value, frame_time, raw_root, save_folder, metadata_base,
+        dwell_mode, dwell_value, frame_time, raw_root, save_folder, metadata_base, hv=None,
     ):
         """The mover: moves the stage through every position/pass and
         triggers each visit's frames (see _trigger_visit), but never waits
@@ -883,11 +1085,18 @@ class SweepInterface(ttk.Frame):
         gets exactly one cv4 file, shared across every pass that visits it
         (position_meta, built up here and finalized at the end once the
         processor has been joined) -- not one file per movement.
+
+        With the "lower the HV while moving" option on, hv is an HVMoveGuard
+        that brackets every move: down to the moving voltage before it, back
+        up to the collecting voltage (and fully ramped) before anything is
+        triggered. A ramp that never gets there ends the sweep -- unlike a
+        failed move, which only costs that one position.
         """
         total_positions = len(positions) * passes
         global_index = 0
         move_failures = 0
         config_failures = 0
+        hv_failed = False
         position_index = {p: i + 1 for i, p in enumerate(positions)}
 
         # Cluster-dwell mode: calibrate every position's frame count once,
@@ -897,9 +1106,19 @@ class SweepInterface(ttk.Frame):
         frame_counts = {}
         fallback_count = None
         if dwell_mode == "clusters":
-            frame_counts = self._calibrate_frame_counts(
-                stage, server, group_name, zero_offset, positions, frame_time, dwell_value, raw_root
-            )
+            try:
+                frame_counts = self._calibrate_frame_counts(
+                    stage, server, group_name, zero_offset, positions, frame_time, dwell_value, raw_root, hv
+                )
+            except HVRampFailed:
+                stopped = self._stop_event.is_set() or self._finish_event.is_set()
+                self._queue.put({
+                    "sweep_done": True,
+                    "reason": "Stopped during calibration." if stopped else
+                              f"Stopped during calibration: the HV group {hv.group} didn't reach its "
+                              f"target voltage.",
+                })
+                return
             if self._stop_event.is_set() or self._finish_event.is_set():
                 self._queue.put({"sweep_done": True, "reason": "Stopped during calibration."})
                 return
@@ -950,8 +1169,20 @@ class SweepInterface(ttk.Frame):
                     visit_tag = f"pos_{global_index:03d}_{requested:+.4f}"
 
                     try:
+                        if hv is not None:
+                            hv.lower()
                         stage.move_absolute(group_name, target)
                         measured_abs = stage.wait_for_settle(group_name, timeout=120.0)
+                        # Back up to the collecting voltage, fully ramped,
+                        # before anything at this position is triggered.
+                        if hv is not None:
+                            hv.restore()
+                    except HVRampFailed:
+                        # Not a one-position problem like a failed move is:
+                        # stop rather than keep moving (or start collecting)
+                        # at a voltage nobody can account for.
+                        hv_failed = True
+                        break
                     except Exception as exc:
                         # One bad position (a transient controller hiccup, a
                         # requested value outside the travel limits, ...)
@@ -1046,7 +1277,7 @@ class SweepInterface(ttk.Frame):
                     if self._finish_event.is_set():
                         break
 
-                if self._finish_event.is_set():
+                if self._finish_event.is_set() or hv_failed:
                     break
         finally:
             # Tell the processor no more visits/frames are coming, then wait
@@ -1060,7 +1291,9 @@ class SweepInterface(ttk.Frame):
             mover_done_event.set()
             processor.join()
 
-        sweep_completed_naturally = not (self._stop_event.is_set() or self._finish_event.is_set())
+        sweep_completed_naturally = not (
+            self._stop_event.is_set() or self._finish_event.is_set() or hv_failed
+        )
         # Each position's cv4 was opened/closed per frame throughout (see
         # _sweep_processor_loop), so there's nothing still open here --
         # just a final reopen per position (skipping any that never
@@ -1087,6 +1320,8 @@ class SweepInterface(ttk.Frame):
 
         if self._stop_event.is_set():
             cause = "Stopped by user."
+        elif hv_failed:
+            cause = f"Stopped: the HV group {hv.group} didn't reach its target voltage."
         elif self._finish_event.is_set():
             cause = "Told to finish the current position and stop."
         else:
@@ -1103,6 +1338,11 @@ class SweepInterface(ttk.Frame):
         if failures:
             detail += " (" + ", ".join(failures) + ")"
         reason = f"{cause} {detail}."
+        if hv is not None and not hv.at_collect_voltage:
+            # Force Stop (or a stalled ramp) can leave the group down at its
+            # moving voltage -- say so rather than let the next run start
+            # from a voltage nobody expected.
+            reason += f" HV group {hv.group} left at (or below) its moving voltage."
 
         self._queue.put({"sweep_done": True, "reason": reason})
 
@@ -1120,6 +1360,10 @@ class SweepInterface(ttk.Frame):
     def _apply_result(self, result):
         if "error" in result:
             self.status_var.set(f"Error: {result['error']}")
+            return
+        if "status" in result:
+            # Plain progress text from the worker (HV ramps around moves).
+            self.status_var.set(result["status"])
             return
         if result.get("sweep_done"):
             reason = result.get("reason", "Sweep finished.")

@@ -90,7 +90,9 @@ For tabs with a data view: plots, a results table, or a log.
   packed at the top as sections collapse.
 
 Tabs using it: diagnostics, monitored acquisition, timewalk calibration,
-parameter sweep, serval config, power supply, conversion.
+parameter sweep, serval config, power supply, conversion, momentum
+calibration, m/q calibration, apply calibration, parameter grouping,
+coincidence.
 
 ### 3.2 Page layout: `ui_style.build_page_layout(self)` → `page`
 
@@ -100,8 +102,7 @@ scrollable page. The column is capped at 640 px (`PAGE_MAX_WIDTH`) and
 left-aligned, so fields don't stretch across a wide window. The components
 and spacing are the same as in the sidebar.
 
-Tabs using it: collection parameters, stage control, and the Analysis
-placeholders (parameter grouping, calibration, coincidence).
+Tabs using it: collection parameters and stage control.
 
 ### 3.3 Main-area content
 
@@ -328,6 +329,19 @@ after `autoRange()`, so it centers on the final view.
 | Parameter Sweep | No data — press Start to sweep |
 | Conversion | No data — press Start to convert |
 | Timewalk (correction) | No correction yet — press Generate Correction |
+| Momentum calibration, m/q calibration (data plots) | No data — press Load Data |
+| Momentum calibration (fit and validation plots) | No fit yet / No calibration yet — press Fit |
+| m/q calibration (fit and mass spectrum) | No calibration yet — Ctrl+click peaks to label them |
+| Apply calibration | No data — press Apply and Save |
+| Coincidence | No data — press Load |
+
+Plots where the user picks peaks (both calibration tabs) take **Ctrl+click**
+to add a peak and **Shift+click** to remove the nearest one. Drags keep the
+rectangle zoom, and double-click shows a plot alone (again to restore the
+grid). Coincidence does the same: double-clicking one of its gate plots, or
+the main plot, gives that plot the whole tab. Where a plain click sets a value (momentum calibration's "Plot clicks"
+mode: center, angle, tc), the click waits out the double-click interval so a
+double-click only toggles focus.
 
 ## 6. Copy conventions
 
