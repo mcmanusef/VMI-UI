@@ -149,11 +149,3 @@ class ZoomFocusViewBox(pg.ViewBox):
                 self.autoRange()
             return
         super().mouseClickEvent(ev)
-
-
-def circle_curve(radius, n=128):
-    """(x, y) arrays tracing a circle of the given radius, centered at
-    the origin -- for drawing dashed order-ring overlays via
-    PlotDataItem (replaces matplotlib's `Circle` patch)."""
-    theta = np.linspace(0.0, 2 * np.pi, n)
-    return radius * np.cos(theta), radius * np.sin(theta)

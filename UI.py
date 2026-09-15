@@ -5,6 +5,7 @@ import qtk as tk
 from qtk import ttk
 
 from acquisition_interface import AcquisitionInterface
+from analysis_interface import ConversionInterface, PlaceholderInterface
 from collection_interface import CollectionInterface
 from diagnostics_interface import DiagnosticsInterface
 from power_supply_interface import PowerSupplyInterface
@@ -47,19 +48,22 @@ class App(tk.Tk):
         self._plot_shared_vars = make_plot_shared_vars(self)
         self._acq_shared_vars = make_acquisition_shared_vars(self)
 
-        # Two top-level groups -- Hardware (things you connect to/operate)
-        # and Acquisition (things that collect or analyze data) -- each its
-        # own inner tab bar.
+        # Three top-level groups -- Hardware (things you connect to/operate),
+        # Acquisition (things that collect data) and Analysis (offline work
+        # on data already collected) -- each its own inner tab bar.
         groups = ttk.Notebook(self)
         groups.grid(row=0, column=0, sticky="nsew")
 
         hardware_group = ttk.Frame(groups)
         acquisition_group = ttk.Frame(groups)
+        analysis_group = ttk.Frame(groups)
         groups.add(hardware_group, text="Hardware")
         groups.add(acquisition_group, text="Acquisition")
+        groups.add(analysis_group, text="Analysis")
 
         hardware = self._build_group_notebook(hardware_group)
         acquisition = self._build_group_notebook(acquisition_group)
+        analysis = self._build_group_notebook(analysis_group)
 
         # Hardware tabs
         serval_tab = ttk.Frame(hardware)
@@ -81,6 +85,16 @@ class App(tk.Tk):
         acquisition.add(timewalk_tab, text="timewalk calibration")
         acquisition.add(sweep_tab, text="parameter sweep")
 
+        # Analysis tabs
+        conversion_tab = ttk.Frame(analysis)
+        grouping_tab = ttk.Frame(analysis)
+        calibration_tab = ttk.Frame(analysis)
+        coincidence_tab = ttk.Frame(analysis)
+        analysis.add(conversion_tab, text="conversion")
+        analysis.add(grouping_tab, text="parameter grouping")
+        analysis.add(calibration_tab, text="calibration")
+        analysis.add(coincidence_tab, text="coincidence")
+
         # Fill each tab with its interface. Stage must be built before
         # Sweep -- Sweep drives its moves through the stage connection
         # StageInterface owns (see stage_interface.py / sweep_interface.py).
@@ -94,6 +108,10 @@ class App(tk.Tk):
         self._build_acquisition(acquisition_tab)
         self._build_timewalk(timewalk_tab)
         self._build_sweep(sweep_tab)
+        self._build_conversion(conversion_tab)
+        self._build_placeholder(grouping_tab, "Parameter grouping")
+        self._build_placeholder(calibration_tab, "Calibration")
+        self._build_placeholder(coincidence_tab, "Coincidence")
 
     def _build_group_notebook(self, parent: ttk.Frame):
         _prepare_tab(parent)
@@ -173,6 +191,22 @@ class App(tk.Tk):
             coordinator=self._coordinator,
         )
         sweep_ui.grid(row=0, column=0, sticky="nsew")
+
+    def _build_conversion(self, parent: ttk.Frame):
+        _prepare_tab(parent)
+
+        conversion_ui = ConversionInterface(
+            parent,
+            plot_shared_vars=self._plot_shared_vars,
+            acq_shared_vars=self._acq_shared_vars,
+        )
+        conversion_ui.grid(row=0, column=0, sticky="nsew")
+
+    def _build_placeholder(self, parent: ttk.Frame, name: str):
+        _prepare_tab(parent)
+
+        placeholder = PlaceholderInterface(parent, name)
+        placeholder.grid(row=0, column=0, sticky="nsew")
 
     def _build_power_supply(self, parent: ttk.Frame):
         _prepare_tab(parent)

@@ -148,18 +148,18 @@ class Cv4Writer:
 
 def partial_path_for(final_path):
     """The in-progress filename to actually write to: <name>.partial.cv4
-    instead of <name>.cv4. Renamed to the real name only on natural
-    completion (see finalize_partial_path) -- so a plain .cv4 on disk is
-    always a guarantee the run reached its target, and anything left named
-    .partial.cv4 (including after a crash) is honestly incomplete."""
+    instead of <name>.cv4. Renamed to the real name only once the caller
+    deems the file complete (see finalize_partial_path) -- so anything left
+    named .partial.cv4 (including after a crash) is honestly incomplete."""
     final_path = pathlib.Path(final_path)
     return final_path.with_name(final_path.stem + ".partial.cv4")
 
 
 def finalize_partial_path(partial_path, completed):
-    """Drop the .partial suffix if the run reached its target naturally;
-    leave the .partial name if it was stopped early (hard stop or a
-    finish-current-and-stop). Returns the resulting path."""
+    """Drop the .partial suffix if `completed`; otherwise leave the
+    .partial name. What counts as complete is up to the caller (e.g. a
+    fixed-length run reaching its target, or every raw file that was
+    actually collected having been processed). Returns the resulting path."""
     partial_path = pathlib.Path(partial_path)
     if not completed:
         return partial_path

@@ -450,9 +450,9 @@ class SweepInterface(ttk.Frame):
         every triggered raw file either fully processed or, if it was never
         triggered, not existing at all, instead of Stop's immediate cutoff
         which can abandon a mid-drain backlog. Doesn't block: each
-        position's cv4 gets its final .partial (or completed) name once
-        the whole backlog has actually finished draining (see
-        _sweep_loop's tail, after the processor thread is joined)."""
+        position's cv4 gets renamed off .partial once the whole backlog has
+        actually finished draining (see _sweep_loop's tail, after the
+        processor thread is joined)."""
         if not self.is_running():
             return
         self._finish_event.set()
@@ -1065,19 +1065,25 @@ class SweepInterface(ttk.Frame):
         # _sweep_processor_loop), so there's nothing still open here --
         # just a final reopen per position (skipping any that never
         # actually got a processed frame, i.e. no file was ever created)
-        # to stamp the run-level attrs and rename off .partial.
+        # to stamp the run-level attrs and rename off .partial. A position
+        # stays .partial only if some raw file actually collected for it
+        # was never processed (Force Stop mid-backlog); a graceful Stop
+        # drains everything, so its files still get the plain .cv4 name.
+        # "Complete" separately records whether the sweep ran to the end.
         for meta in position_meta.values():
             if meta["frames_processed"] == 0:
                 continue
+            all_processed = meta["frames_processed"] >= meta["frames_collected"]
             partial_path = cv4_writer.partial_path_for(meta["cv4_path"])
             writer = Cv4Writer(partial_path)
             writer.set_attrs({
                 "Frames Collected": meta["frames_collected"],
                 "Frames Processed": meta["frames_processed"],
                 "Complete": sweep_completed_naturally,
+                "All Collected Frames Processed": all_processed,
             })
             writer.close()
-            cv4_writer.finalize_partial_path(partial_path, sweep_completed_naturally)
+            cv4_writer.finalize_partial_path(partial_path, all_processed)
 
         if self._stop_event.is_set():
             cause = "Stopped by user."

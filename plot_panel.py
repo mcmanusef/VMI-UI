@@ -51,10 +51,12 @@ class HistogramPlotPanel(ttk.Frame):
     optionally settings (defaults to the panel's own current settings).
     """
 
-    def __init__(self, parent, on_settings_changed=None, plots_first=False, shared_vars=None, **kwargs):
+    def __init__(self, parent, on_settings_changed=None, plots_first=False, shared_vars=None,
+                 empty_text="No data — press Start to acquire", **kwargs):
         super().__init__(parent, **kwargs)
         self._on_settings_changed = on_settings_changed
         self._plots_first = plots_first
+        self._empty_text = empty_text
         self._last_data = None
 
         # `shared_vars` (see shared_state.make_plot_shared_vars) lets two
@@ -317,9 +319,7 @@ class HistogramPlotPanel(ttk.Frame):
             else:
                 self._curves[key] = plot_item.plot([], [])
 
-            empty_label = pg.TextItem(
-                "No data — press Start to acquire", anchor=(0.5, 0.5), color=(140, 140, 140),
-            )
+            empty_label = pg.TextItem(self._empty_text, anchor=(0.5, 0.5), color=(140, 140, 140))
             empty_label.setVisible(False)
             plot_item.addItem(empty_label, ignoreBounds=True)
             self._empty_labels[key] = empty_label

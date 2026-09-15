@@ -9,29 +9,13 @@ from qtk import ttk, messagebox, filedialog
 
 import app_settings
 import cv4_writer
+import raw_conversion
 import serval_client
 import time_estimate
 import ui_style
 from cv4_writer import Cv4Writer
 from plot_panel import HistogramPlotPanel
-from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection, apply_timewalk_correction
-from tpx_processing import (
-    decode_tpx3,
-    sort_tdcs,
-    group_pixels_by_pulse,
-    group_times_relative,
-    cluster_pixels_by_pulse,
-    make_pixel_hist_from_pulses,
-    make_cluster_hists,
-    make_hist_1d,
-    hist_args,
-    flatten_dict,
-    copy_hist,
-    add_hist,
-    add_hist_2d,
-    summarize_records,
-    merge_stats,
-)
+from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection
 
 
 class AcquisitionInterface(ttk.Frame):
@@ -360,8 +344,9 @@ class AcquisitionInterface(ttk.Frame):
         finish processing -- ends with every triggered raw file either fully
         processed or, if it was never triggered, not existing at all,
         instead of Stop's immediate cutoff which can abandon a mid-drain
-        backlog. Doesn't block: the cv4 gets finalized (.partial or not)
-        once the processor actually drains and reports "done"."""
+        backlog. Doesn't block: the cv4 gets renamed off .partial once the
+        processor actually drains and reports "done" (only a Force Stop
+        that abandons unprocessed frames leaves it as .partial.cv4)."""
         if not self.is_running():
             return
         self._finish_event.set()
@@ -564,13 +549,24 @@ class AcquisitionInterface(ttk.Frame):
         except Exception as exc:
             self._queue.put({"error": str(exc)})
         finally:
+            # On a Force Stop this loop can exit while the collector is still
+            # winding down; wait (briefly) so the collected count is final
+            # before deciding whether every collected frame got processed.
+            self._collection_done.wait(timeout=10)
+            # .partial only if raw files that were actually collected were
+            # left unprocessed (Force Stop mid-backlog). A graceful Stop, or
+            # a run stopped before its target but with everything collected
+            # processed, still gets the plain .cv4 name; "Complete" separately
+            # records whether the run reached its target.
+            all_processed = frame_index >= self._collected_frame_count
             writer.set_attrs({
                 "Frames Collected": self._collected_frame_count,
                 "Frames Processed": frame_index,
                 "Complete": self._completed_naturally,
+                "All Collected Frames Processed": all_processed,
             })
             writer.close()
-            final_path = cv4_writer.finalize_partial_path(partial_path, self._completed_naturally)
+            final_path = cv4_writer.finalize_partial_path(partial_path, all_processed)
             self._queue.put({
                 "done": True,
                 "frame_index": frame_index,
@@ -579,73 +575,9 @@ class AcquisitionInterface(ttk.Frame):
             })
 
     def _process_file(self, path: pathlib.Path):
-        start = time.perf_counter()
-        settings = self._plot_panel.hist_snapshot()
-
-        # No max_packets cap: monitored acquisition processes every packet.
-        pixels, tdcs, processed_packets, total_packets = decode_tpx3(str(path), max_packets=None)
-        if self._active_timewalk is not None:
-            pixels = apply_timewalk_correction(pixels, self._active_timewalk)
-        etof, itof, pulses = sort_tdcs(300.0, tdcs)
-
-        pulses_sorted = sorted(pulses)
-        pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)
-        clusters_by_pulse, cluster_size_sum, cluster_count = cluster_pixels_by_pulse(pixels_by_pulse)
-        etof_by_pulse = group_times_relative(etof, pulses_sorted)
-        itof_by_pulse = group_times_relative(itof, pulses_sorted)
-
-        pulse_records = []
-        for pulse_time in pulses_sorted:
-            pulse_records.append(
-                (
-                    pulse_time,
-                    pixels_by_pulse.get(pulse_time, []),
-                    clusters_by_pulse.get(pulse_time, []),
-                    etof_by_pulse.get(pulse_time, []),
-                    itof_by_pulse.get(pulse_time, []),
-                )
-            )
-
-        pixel_hist = make_pixel_hist_from_pulses(
-            pixels_by_pulse,
-            bins=int(settings["pixel"]["bins"]),
-            range_min=settings["pixel"]["min"],
-            range_max=settings["pixel"]["max"],
-        )
-        cluster_hist, cluster_t_hist = make_cluster_hists(
-            clusters_by_pulse,
-            t_bins=int(settings["cluster_t"]["bins"]),
-            t_min=settings["cluster_t"]["min"],
-            t_max=settings["cluster_t"]["max"],
-            xy_bins=int(settings["cluster"]["bins"]),
-            xy_min=settings["cluster"]["min"],
-            xy_max=settings["cluster"]["max"],
-        )
-        itof_hist = make_hist_1d(flatten_dict(itof_by_pulse), **hist_args(settings["itof"]))
-        etof_hist = make_hist_1d(flatten_dict(etof_by_pulse), **hist_args(settings["etof"]))
-
-        stats = summarize_records(
-            pulse_records, cluster_size_sum, cluster_count, processed_packets, total_packets, start
-        )
-        stats["analysis_time_last"] = time.perf_counter() - start
-
-        plot_result = {
-            "pixel_hist": pixel_hist,
-            "cluster_hist": cluster_hist,
-            "itof_hist": itof_hist,
-            "etof_hist": etof_hist,
-            "cluster_t_hist": cluster_t_hist,
-            "stats": stats,
-            "settings": settings,
-        }
-
-        return {
-            "pulses_sorted": pulses_sorted,
-            "clusters_by_pulse": clusters_by_pulse,
-            "etof_by_pulse": etof_by_pulse,
-            "itof_by_pulse": itof_by_pulse,
-            "plot_result": plot_result,
-        }
+        # Shared with Analysis > conversion, so offline conversion of these
+        # same raw files produces an identical cv4.
+        return raw_conversion.process_raw_file(path, self._plot_panel.hist_snapshot(), self._active_timewalk)
 
     # ---- main-thread queue handling ---------------------------------------
 
@@ -706,33 +638,10 @@ class AcquisitionInterface(ttk.Frame):
         if "pending" in result:
             self.pending_var.set(str(result["pending"]))
 
-        settings_changed = (
-            self._accumulated is not None
-            and self._accumulated.get("settings") != result.get("settings")
-        )
-
-        if self._reset_accumulation or self._accumulated is None or settings_changed:
-            self._accumulated = {
-                "pixel_hist": result["pixel_hist"].copy(),
-                "cluster_hist": result["cluster_hist"].copy(),
-                "itof_hist": copy_hist(result["itof_hist"]),
-                "etof_hist": copy_hist(result["etof_hist"]),
-                "cluster_t_hist": copy_hist(result["cluster_t_hist"]),
-                "stats": result["stats"].copy(),
-                "settings": result["settings"],
-            }
+        if self._reset_accumulation:
+            self._accumulated = None
             self._reset_accumulation = False
-        else:
-            self._accumulated["pixel_hist"] = add_hist_2d(self._accumulated["pixel_hist"], result["pixel_hist"])
-            self._accumulated["cluster_hist"] = add_hist_2d(
-                self._accumulated["cluster_hist"], result["cluster_hist"]
-            )
-            self._accumulated["itof_hist"] = add_hist(self._accumulated["itof_hist"], result["itof_hist"])
-            self._accumulated["etof_hist"] = add_hist(self._accumulated["etof_hist"], result["etof_hist"])
-            self._accumulated["cluster_t_hist"] = add_hist(
-                self._accumulated["cluster_t_hist"], result["cluster_t_hist"]
-            )
-            self._accumulated["stats"] = merge_stats(self._accumulated["stats"], result["stats"])
+        self._accumulated = raw_conversion.accumulate_plot_result(self._accumulated, result)
 
         self._plot_panel.update_plots(self._accumulated)
 

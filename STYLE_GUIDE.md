@@ -90,7 +90,7 @@ For tabs with a data view: plots, a results table, or a log.
   packed at the top as sections collapse.
 
 Tabs using it: diagnostics, monitored acquisition, timewalk calibration,
-parameter sweep, serval config, power supply.
+parameter sweep, serval config, power supply, conversion.
 
 ### 3.2 Page layout: `ui_style.build_page_layout(self)` → `page`
 
@@ -100,7 +100,8 @@ scrollable page. The column is capped at 640 px (`PAGE_MAX_WIDTH`) and
 left-aligned, so fields don't stretch across a wide window. The components
 and spacing are the same as in the sidebar.
 
-Tabs using it: collection parameters, stage control.
+Tabs using it: collection parameters, stage control, and the Analysis
+placeholders (parameter grouping, calibration, coincidence).
 
 ### 3.3 Main-area content
 
@@ -325,6 +326,7 @@ after `autoRange()`, so it centers on the final view.
 |---|---|
 | Diagnostics, Monitored Acquisition, Timewalk (histogram) | No data — press Start to acquire |
 | Parameter Sweep | No data — press Start to sweep |
+| Conversion | No data — press Start to convert |
 | Timewalk (correction) | No correction yet — press Generate Correction |
 
 ## 6. Copy conventions
