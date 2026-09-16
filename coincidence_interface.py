@@ -29,6 +29,10 @@ REDRAW_DELAY_MS = 150
 # Quantities that are a distribution, and so are drawn as a curve; the rest
 # are per-bin values drawn as points.
 CURVE_QUANTITIES = (co.QUANTITY_COUNTS, co.QUANTITY_DENSITY)
+# A 1D plot can be split into a line per value of a second column.
+SPLIT_NONE = "None"
+# More distinct values than this and the split uses ranges instead.
+MAX_SPLIT_VALUES = 12
 
 
 def colorize(values, levels, log):
@@ -83,6 +87,8 @@ class CoincidenceInterface(ttk.Frame):
         self.auto_levels_var = pvar(tk.BooleanVar, "auto_levels", True)
         self.aspect_var = pvar(tk.BooleanVar, "equal_aspect", False)
         self.quantity_var = pvar(tk.StringVar, "quantity", co.QUANTITY_DENSITY)
+        self.split_var = pvar(tk.StringVar, "split_by", SPLIT_NONE)
+        self.split_bins_var = pvar(tk.StringVar, "split_bins", "4")
         # Which columns get a plot of their own, and which can be a main-plot axis.
         self.plot_columns_var = pvar(tk.StringVar, "gate_columns", ",".join(co.DEFAULT_KEYS))
         self.main_columns_var = pvar(tk.StringVar, "main_columns", ",".join(co.DEFAULT_KEYS))
@@ -105,6 +111,7 @@ class CoincidenceInterface(ttk.Frame):
         self._curves = {}         # key -> the gate plot's PlotDataItem, reused
         self._placeholders = {}   # plot -> its "no data" label, reused
         self._data_ranges = {}    # key -> the column's plotting range
+        self._distinct = {}       # key -> its distinct values, or None if there are many
         self._binning = {}        # key -> (low, high, bin index, inside) for the gate plots
         self._main_binning = {}   # (key, low, high, bins) -> (bin index, inside)
         self._mask_cache = {}     # key -> (range, boolean mask) for an applied gate
@@ -115,7 +122,8 @@ class CoincidenceInterface(ttk.Frame):
         self._build_ui()
         # These only affect the main plot, so they don't recompute the gate plots.
         for var in (self.mode_var, self.x_var, self.y_var, self.x_bins_var, self.y_bins_var,
-                    self.log_var, self.quantity_var, self.auto_levels_var, self.aspect_var):
+                    self.log_var, self.quantity_var, self.auto_levels_var, self.aspect_var,
+                    self.split_var, self.split_bins_var):
             var.trace_add("write", self._schedule_main_redraw)
         self.gate_bins_var.trace_add("write", self._on_gate_bins_changed)
         self._redraw()
@@ -162,22 +170,31 @@ class CoincidenceInterface(ttk.Frame):
         ui_style.add_form_row(plot, 5, "Quantity:", ttk.Combobox(
             plot, textvariable=self.quantity_var, values=co.QUANTITIES, state="readonly", width=18,
         ))
+        self._split_label = ttk.Label(plot, text="Split by (1D):")
+        self._split_label.grid(row=6, column=0, sticky="w", padx=(0, 8), pady=4)
+        self._split_combo = ttk.Combobox(plot, textvariable=self.split_var, state="readonly", width=18)
+        self._split_combo.grid(row=6, column=1, sticky="ew", pady=4)
+        self._split_bins_label = ttk.Label(plot, text="Split ranges:")
+        self._split_bins_label.grid(row=7, column=0, sticky="w", padx=(0, 8), pady=4)
+        self._split_bins_entry = ttk.Entry(plot, textvariable=self.split_bins_var, width=18)
+        self._split_bins_entry.grid(row=7, column=1, sticky="ew", pady=4)
         ttk.Checkbutton(plot, text="Log color scale (2D)", variable=self.log_var).grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(4, 0)
+            row=8, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
         ttk.Checkbutton(plot, text="Auto color levels", variable=self.auto_levels_var).grid(
-            row=7, column=0, columnspan=2, sticky="w", pady=(0, 0)
+            row=9, column=0, columnspan=2, sticky="w", pady=(0, 0)
         )
         ttk.Checkbutton(plot, text="Equal aspect ratio (2D)", variable=self.aspect_var).grid(
-            row=8, column=0, columnspan=2, sticky="w", pady=(0, 0)
+            row=10, column=0, columnspan=2, sticky="w", pady=(0, 0)
         )
         ui_style.add_note(
-            plot, 9,
+            plot, 11,
             "Probability density normalizes the counts to integrate to 1 over the plotted range. Other "
             "quantities are drawn as points, one per bin that has data; the asymmetry is "
             "(forward − backward) / total by the sign of p_z. An axis whose gate is applied is bounded "
             "by that gate. Drag the color bar's handles to set the heat map's levels, which turns auto "
-            "levels off.",
+            "levels off. “Split by” draws a 1D line per value of a second column, or per range of it "
+            "when it has many values, each normalized on its own.",
             pady=(4, 4),
         )
 
@@ -218,6 +235,7 @@ class CoincidenceInterface(ttk.Frame):
         self._main_plot = self._main_glw.addPlot(
             row=0, col=0, viewBox=ZoomFocusViewBox(on_focus=self._toggle_main_focus),
         )
+        self._legend = self._main_plot.addLegend(offset=(-10, 10))
         self._color_bar = pg.ColorBarItem(colorMap=rainforest_colormap(), interactive=True, values=(0.0, 1.0))
         self._color_bar.sigLevelsChanged.connect(self._on_levels_changed)
         self._main_glw.addItem(self._color_bar, row=0, col=1)
@@ -372,6 +390,9 @@ class CoincidenceInterface(ttk.Frame):
             combo.configure(values=keys)
             if keys and var.get() not in keys:
                 var.set(keys[min(fallback, len(keys) - 1)])
+        self._split_combo.configure(values=[SPLIT_NONE] + keys)
+        if self.split_var.get() not in [SPLIT_NONE] + keys:
+            self.split_var.set(SPLIT_NONE)
 
     def _build_small_plots(self):
         """One plot, gate checkbox and region per column with "Gate" ticked.
@@ -452,6 +473,7 @@ class CoincidenceInterface(ttk.Frame):
         self._ranges = {}
         self._mask_cache = {}
         self._data_ranges = {}
+        self._distinct = {}
         self._binning = {}
         self._main_binning = {}
         self._build_column_table()
@@ -582,7 +604,13 @@ class CoincidenceInterface(ttk.Frame):
         is_2d = self.mode_var.get() == MODE_2D
         for widget in (self._y_label, self._y_combo, self._y_bins_label, self._y_bins_entry):
             widget.setVisible(is_2d)
+        splitting = not is_2d and self.split_var.get() != SPLIT_NONE
+        for widget in (self._split_label, self._split_combo):
+            widget.setVisible(not is_2d)
+        for widget in (self._split_bins_label, self._split_bins_entry):
+            widget.setVisible(splitting)
         self._main_plot.clear()
+        self._legend.clear()
         self._update_gate_info()
 
         if self._dataset is not None:
@@ -639,6 +667,35 @@ class CoincidenceInterface(ttk.Frame):
             cached = co.bin_index(self._dataset.arrays[key], low, high, bins)
             self._main_binning[cache_key] = cached
         return cached
+
+    def _distinct_for(self, key):
+        """The column's distinct values when there are few enough to draw one
+        line each, else None. Cached: it is a sort over the whole column."""
+        if key not in self._distinct:
+            values = self._dataset.arrays[key]
+            values = np.unique(values[np.isfinite(values)])
+            self._distinct[key] = values if values.size <= MAX_SPLIT_VALUES else None
+        return self._distinct[key]
+
+    def _series_groups(self, base_inside):
+        """[(legend label or None, rows)] for the 1D plot: one entry unless a
+        second column splits it."""
+        key = self.split_var.get()
+        if key == SPLIT_NONE or self._dataset is None or key not in self._dataset.arrays:
+            return [(None, base_inside)]
+        values = self._dataset.arrays[key]
+        label = self._dataset.label(key)
+        distinct = self._distinct_for(key)
+        if distinct is not None:
+            return [(f"{label} = {value:g}", base_inside & (values == value)) for value in distinct]
+        count = read_number(self.split_bins_var, "Split ranges", integer=True, positive=True)
+        low, high = self._axis_range(key)
+        edges = np.linspace(low, high, count + 1)
+        index, inside = co.bin_index(values, low, high, count)
+        return [
+            (f"{edges[i]:.3g} to {edges[i + 1]:.3g}", base_inside & inside & (index == i))
+            for i in range(count)
+        ]
 
     def _data_range(self, key):
         """A column's plotting range. Worth keeping: it is a percentile over
@@ -729,20 +786,26 @@ class CoincidenceInterface(ttk.Frame):
             self._main_plot.setTitle(f"{quantity} of {self._dataset.label(y_key)} against "
                                      f"{self._dataset.label(x_key)} ({scale} color)")
         else:
-            centers, values = co.histogram_1d(
-                None, pz, x_bins, *x_range, quantity, binning=(x_index, x_inside),
-            )
-            if quantity in CURVE_QUANTITIES:
-                self._main_plot.addItem(pg.PlotDataItem(centers, values, pen=pg.mkPen(BLUE, width=1.5)))
-            else:
-                # One point per bin that has data; empty bins are left out.
-                has_data = np.isfinite(values)
-                self._main_plot.addItem(pg.ScatterPlotItem(
-                    centers[has_data], values[has_data], symbol="o", size=6,
-                    pen=pg.mkPen(BLUE), brush=pg.mkBrush(BLUE),
-                ))
+            groups = self._series_groups(x_inside)
+            for position, (label, selected) in enumerate(groups):
+                centers, values = co.histogram_1d(
+                    None, pz, x_bins, *x_range, quantity, binning=(x_index, selected),
+                )
+                color = BLUE if label is None else pg.intColor(position, hues=max(len(groups), 3))
+                if quantity in CURVE_QUANTITIES:
+                    self._main_plot.addItem(pg.PlotDataItem(
+                        centers, values, pen=pg.mkPen(color, width=1.5), name=label,
+                    ))
+                else:
+                    # One point per bin that has data; empty bins are left out.
+                    has_data = np.isfinite(values)
+                    self._main_plot.addItem(pg.ScatterPlotItem(
+                        centers[has_data], values[has_data], symbol="o", size=6,
+                        pen=pg.mkPen(color), brush=pg.mkBrush(color), name=label,
+                    ))
             self._main_plot.setLabel("left", quantity)
-            self._main_plot.setTitle(f"{quantity} against {self._dataset.label(x_key)}")
+            split = "" if len(groups) == 1 else f", split by {self._dataset.label(self.split_var.get())}"
+            self._main_plot.setTitle(f"{quantity} against {self._dataset.label(x_key)}{split}")
         self._main_plot.setLabel("bottom", self._dataset.label(x_key))
         drawn.add(self._main_plot)
         return drawn
