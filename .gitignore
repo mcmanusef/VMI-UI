@@ -7,6 +7,13 @@ venv/
 
 # IDE
 .idea/
+.ruff_cache/
+
+# Per-machine session state: last-used folders, plot ranges, calibration
+# paths. Written by app_settings.py, and regenerated from each field's
+# default when missing -- so it's machine-specific, not shared config.
+# (serval_config.json stays tracked: those are real shared defaults.)
+app_settings.json
 
 # Large binary data / manuals (not source)
 *.cv4
