@@ -191,7 +191,8 @@ class CoincidenceInterface(ttk.Frame):
             plot, 11,
             "Probability density normalizes the counts to integrate to 1 over the plotted range. Other "
             "quantities are drawn as points, one per bin that has data; the asymmetry is "
-            "(forward − backward) / total by the sign of p_z. An axis whose gate is applied is bounded "
+            "(forward − backward) / total by the sign of p_x, the propagation axis. An axis whose gate "
+            "is applied is bounded "
             "by that gate. Drag the color bar's handles to set the heat map's levels, which turns auto "
             "levels off. “Split by” draws a 1D line per value of a second column, or per range of it "
             "when it has many values, each normalized on its own.",
@@ -727,14 +728,14 @@ class CoincidenceInterface(ttk.Frame):
         """Counts per gate plot, gated by every gate except the plot's own."""
         drawn = set()
         arrays = self._dataset.arrays
-        pz = arrays["pz"]
+        forward = arrays[co.FORWARD_KEY]
         bins = read_number(self.gate_bins_var, "Gate plot bins", integer=True, positive=True)
         for key, plot in self._small.items():
             low, high, index, inside = self._binning_for(key, bins)
             mask = self._combined_mask(skip=key)
             selected = inside if mask is None else (inside & mask)
             centers, counts = co.histogram_1d(
-                arrays[key], pz, bins, low, high, co.QUANTITY_COUNTS, binning=(index, selected),
+                arrays[key], forward, bins, low, high, co.QUANTITY_COUNTS, binning=(index, selected),
             )
             self._curves[key].setData(centers, counts)
             drawn.add(plot)
@@ -746,7 +747,7 @@ class CoincidenceInterface(ttk.Frame):
         x_bins = read_number(self.x_bins_var, "X bins", integer=True, positive=True)
         y_bins = read_number(self.y_bins_var, "Y bins", integer=True, positive=True)
         quantity = self.quantity_var.get()
-        pz = arrays["pz"]
+        forward = arrays[co.FORWARD_KEY]
 
         inside = self._combined_mask()
         self.gated_var.set(str(int(inside.sum()) if inside is not None else self._dataset.n_rows))
@@ -767,7 +768,7 @@ class CoincidenceInterface(ttk.Frame):
             y_range = self._axis_range(y_key)
             y_index, y_inside = self._main_binning_for(y_key, *y_range, y_bins)
             values, x_edges, y_edges = co.histogram_2d(
-                None, None, pz, (x_bins, y_bins), x_range, y_range, quantity,
+                None, None, forward, (x_bins, y_bins), x_range, y_range, quantity,
                 binning=(x_index, y_index, x_inside & y_inside),
             )
             # Counts and density can use a log color scale; the signed
@@ -789,7 +790,7 @@ class CoincidenceInterface(ttk.Frame):
             groups = self._series_groups(x_inside)
             for position, (label, selected) in enumerate(groups):
                 centers, values = co.histogram_1d(
-                    None, pz, x_bins, *x_range, quantity, binning=(x_index, selected),
+                    None, forward, x_bins, *x_range, quantity, binning=(x_index, selected),
                 )
                 color = BLUE if label is None else pg.intColor(position, hues=max(len(groups), 3))
                 if quantity in CURVE_QUANTITIES:

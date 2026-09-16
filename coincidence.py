@@ -7,7 +7,9 @@ with two ions gives two rows, and one with no ion keeps a NaN m/q (gating
 on m/q then drops it). Rows whose momenta are NaN, i.e. outside the
 calibration's valid dt range, are dropped on load.
 
-p_r is the full momentum magnitude, sqrt(px^2 + py^2 + pz^2).
+p_r is the full momentum magnitude, sqrt(px^2 + py^2 + pz^2). The
+forward-backward asymmetry splits rows by the sign of p_x, the propagation
+axis (FORWARD_KEY).
 
 Gates are (low, high) ranges per variable. A plot of one variable shows the
 data gated by every other enabled gate, so a gate never cuts into its own
@@ -68,6 +70,8 @@ QUANTITY_ASYMMETRY = "Forward–backward asymmetry"
 QUANTITIES = (QUANTITY_COUNTS, QUANTITY_DENSITY, QUANTITY_ASYMMETRY)
 
 MOMENTUM_COLUMNS = ("px", "py", "pz")
+# The propagation axis: its sign is "forward" in the asymmetry.
+FORWARD_KEY = "px"
 
 
 @dataclasses.dataclass
@@ -183,18 +187,20 @@ def counts_1d(index, inside, bins):
     return np.bincount(index[inside], minlength=int(bins)).astype(np.float64)
 
 
-def histogram_1d(x, pz, bins, lo, hi, quantity=QUANTITY_DENSITY, binning=None):
-    """(bin centers, values) of `quantity` against x. `binning` is a cached
-    (index, inside) from bin_index() for the same x, range and bin count."""
+def histogram_1d(x, forward, bins, lo, hi, quantity=QUANTITY_DENSITY, binning=None):
+    """(bin centers, values) of `quantity` against x. `forward` is the
+    momentum along the propagation axis, whose sign splits forward from
+    backward. `binning` is a cached (index, inside) from bin_index() for the
+    same x, range and bin count."""
     bins = int(bins)
     edges = np.linspace(lo, hi, bins + 1)
     centers = 0.5 * (edges[:-1] + edges[1:])
     index, inside = bin_index(x, lo, hi, bins) if binning is None else binning
-    inside = inside & np.isfinite(pz)
+    inside = inside & np.isfinite(forward)
     if quantity == QUANTITY_ASYMMETRY:
-        forward = counts_1d(index, inside & (pz > 0), bins)
-        backward = counts_1d(index, inside & (pz < 0), bins)
-        return centers, _asymmetry(forward, backward)
+        ahead = counts_1d(index, inside & (forward > 0), bins)
+        behind = counts_1d(index, inside & (forward < 0), bins)
+        return centers, _asymmetry(ahead, behind)
     counts = counts_1d(index, inside, bins)
     if quantity == QUANTITY_DENSITY:
         return centers, _density(counts, float(edges[1] - edges[0]))
@@ -203,11 +209,12 @@ def histogram_1d(x, pz, bins, lo, hi, quantity=QUANTITY_DENSITY, binning=None):
     raise ValueError(f"Unknown quantity: {quantity}")
 
 
-def histogram_2d(x, y, pz, bins, x_range, y_range, quantity=QUANTITY_DENSITY, binning=None):
+def histogram_2d(x, y, forward, bins, x_range, y_range, quantity=QUANTITY_DENSITY, binning=None):
     """(values[x bin, y bin], x edges, y edges) of `quantity` in 2D. `bins`
-    is one count for both axes, or (x bins, y bins). `binning` is a cached
-    (x index, y index, inside) for the same columns, ranges and bin counts,
-    in which case x and y are not read."""
+    is one count for both axes, or (x bins, y bins). `forward` is the
+    momentum along the propagation axis, whose sign splits forward from
+    backward. `binning` is a cached (x index, y index, inside) for the same
+    columns, ranges and bin counts, in which case x and y are not read."""
     x_bins, y_bins = (int(bins), int(bins)) if np.isscalar(bins) else (int(bins[0]), int(bins[1]))
     x_edges = np.linspace(x_range[0], x_range[1], x_bins + 1)
     y_edges = np.linspace(y_range[0], y_range[1], y_bins + 1)
@@ -217,7 +224,7 @@ def histogram_2d(x, y, pz, bins, x_range, y_range, quantity=QUANTITY_DENSITY, bi
         inside = x_inside & y_inside
     else:
         x_index, y_index, inside = binning
-    inside = inside & np.isfinite(pz)
+    inside = inside & np.isfinite(forward)
     flat = x_index * y_bins + y_index
 
     def counts_2d(selected):
@@ -225,9 +232,9 @@ def histogram_2d(x, y, pz, bins, x_range, y_range, quantity=QUANTITY_DENSITY, bi
         return counts.reshape(x_bins, y_bins).astype(np.float64)
 
     if quantity == QUANTITY_ASYMMETRY:
-        forward = counts_2d(inside & (pz > 0))
-        backward = counts_2d(inside & (pz < 0))
-        return _asymmetry(forward, backward), x_edges, y_edges
+        ahead = counts_2d(inside & (forward > 0))
+        behind = counts_2d(inside & (forward < 0))
+        return _asymmetry(ahead, behind), x_edges, y_edges
     counts = counts_2d(inside)
     if quantity == QUANTITY_DENSITY:
         cell = float((x_edges[1] - x_edges[0]) * (y_edges[1] - y_edges[0]))
