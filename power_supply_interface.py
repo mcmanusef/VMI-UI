@@ -669,6 +669,9 @@ class PowerSupplyInterface(ttk.Frame):
         self._group_grid = None
         self._group_lead_vars = {}
         self._populate_channel_grid()
+        ui_style.build_button_bar(
+            self._grid_card, 1, [("Toggle All", self._toggle_all_channels)], pady=(0, 8)
+        )
 
         log_card = ui_style.build_card(main, 2, "Activity", pady=8)
         log_card.rowconfigure(0, weight=1)
@@ -720,7 +723,8 @@ class PowerSupplyInterface(ttk.Frame):
         ui_style.add_note(
             self._grid, len(channels) + 2,
             "Edit V0 / I0 / ramp values, then click Apply (or press Enter in any field). "
-            "ON / OFF act immediately. Name and Group are saved per channel.",
+            "ON / OFF act immediately. Name and Group are saved per channel. Toggle All below flips "
+            "every listed channel together (all off if they're not all in the same state).",
             columnspan=len(headers), pady=(6, 4),
         )
         self._populate_group_grid()
@@ -810,6 +814,61 @@ class PowerSupplyInterface(ttk.Frame):
         self.worker.queue_status_toggle(channel)
         self._log(f"{self._channel_label(channel)}: queued status toggle")
 
+    def _member_state(self, channel):
+        """"ON"/"OFF" for a channel's last-known status, or None if it
+        hasn't been read yet (or isn't a channel we know about)."""
+        row = self.rows.get(channel)
+        if row is None:
+            return None
+        current = row.status_var.get().split("/")[0]
+        if current in ChannelRow._ON_LIKE:
+            return "ON"
+        if current in ChannelRow._OFF_LIKE:
+            return "OFF"
+        return None
+
+    def _toggle_members(self, channels, label):
+        """Flip a set of channels together, like one switch: all-ON goes to
+        OFF and all-OFF goes to ON, but if they disagree (or some haven't
+        reported a status yet) the safe move is to turn everything off
+        rather than guess which way each one should go."""
+        if self.worker is None:
+            self._log("Not connected -- connect first.")
+            return
+        known = {ch: self._member_state(ch) for ch in channels}
+        known = {ch: s for ch, s in known.items() if s is not None}
+        if not known:
+            self._log(f"{label}: no status read yet.")
+            return
+        if len(known) == len(channels) and len(set(known.values())) == 1:
+            desired = "OFF" if next(iter(known.values())) == "ON" else "ON"
+        else:
+            desired = "OFF"
+
+        queued = 0
+        for ch, current in known.items():
+            if current != desired:
+                self.worker.queue_status_toggle(ch)
+                self._log(f"{self._channel_label(ch)}: queued status toggle")
+                queued += 1
+        skipped = [ch for ch in channels if ch not in known]
+        if skipped:
+            self._log(f"{label}: skipping {', '.join(skipped)} (no status yet).")
+        elif queued == 0:
+            self._log(f"{label}: already {desired}.")
+
+    def _toggle_all_channels(self):
+        channels = list(self.rows)
+        if not channels:
+            return
+        self._toggle_members(channels, "All channels")
+
+    def _toggle_group(self, group):
+        members = self._groups().get(group)
+        if not members:
+            return
+        self._toggle_members(members, f"Group {group}")
+
     # -- channel groups --
     #
     # Channels sharing a Group name move together: "Capture Ratios" records
@@ -861,7 +920,7 @@ class PowerSupplyInterface(ttk.Frame):
             )
             return
 
-        headers = ["Group", "Channels", "V0 ratios", "Lead V0", "", ""]
+        headers = ["Group", "Channels", "V0 ratios", "Lead V0", "", "", ""]
         for i, header in enumerate(headers):
             ttk.Label(grid, text=header).grid(
                 row=0, column=i, sticky="w", padx=(6, 4) if i == 0 else 2, pady=(4, 2)
@@ -890,15 +949,20 @@ class PowerSupplyInterface(ttk.Frame):
             lead_entry.grid(row=r, column=3, padx=2, pady=1)
             lead_entry.bind("<Return>", lambda _e, g=group: self._apply_group(g))
 
-            ttk.Button(grid, text="Capture Ratios", command=lambda g=group: self._capture_group_ratios(g)).grid(
+            ttk.Button(grid, text="Toggle", width=6, command=lambda g=group: self._toggle_group(g)).grid(
                 row=r, column=4, padx=2, pady=1
             )
+            ttk.Button(grid, text="Capture Ratios", command=lambda g=group: self._capture_group_ratios(g)).grid(
+                row=r, column=5, padx=2, pady=1
+            )
             ttk.Button(grid, text="Apply", width=6, command=lambda g=group: self._apply_group(g)).grid(
-                row=r, column=5, padx=(8, 6), pady=1
+                row=r, column=6, padx=(8, 6), pady=1
             )
 
         ui_style.add_note(
             grid, len(groups) + 2,
+            "Toggle turns every member ON or OFF together: if they're all already in the same state it "
+            "flips them the other way, otherwise (mixed, or status not read yet) it turns them all off. "
             "Capture Ratios records each member's V0 set value as a ratio to the group's first channel. "
             "Apply sets the first channel's V0 to Lead V0 and scales the others by those ratios. "
             "Each channel still ramps at its own rate, so the ratio holds exactly once ramping finishes.",
