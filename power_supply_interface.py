@@ -325,7 +325,8 @@ class PowerSupplyUnavailable(RuntimeError):
 class GroupVoltageControl:
     """Drives one channel group's V0 from another thread (the parameter
     sweep lowering the voltages while the stage moves), using the same lead
-    V0 + captured ratios scheme as the Groups card's Apply button.
+    V0 + captured ratios/differences scheme as the Groups card's Apply
+    button.
 
     It never touches a widget: the writes go through the SY127 worker's
     command queue, log lines through the log queue, and the readback comes
@@ -340,17 +341,22 @@ class GroupVoltageControl:
     SETTLE_TOLERANCE_V = 5.0
     SETTLE_TOLERANCE_FRAC = 0.02
 
-    def __init__(self, ui, group, members, ratios):
+    def __init__(self, ui, group, members, mode, factors):
         self._ui = ui
         self.group = group
         self.members = list(members)
-        self.ratios = dict(ratios)
+        self.mode = mode
+        self.factors = dict(factors)
 
     def targets(self, lead_v0):
         """{channel: V0} for a given lead voltage -- rounded exactly the way
         the values actually written to the device are, so the readback
-        check below compares against what was really asked for."""
-        return {ch: float(_format_setpoint(lead_v0 * self.ratios[ch])) for ch in self.members}
+        check below compares against what was really asked for. In "ratio"
+        mode each member is lead_v0 times its captured ratio; in
+        "difference" mode each member is lead_v0 plus its captured offset."""
+        if self.mode == "difference":
+            return {ch: float(_format_setpoint(lead_v0 + self.factors[ch])) for ch in self.members}
+        return {ch: float(_format_setpoint(lead_v0 * self.factors[ch])) for ch in self.members}
 
     def set_lead_v0(self, lead_v0):
         """Queue the V0 write for every member. Returns (targets,
@@ -668,6 +674,8 @@ class PowerSupplyInterface(ttk.Frame):
         self._grid = None
         self._group_grid = None
         self._group_lead_vars = {}
+        self._group_ref_vars = {}
+        self._group_mode_vars = {}
         self._populate_channel_grid()
         ui_style.build_button_bar(
             self._grid_card, 1, [("Toggle All", self._toggle_all_channels)], pady=(0, 8)
@@ -871,14 +879,22 @@ class PowerSupplyInterface(ttk.Frame):
 
     # -- channel groups --
     #
-    # Channels sharing a Group name move together: "Capture Ratios" records
-    # each member's V0 as a ratio to the group's lead channel (its first
-    # member in table order), and Apply sets the lead to a new V0 and every
-    # other member to that value times its ratio. Ratios are stored rather
-    # than re-derived from the current setpoints on every Apply, so repeated
-    # moves (and one-decimal rounding) never drift the proportions.
+    # Channels sharing a Group name move together: "Capture" records each
+    # member's V0 relative to the group's reference channel (its first
+    # member in table order by default, or whichever channel is picked in
+    # the Reference column), either as a ratio or as a fixed difference
+    # (the Mode column). Apply then sets the reference channel to a new V0
+    # and every other member to that value scaled by its ratio or offset by
+    # its difference. The captured factors are stored rather than
+    # re-derived from the current setpoints on every Apply, so repeated
+    # moves (and one-decimal rounding) never drift the proportions/gaps.
 
     GROUP_RATIOS_KEY = "power_supply.group_ratios"
+    GROUP_REFERENCE_KEY = "power_supply.group_reference"
+    GROUP_MODE_KEY = "power_supply.group_mode"
+
+    MODE_LABELS = {"ratio": "Ratio", "difference": "Difference"}
+    MODE_VALUES = {label: mode for mode, label in MODE_LABELS.items()}
 
     def _groups(self):
         """Group name -> member channel IDs, in table order (first = lead)."""
@@ -889,12 +905,45 @@ class PowerSupplyInterface(ttk.Frame):
                 groups.setdefault(name, []).append(ch)
         return groups
 
+    def _group_reference(self, group, members):
+        """The channel `group`'s ratios/differences are measured against:
+        whichever channel was picked in the Reference column, or the first
+        member in table order if none was picked (or the picked one is no
+        longer in the group)."""
+        stored = (app_settings.get(self.GROUP_REFERENCE_KEY) or {}).get(group)
+        return stored if stored in members else members[0]
+
+    def _set_group_reference(self, group, channel):
+        stored = dict(app_settings.get(self.GROUP_REFERENCE_KEY) or {})
+        stored[group] = channel
+        app_settings.set(self.GROUP_REFERENCE_KEY, stored)
+        self._log(f"Group {group}: reference channel set to {self._channel_label(channel)}.")
+        self._populate_group_grid()
+
+    def _group_mode(self, group):
+        """"ratio" (default) or "difference" -- whether `group`'s other
+        members are locked to the reference channel by a fixed V0 ratio or
+        a fixed V0 offset."""
+        stored = (app_settings.get(self.GROUP_MODE_KEY) or {}).get(group)
+        return stored if stored in self.MODE_LABELS else "ratio"
+
+    def _set_group_mode(self, group, mode):
+        stored = dict(app_settings.get(self.GROUP_MODE_KEY) or {})
+        stored[group] = mode
+        app_settings.set(self.GROUP_MODE_KEY, stored)
+        self._log(f"Group {group}: mode set to {self.MODE_LABELS[mode]}.")
+        self._populate_group_grid()
+
     def _stored_ratios(self, group, members):
-        """The captured ratios for `group` as {channel: ratio}, or None if
-        none were captured or they were captured for a different lead or
-        set of channels than the group has now."""
+        """The captured ratios/differences for `group` as {channel: value},
+        or None if none were captured or they were captured for a
+        different reference channel, mode, or set of channels than the
+        group has now."""
+        reference = self._group_reference(group, members)
+        mode = self._group_mode(group)
         stored = (app_settings.get(self.GROUP_RATIOS_KEY) or {}).get(group)
-        if not stored or stored.get("lead") != members[0] or set(stored.get("ratios", {})) != set(members):
+        if (not stored or stored.get("lead") != reference or stored.get("mode", "ratio") != mode
+                or set(stored.get("ratios", {})) != set(members)):
             return None
         return stored["ratios"]
 
@@ -910,6 +959,8 @@ class PowerSupplyInterface(ttk.Frame):
         grid.grid(row=0, column=0, sticky="ew")
         grid.columnconfigure(1, weight=1)
         self._group_lead_vars = {}
+        self._group_ref_vars = {}
+        self._group_mode_vars = {}
 
         groups = self._groups()
         if not groups:
@@ -920,7 +971,7 @@ class PowerSupplyInterface(ttk.Frame):
             )
             return
 
-        headers = ["Group", "Channels", "V0 ratios", "Lead V0", "", "", ""]
+        headers = ["Group", "Channels", "Reference", "Mode", "Ratio / diff", "Lead V0", "", "", ""]
         for i, header in enumerate(headers):
             ttk.Label(grid, text=header).grid(
                 row=0, column=i, sticky="w", padx=(6, 4) if i == 0 else 2, pady=(4, 2)
@@ -934,38 +985,67 @@ class PowerSupplyInterface(ttk.Frame):
                 row=r, column=1, sticky="ew", padx=2, pady=1
             )
 
+            reference = self._group_reference(group, members)
+            ref_var = tk.StringVar(self, value=reference)
+            self._group_ref_vars[group] = ref_var
+            ref_combo = ttk.Combobox(
+                grid, textvariable=ref_var, values=members, width=6, state="readonly"
+            )
+            ref_combo.grid(row=r, column=2, sticky="w", padx=2, pady=1)
+            ref_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, g=group: self._set_group_reference(g, self._group_ref_vars[g].get()),
+            )
+
+            mode = self._group_mode(group)
+            mode_var = tk.StringVar(self, value=self.MODE_LABELS[mode])
+            self._group_mode_vars[group] = mode_var
+            mode_combo = ttk.Combobox(
+                grid, textvariable=mode_var, values=list(self.MODE_LABELS.values()),
+                width=9, state="readonly",
+            )
+            mode_combo.grid(row=r, column=3, sticky="w", padx=2, pady=1)
+            mode_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, g=group: self._set_group_mode(g, self.MODE_VALUES[self._group_mode_vars[g].get()]),
+            )
+
             ratios = self._stored_ratios(group, members)
             if ratios is not None:
-                ratio_label = ttk.Label(grid, text=" : ".join(f"{ratios[ch]:.4g}" for ch in members))
+                fmt = "{:+.4g}".format if mode == "difference" else "{:.4g}".format
+                ratio_label = ttk.Label(grid, text=" : ".join(fmt(ratios[ch]) for ch in members))
             elif (app_settings.get(self.GROUP_RATIOS_KEY) or {}).get(group):
                 ratio_label = ttk.Label(grid, text="Out of date — capture again", foreground=ui_style.WARNING)
             else:
                 ratio_label = ttk.Label(grid, text="Not captured", foreground=ui_style.WARNING)
-            ratio_label.grid(row=r, column=2, sticky="w", padx=2, pady=1)
+            ratio_label.grid(row=r, column=4, sticky="w", padx=2, pady=1)
 
-            lead_var = tk.StringVar(self, value=lead_text.get(group, self.rows[members[0]].v0_var.get()))
+            lead_var = tk.StringVar(self, value=lead_text.get(group, self.rows[reference].v0_var.get()))
             self._group_lead_vars[group] = lead_var
             lead_entry = ttk.Entry(grid, textvariable=lead_var, width=6, justify="right")
-            lead_entry.grid(row=r, column=3, padx=2, pady=1)
+            lead_entry.grid(row=r, column=5, padx=2, pady=1)
             lead_entry.bind("<Return>", lambda _e, g=group: self._apply_group(g))
 
             ttk.Button(grid, text="Toggle", width=6, command=lambda g=group: self._toggle_group(g)).grid(
-                row=r, column=4, padx=2, pady=1
+                row=r, column=6, padx=2, pady=1
             )
-            ttk.Button(grid, text="Capture Ratios", command=lambda g=group: self._capture_group_ratios(g)).grid(
-                row=r, column=5, padx=2, pady=1
+            ttk.Button(grid, text="Capture", command=lambda g=group: self._capture_group_ratios(g)).grid(
+                row=r, column=7, padx=2, pady=1
             )
             ttk.Button(grid, text="Apply", width=6, command=lambda g=group: self._apply_group(g)).grid(
-                row=r, column=6, padx=(8, 6), pady=1
+                row=r, column=8, padx=(8, 6), pady=1
             )
 
         ui_style.add_note(
             grid, len(groups) + 2,
             "Toggle turns every member ON or OFF together: if they're all already in the same state it "
             "flips them the other way, otherwise (mixed, or status not read yet) it turns them all off. "
-            "Capture Ratios records each member's V0 set value as a ratio to the group's first channel. "
-            "Apply sets the first channel's V0 to Lead V0 and scales the others by those ratios. "
-            "Each channel still ramps at its own rate, so the ratio holds exactly once ramping finishes.",
+            "Reference picks which channel the others are measured against (defaults to the first "
+            "channel). Mode picks how: Ratio keeps each member a fixed multiple of the reference V0, "
+            "Difference keeps each member a fixed number of volts above or below it. Capture records "
+            "each member's current V0 relative to the reference under that mode. Apply sets the "
+            "reference channel's V0 to Lead V0 and scales/offsets the others to match. Each channel "
+            "still ramps at its own rate, so the relationship holds exactly once ramping finishes.",
             columnspan=len(headers), pady=(6, 4),
         )
 
@@ -976,20 +1056,31 @@ class PowerSupplyInterface(ttk.Frame):
         try:
             values = {ch: float(self.rows[ch].v0_var.get()) for ch in members}
         except ValueError:
-            self._log(f"Group {group}: every channel needs a numeric V0 set value to capture ratios.")
+            self._log(f"Group {group}: every channel needs a numeric V0 set value to capture.")
             return
-        lead = members[0]
-        if values[lead] <= 0:
-            self._log(f"Group {group}: lead channel {self.rows[lead].label} needs a V0 above 0 to capture ratios.")
-            return
+        lead = self._group_reference(group, members)
+        mode = self._group_mode(group)
+
+        if mode == "difference":
+            factors = {ch: values[ch] - values[lead] for ch in members}
+            noun, fmt = "differences", "{:+.4g}".format
+        else:
+            if values[lead] <= 0:
+                self._log(
+                    f"Group {group}: reference channel {self.rows[lead].label} needs a V0 above 0 "
+                    "to capture ratios."
+                )
+                return
+            factors = {ch: values[ch] / values[lead] for ch in members}
+            noun, fmt = "ratios", "{:.4g}".format
 
         stored = dict(app_settings.get(self.GROUP_RATIOS_KEY) or {})
-        stored[group] = {"lead": lead, "ratios": {ch: values[ch] / values[lead] for ch in members}}
+        stored[group] = {"lead": lead, "mode": mode, "ratios": factors}
         app_settings.set(self.GROUP_RATIOS_KEY, stored)
         self._group_lead_vars[group].set(_format_setpoint(values[lead]))
         self._log(
-            f"Group {group}: captured V0 ratios "
-            + ", ".join(f"{self.rows[ch].label} {values[ch] / values[lead]:.4g}" for ch in members)
+            f"Group {group}: captured V0 {noun} (reference {self.rows[lead].label}) "
+            + ", ".join(f"{self.rows[ch].label} {fmt(factors[ch])}" for ch in members)
         )
         self._populate_group_grid()
 
@@ -1022,8 +1113,9 @@ class PowerSupplyInterface(ttk.Frame):
         """A GroupVoltageControl for `group`: the handle other tabs use to
         set its voltages off the GUI thread (the parameter sweep lowering
         them while the stage moves). Raises PowerSupplyUnavailable if this
-        tab isn't connected, there is no such group, or its ratios haven't
-        been captured -- the same three things Apply refuses on."""
+        tab isn't connected, there is no such group, or its ratios/
+        differences haven't been captured -- the same three things Apply
+        refuses on."""
         groups = self._groups()
         members = groups.get(group)
         if not members:
@@ -1033,21 +1125,25 @@ class PowerSupplyInterface(ttk.Frame):
             )
         if self.worker is None:
             raise PowerSupplyUnavailable("Power Supply tab isn't connected to the crate.")
-        ratios = self._stored_ratios(group, members)
-        if ratios is None:
+        mode = self._group_mode(group)
+        factors = self._stored_ratios(group, members)
+        if factors is None:
+            noun = "differences" if mode == "difference" else "ratios"
             raise PowerSupplyUnavailable(
-                f"Group {group}: capture ratios first (none captured for its current channels)."
+                f"Group {group}: capture {noun} first (none captured for its current channels/mode)."
             )
-        return GroupVoltageControl(self, group, members, ratios)
+        return GroupVoltageControl(self, group, members, mode, factors)
 
     def group_lead_v0(self, group):
-        """`group`'s lead channel V0 set value, as the text shown in the
-        channel table (the device's own value, refreshed on every status
-        read), or None if there's no such group or no value read yet."""
+        """`group`'s reference channel V0 set value, as the text shown in
+        the channel table (the device's own value, refreshed on every
+        status read), or None if there's no such group or no value read
+        yet."""
         members = self._groups().get(group)
         if not members:
             return None
-        return self.rows[members[0]].v0_var.get().strip() or None
+        reference = self._group_reference(group, members)
+        return self.rows[reference].v0_var.get().strip() or None
 
     def status_snapshot(self):
         """(monotonic timestamp, {channel: status fields}) of the last
