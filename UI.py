@@ -13,6 +13,7 @@ from collection_interface import CollectionInterface
 from diagnostics_interface import DiagnosticsInterface
 from parameter_grouping_interface import ParameterGroupingInterface
 from power_supply_interface import PowerSupplyInterface
+from raw_to_h5_interface import RawToH5Interface
 from serval_interface import ServalInterface
 from shared_state import make_plot_shared_vars, make_acquisition_shared_vars
 from stage_interface import StageInterface
@@ -94,12 +95,14 @@ class App(tk.Tk):
 
         # Analysis tabs
         conversion_tab = ttk.Frame(analysis)
+        raw_to_h5_tab = ttk.Frame(analysis)
         momentum_calibration_tab = ttk.Frame(analysis)
         mq_calibration_tab = ttk.Frame(analysis)
         apply_calibration_tab = ttk.Frame(analysis)
         grouping_tab = ttk.Frame(analysis)
         coincidence_tab = ttk.Frame(analysis)
         analysis.add(conversion_tab, text="conversion")
+        analysis.add(raw_to_h5_tab, text="tpx to h5")
         analysis.add(momentum_calibration_tab, text="momentum calibration")
         analysis.add(mq_calibration_tab, text="m/q calibration")
         analysis.add(apply_calibration_tab, text="apply calibration")
@@ -123,6 +126,7 @@ class App(tk.Tk):
         self._build_timewalk(timewalk_tab)
         self._build_sweep(sweep_tab)
         self._build_conversion(conversion_tab)
+        self._build_raw_to_h5(raw_to_h5_tab)
         self._build_momentum_calibration(momentum_calibration_tab)
         self._build_mq_calibration(mq_calibration_tab)
         self._build_apply_calibration(apply_calibration_tab)
@@ -218,6 +222,12 @@ class App(tk.Tk):
             acq_shared_vars=self._acq_shared_vars,
         )
         conversion_ui.grid(row=0, column=0, sticky="nsew")
+
+    def _build_raw_to_h5(self, parent: ttk.Frame):
+        _prepare_tab(parent)
+
+        raw_to_h5_ui = RawToH5Interface(parent, acq_shared_vars=self._acq_shared_vars)
+        raw_to_h5_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_momentum_calibration(self, parent: ttk.Frame):
         _prepare_tab(parent)
