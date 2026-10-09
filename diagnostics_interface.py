@@ -12,12 +12,13 @@ from qtk import filedialog, messagebox
 
 import app_settings
 import serval_client
+import tdc_mapping
 import ui_style
 from plot_panel import HistogramPlotPanel
 from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection, apply_timewalk_correction
 from tpx_processing import (
     decode_tpx3,
-    sort_tdcs,
+    classify_tdcs,
     group_pixels_by_pulse,
     group_times_relative,
     cluster_pixels_by_pulse,
@@ -386,7 +387,7 @@ class DiagnosticsInterface(ttk.Frame):
         pixels, tdcs, processed_packets, total_packets = decode_tpx3(str(path), max_packets=max_packets)
         if self._active_timewalk is not None:
             pixels = apply_timewalk_correction(pixels, self._active_timewalk)
-        etof, itof, pulses = sort_tdcs(300.0, tdcs)
+        etof, itof, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
 
         pulses_sorted = sorted(pulses)
         pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)

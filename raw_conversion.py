@@ -14,11 +14,12 @@ import time
 from dataclasses import dataclass, field
 
 import cv4_writer
+import tdc_mapping
 from cv4_writer import Cv4Writer
 from timewalk import apply_timewalk_correction
 from tpx_processing import (
     decode_tpx3,
-    sort_tdcs,
+    classify_tdcs,
     group_pixels_by_pulse,
     group_times_relative,
     cluster_pixels_by_pulse,
@@ -49,7 +50,7 @@ def process_raw_file(path, settings, timewalk=None):
     pixels, tdcs, processed_packets, total_packets = decode_tpx3(str(path), max_packets=None)
     if timewalk is not None:
         pixels = apply_timewalk_correction(pixels, timewalk)
-    etof, itof, pulses = sort_tdcs(300.0, tdcs)
+    etof, itof, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
 
     pulses_sorted = sorted(pulses)
     pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)

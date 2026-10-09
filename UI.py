@@ -19,6 +19,7 @@ from shared_state import make_plot_shared_vars, make_acquisition_shared_vars
 from stage_interface import StageInterface
 from sweep_interface import SweepInterface
 from tab_coordinator import TabCoordinator
+from tdc_mapping_interface import TdcMappingInterface
 from timewalk_interface import TimewalkInterface
 
 def _prepare_tab(parent: ttk.Frame):
@@ -77,9 +78,11 @@ class App(tk.Tk):
         serval_tab = ttk.Frame(hardware)
         stage_tab = ttk.Frame(hardware)
         power_supply_tab = ttk.Frame(hardware)
+        tdc_mapping_tab = ttk.Frame(hardware)
         hardware.add(serval_tab, text="serval config")
         hardware.add(stage_tab, text="stage control")
         hardware.add(power_supply_tab, text="power supply")
+        hardware.add(tdc_mapping_tab, text="tdc mapping")
 
         # Acquisition tabs
         collection_tab = ttk.Frame(acquisition)
@@ -120,6 +123,7 @@ class App(tk.Tk):
         self._build_serval_config(serval_tab)
         self._build_stage(stage_tab)
         self._build_power_supply(power_supply_tab)
+        self._build_tdc_mapping(tdc_mapping_tab)
         self._build_collection_params(collection_tab)
         self._build_diagnostics(diagnostics_tab)
         self._build_acquisition(acquisition_tab)
@@ -264,6 +268,12 @@ class App(tk.Tk):
 
         self.power_supply_ui = PowerSupplyInterface(parent, coordinator=self._coordinator)
         self.power_supply_ui.grid(row=0, column=0, sticky="nsew")
+
+    def _build_tdc_mapping(self, parent: ttk.Frame):
+        _prepare_tab(parent)
+
+        tdc_mapping_ui = TdcMappingInterface(parent)
+        tdc_mapping_ui.grid(row=0, column=0, sticky="nsew")
 
 
 if __name__ == "__main__":

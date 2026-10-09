@@ -12,10 +12,11 @@ from PyQt5 import QtCore
 
 import app_settings
 import serval_client
+import tdc_mapping
 import ui_style
 from qt_plots import hist_to_rgba, mpl_color, ZoomFocusViewBox
 from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection, generate_correction
-from tpx_processing import decode_tpx3, sort_tdcs, group_pixels_by_pulse
+from tpx_processing import decode_tpx3, classify_tdcs, group_pixels_by_pulse
 
 
 class TimewalkInterface(ttk.Frame):
@@ -337,7 +338,7 @@ class TimewalkInterface(ttk.Frame):
         tot_bins, tot_min, tot_max, t_bins, t_min, t_max = hist_settings
 
         pixels, tdcs, _, _ = decode_tpx3(str(path), max_packets=max_packets)
-        _, _, pulses = sort_tdcs(300.0, tdcs)
+        _, _, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
         pulses_sorted = sorted(pulses)
         pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)
 

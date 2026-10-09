@@ -36,20 +36,8 @@ import h5py
 import numpy as np
 
 from raw_conversion import list_raw_files, _SWEEP_VISIT_RE
+from tdc_mapping import FPGA_TDC_NS_PER_COUNT, FPGA_TDC_SUBTYPES, PICOTDC_NS_PER_COUNT
 from tpx_processing import PIXEL_RES_NS
-
-# PicoTDC: 1 count = 25 ns / 8192 (~3.0518 ps). FPGA TDC's combined
-# (coarse * 12 + fine - 1) counter: 1 count = 3.125 ns / 12 (~260.42 ps).
-PICOTDC_NS_PER_COUNT = 25.0 / 8192
-FPGA_TDC_NS_PER_COUNT = 3.125 / 12
-
-# FPGA TDC sub-nibble (bits [59:56]) -> (channel, edge). edge: 1 = rising, 0 = falling.
-_FPGA_TDC_SUBTYPES = {
-    0xF: (1, 1),
-    0xA: (1, 0),
-    0xE: (2, 1),
-    0xB: (2, 0),
-}
 
 
 @dataclasses.dataclass
@@ -196,7 +184,7 @@ def decode_raw_file(path):
                 tdc_edge.append(edge.astype(np.uint8))
                 tdc_chip.append(np.full(len(pico_words), chip, dtype=np.uint8))
 
-            for sub_value, (channel_id, edge_value) in _FPGA_TDC_SUBTYPES.items():
+            for sub_value, (channel_id, edge_value) in FPGA_TDC_SUBTYPES.items():
                 fw = tw[sub == np.uint64(sub_value)]
                 if len(fw) == 0:
                     continue

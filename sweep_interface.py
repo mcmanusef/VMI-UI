@@ -50,6 +50,7 @@ import pyqtgraph as pg
 import app_settings
 import cv4_writer
 import serval_client
+import tdc_mapping
 from power_supply_interface import PowerSupplyUnavailable
 from qt_plots import mpl_color, ZoomFocusViewBox
 import time_estimate
@@ -58,7 +59,7 @@ import ui_style
 from stage_interface import describe_move_failure
 from tpx_processing import (
     decode_tpx3,
-    sort_tdcs,
+    classify_tdcs,
     group_pixels_by_pulse,
     group_times_relative,
     cluster_pixels_by_pulse,
@@ -685,7 +686,7 @@ class SweepInterface(ttk.Frame):
         per-frame pipeline every other tab uses."""
         frame_start = time.perf_counter()
         pixels, tdcs, processed_packets, total_packets = decode_tpx3(str(path), max_packets=None)
-        etof, itof, pulses = sort_tdcs(300.0, tdcs)
+        etof, itof, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
         pulses_sorted = sorted(pulses)
         pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)
         clusters_by_pulse, cluster_size_sum, cluster_count = cluster_pixels_by_pulse(pixels_by_pulse)
