@@ -29,6 +29,10 @@ class PixelData:
 
 
 PIXEL_RES_NS = 25 / 16
+# Pixel ToA (16-bit coarse + 14-bit mid, in 1.5625 ns steps) wraps every
+# 2^34 * 1.5625 ns = 2^30 * 25 ns (~26.8 s); TDC times are folded onto the
+# same period so pulses and pixels line up.
+TIME_ROLLOVER_NS = (1 << 34) * PIXEL_RES_NS
 
 # Dither widths used to smear out the quantization of the raw timestamps.
 TDC_JITTER_NS = 0.26          # applied to every e-ToF and i-ToF time
@@ -135,7 +139,7 @@ def decode_tpx3(path: str, max_packets: int = None):
                 ts_lower = (pico >> 21) & 0x3FFFFFF
                 spidr = pico & 0x1FFFFF
                 ts = (spidr << 26) | ts_lower
-                time_ns = ts.astype(np.float64) * PICOTDC_NS_PER_COUNT
+                time_ns = np.mod(ts.astype(np.float64) * PICOTDC_NS_PER_COUNT, TIME_ROLLOVER_NS)
                 tdcs.extend(
                     (0xC, int(c), int(e), float(t))
                     for c, e, t in zip(channel, edge, time_ns)
@@ -151,7 +155,9 @@ def decode_tpx3(path: str, max_packets: int = None):
                 fine = fine[ok]
                 if len(fw) == 0:
                     continue
-                coarse = (fw >> 9) & ((1 << 35) - 1)
+                # Keep only the low 33 bits of the 35-bit coarse counter
+                # (3.125 ns steps) so it wraps with the pixel ToA.
+                coarse = (fw >> 9) & 0x1FFFFFFFF
                 combined = coarse.astype(np.int64) * 12 + (fine.astype(np.int64) - 1)
                 time_ns = combined.astype(np.float64) * FPGA_TDC_NS_PER_COUNT
                 tdcs.extend((sub_value, channel_id, edge_value, float(t)) for t in time_ns)
