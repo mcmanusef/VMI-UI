@@ -128,11 +128,20 @@ def decode_tpx3(path: str, max_packets: int = None):
         if np.any(tdc_mask):
             reduced_tdcs = reduced[tdc_mask]
             sub = (reduced_tdcs >> 56) & 0xF
+            # Each family/subtype is decoded separately, then the hits are
+            # put back in file order: classify_tdcs pairs each rising edge
+            # with the next falling edge on its line, which needs them
+            # interleaved as they arrived.
+            order = np.arange(len(reduced_tdcs))
+            parts = []
 
-            pico = reduced_tdcs[sub == 0xC]
+            pico_sel = sub == 0xC
+            pico = reduced_tdcs[pico_sel]
+            pico_order = order[pico_sel]
             if len(pico):
-                valid = (pico >> 52) & 1
-                pico = pico[valid == 0]
+                valid = ((pico >> 52) & 1) == 0
+                pico = pico[valid]
+                pico_order = pico_order[valid]
             if len(pico):
                 channel = (((pico >> 53) & 0x3) << 4) | ((pico >> 48) & 0xF)
                 edge = (pico >> 47) & 1
@@ -140,19 +149,22 @@ def decode_tpx3(path: str, max_packets: int = None):
                 spidr = pico & 0x1FFFFF
                 ts = (spidr << 26) | ts_lower
                 time_ns = np.mod(ts.astype(np.float64) * PICOTDC_NS_PER_COUNT, TIME_ROLLOVER_NS)
-                tdcs.extend(
-                    (0xC, int(c), int(e), float(t))
-                    for c, e, t in zip(channel, edge, time_ns)
+                parts.extend(
+                    (int(i), (0xC, int(c), int(e), float(t)))
+                    for i, c, e, t in zip(pico_order, channel, edge, time_ns)
                 )
 
             for sub_value, (channel_id, edge_value) in FPGA_TDC_SUBTYPES.items():
-                fw = reduced_tdcs[sub == sub_value]
+                sel = sub == sub_value
+                fw = reduced_tdcs[sel]
+                fw_order = order[sel]
                 if len(fw) == 0:
                     continue
                 fine = (fw >> 5) & 0xF
                 ok = (fine > 0) & (fine <= 12)
                 fw = fw[ok]
                 fine = fine[ok]
+                fw_order = fw_order[ok]
                 if len(fw) == 0:
                     continue
                 # Keep only the low 33 bits of the 35-bit coarse counter
@@ -160,7 +172,13 @@ def decode_tpx3(path: str, max_packets: int = None):
                 coarse = (fw >> 9) & 0x1FFFFFFFF
                 combined = coarse.astype(np.int64) * 12 + (fine.astype(np.int64) - 1)
                 time_ns = combined.astype(np.float64) * FPGA_TDC_NS_PER_COUNT
-                tdcs.extend((sub_value, channel_id, edge_value, float(t)) for t in time_ns)
+                parts.extend(
+                    (int(i), (sub_value, channel_id, edge_value, float(t)))
+                    for i, t in zip(fw_order, time_ns)
+                )
+
+            parts.sort(key=lambda item: item[0])
+            tdcs.extend(hit for _, hit in parts)
 
         if max_packets is not None and processed >= max_packets:
             continue

@@ -155,8 +155,8 @@ class TdcMappingInterface(ttk.Frame):
             signals[name] = tdc_mapping.SignalMapping(
                 source=tdc_mapping.TdcSource(family=v["family"].get(), channel=int(v["channel"].get())),
                 time_edge=v["time_edge"].get(),
-                gate_min_ns=_parse_optional_float(v["gate_min_ns"].get()),
-                gate_max_ns=_parse_optional_float(v["gate_max_ns"].get()),
+                gate_min_ns=tdc_mapping.parse_optional_float(v["gate_min_ns"].get()),
+                gate_max_ns=tdc_mapping.parse_optional_float(v["gate_max_ns"].get()),
             )
         return tdc_mapping.TdcMapping(**signals)
 
@@ -203,12 +203,3 @@ class TdcMappingInterface(ttk.Frame):
     def _restore_default(self):
         self._apply_mapping(tdc_mapping.default_mapping())
 
-
-def _parse_optional_float(text):
-    text = (text or "").strip()
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None

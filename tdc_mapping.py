@@ -118,6 +118,20 @@ def default_mapping():
     )
 
 
+def parse_optional_float(value):
+    """A gate bound as stored by the Hardware tab's entries (text, "" =
+    no bound) or as a number/None -> float or None."""
+    if value is None or isinstance(value, (int, float)):
+        return None if value is None else float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def _settings_key(signal_name, field):
     return f"tdc_mapping.{signal_name}.{field}"
 
@@ -137,7 +151,11 @@ def get_active_mapping():
                 channel=int(app_settings.get(_settings_key(name, "channel"), default_signal.source.channel)),
             ),
             time_edge=app_settings.get(_settings_key(name, "time_edge"), default_signal.time_edge),
-            gate_min_ns=app_settings.get(_settings_key(name, "gate_min_ns"), default_signal.gate_min_ns),
-            gate_max_ns=app_settings.get(_settings_key(name, "gate_max_ns"), default_signal.gate_max_ns),
+            gate_min_ns=parse_optional_float(
+                app_settings.get(_settings_key(name, "gate_min_ns"), default_signal.gate_min_ns)
+            ),
+            gate_max_ns=parse_optional_float(
+                app_settings.get(_settings_key(name, "gate_max_ns"), default_signal.gate_max_ns)
+            ),
         )
     return TdcMapping(**signals)
