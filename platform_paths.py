@@ -25,13 +25,6 @@ def dated_data_folder(leaf):
     return str(DATA_ROOT / datetime.date.today().strftime("%Y%m%d") / leaf)
 
 
-def scratch_folder(name):
-    """A folder under the scratch root (created) for throwaway raw files."""
-    folder = SCRATCH_ROOT / name
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
-
-
 def file_uri(path):
     """A local folder as the file:// URI Serval's destination wants. Made
     absolute first: Path.as_uri() refuses relative paths."""

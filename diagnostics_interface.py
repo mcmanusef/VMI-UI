@@ -38,6 +38,13 @@ from tpx_processing import (
 )
 
 
+DEFAULT_TEMP_DIR = str(platform_paths.SCRATCH_ROOT / "serval_diag")
+# Serval names Diagnostics' files <prefix><time>..., and only those are read
+# or cleaned up, so the temp folder can be any folder.
+FILE_PREFIX = "diag"
+FILE_GLOB = f"{FILE_PREFIX}*.tpx3"
+
+
 class DiagnosticsInterface(ttk.Frame):
     def __init__(self, parent, server_var=None, plot_shared_vars=None, coordinator=None, **kwargs):
         super().__init__(parent, **kwargs)
@@ -54,10 +61,11 @@ class DiagnosticsInterface(ttk.Frame):
         # default" button (next to the tab bar); untouched until then.
         self.frame_rate_var = tk.StringVar(self, value=app_settings.get("diag.frame_rate", "10"))
         self.max_packets_var = tk.StringVar(self, value=app_settings.get("diag.max_packets", "10000"))
+        self.temp_dir_var = tk.StringVar(self, value=app_settings.get("diag.temp_dir", DEFAULT_TEMP_DIR))
         self.accumulate_var = tk.BooleanVar(self, value=False)
         self.use_test_file_var = tk.BooleanVar(self, value=app_settings.get("diag.use_test_file", False))
         self.test_file_var = tk.StringVar(
-            self, value=app_settings.get("diag.test_file", str(platform_paths.SCRATCH_ROOT / "serval_diag" / "test.tpx3"))
+            self, value=app_settings.get("diag.test_file", str(pathlib.Path(DEFAULT_TEMP_DIR) / "test.tpx3"))
         )
         self.mask_threshold_var = tk.StringVar(self, value=app_settings.get("diag.mask_threshold", "100"))
         self.status_var = tk.StringVar(self, value="Idle")
@@ -94,22 +102,30 @@ class DiagnosticsInterface(ttk.Frame):
             params, 0, "Frame rate (fps):", ttk.Entry(params, textvariable=self.frame_rate_var, width=18)
         )
         ui_style.add_form_row(params, 1, "Max packets:", ttk.Entry(params, textvariable=self.max_packets_var, width=18))
+        ui_style.add_form_row(
+            params, 2, "Temp folder:", ui_style.build_path_field(params, self.temp_dir_var, self._browse_temp_dir),
+        )
+        ui_style.add_note(
+            params, 3,
+            f"Serval writes each frame here as {FILE_PREFIX}*.tpx3; older {FILE_PREFIX}*.tpx3 files in it are "
+            "deleted as new ones arrive. Other files are left alone.",
+        )
         ttk.Checkbutton(
             params, text="Accumulate", variable=self.accumulate_var, command=self._on_accumulate_toggle,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ttk.Checkbutton(
             params, text="Use test file", variable=self.use_test_file_var,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ui_style.build_path_field(params, self.test_file_var, self._browse_test_file).grid(
-            row=4, column=0, columnspan=2, sticky="ew", pady=(2, 4)
+            row=6, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
         ttk.Checkbutton(
             params, text="Apply timewalk correction before clustering", variable=self.timewalk_enabled_var
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ui_style.build_path_field(params, self.timewalk_path_var, self._browse_timewalk).grid(
-            row=6, column=0, columnspan=2, sticky="ew", pady=(2, 4)
+            row=8, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
-        ui_style.add_form_row(params, 7, "Min cluster size (hits):", ttk.Entry(params, textvariable=self.min_cluster_size_var, width=18))
+        ui_style.add_form_row(params, 9, "Min cluster size (hits):", ttk.Entry(params, textvariable=self.min_cluster_size_var, width=18))
 
         # An occasional maintenance action, not an every-session one.
         mask = ui_style.build_section(sidebar, 3, "Hot pixel masking", collapsed=True)
@@ -202,6 +218,7 @@ class DiagnosticsInterface(ttk.Frame):
         return {
             "diag.frame_rate": self.frame_rate_var,
             "diag.max_packets": self.max_packets_var,
+            "diag.temp_dir": self.temp_dir_var,
             "diag.use_test_file": self.use_test_file_var,
             "diag.test_file": self.test_file_var,
             "diag.mask_threshold": self.mask_threshold_var,
@@ -235,9 +252,13 @@ class DiagnosticsInterface(ttk.Frame):
         self._reset_accumulation = True
         self._accumulated = None
         self._stop_event.clear()
-        self._temp_dir = self._create_temp_dir()
-
         test_mode = self.use_test_file_var.get()
+        try:
+            self._temp_dir = self._create_temp_dir()
+        except OSError as exc:
+            self.status_var.set(f"Could not use the temp folder: {exc}")
+            return
+
         if not test_mode:
             if not self._configure_server(frame_rate):
                 return
@@ -273,6 +294,15 @@ class DiagnosticsInterface(ttk.Frame):
         if chosen:
             self.timewalk_path_var.set(chosen)
 
+    def _browse_temp_dir(self):
+        chosen = filedialog.askdirectory(
+            initialdir=self.temp_dir_var.get().strip() or DEFAULT_TEMP_DIR,
+            title="Choose temp folder for diagnostic frames",
+            parent=self,
+        )
+        if chosen:
+            self.temp_dir_var.set(chosen)
+
     def _browse_test_file(self):
         initial = self.test_file_var.get().strip()
         chosen = filedialog.askopenfilename(
@@ -292,14 +322,19 @@ class DiagnosticsInterface(ttk.Frame):
         try:
             server = self._server_url()
             frame_time = 1.0 / frame_rate if frame_rate > 0 else 0.1
-            serval_client.configure_single_trigger_destination(server, frame_time, self._temp_dir, "diag%Hms_")
+            serval_client.configure_single_trigger_destination(
+                server, frame_time, self._temp_dir, f"{FILE_PREFIX}%Hms_",
+            )
             return True
         except Exception as exc:
             self.status_var.set(f"Config failed: {type(exc).__name__}: {exc} (server={server})")
             return False
 
     def _create_temp_dir(self):
-        return str(platform_paths.scratch_folder("serval_diag"))
+        """The temp folder setting (blank: the default), created if needed."""
+        folder = pathlib.Path(self.temp_dir_var.get().strip() or DEFAULT_TEMP_DIR).expanduser()
+        folder.mkdir(parents=True, exist_ok=True)
+        return str(folder)
 
     def _start_measurement(self):
         try:
@@ -344,7 +379,7 @@ class DiagnosticsInterface(ttk.Frame):
                         time.sleep(0.2)
                         continue
 
-                    files = sorted(temp_dir.glob("*.tpx3"), key=lambda p: p.stat().st_mtime)
+                    files = sorted(temp_dir.glob(FILE_GLOB), key=lambda p: p.stat().st_mtime)
                     test_path = pathlib.Path(self.test_file_var.get().strip()) if self.test_file_var.get() else None
                     for old in files[:-1]:
                         if test_path and old.resolve() == test_path.resolve():
@@ -369,7 +404,7 @@ class DiagnosticsInterface(ttk.Frame):
     def _wait_for_new_file(self, temp_dir: pathlib.Path, last_path, last_mtime):
         start = time.time()
         while not self._stop_event.is_set():
-            files = sorted(temp_dir.glob("*.tpx3"), key=lambda p: p.stat().st_mtime)
+            files = sorted(temp_dir.glob(FILE_GLOB), key=lambda p: p.stat().st_mtime)
             if files:
                 newest = files[-1]
                 newest_stat = newest.stat()
