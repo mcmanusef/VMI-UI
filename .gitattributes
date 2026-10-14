@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings (bash chokes on CRLF), batch files CRLF,
+# whatever core.autocrlf is set to on the machine that checks them out.
+*.sh text eol=lf
+*.bat text eol=crlf

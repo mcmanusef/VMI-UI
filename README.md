@@ -35,6 +35,20 @@ Everything is one PyQt5 process, organised as three groups of tabs:
 
 Requires **Python ≥ 3.13**, on Windows or Linux.
 
+The quickest way: run the install script once, then the run script to
+start the app. Both work from any folder and are safe to re-run.
+
+| | Install (creates `.venv`, installs `requirements.txt`) | Start |
+|---|---|---|
+| Windows | double-click `install.bat` | double-click `run.bat` |
+| Linux | `./install.sh` | `./run.sh` |
+
+`install.sh` doesn't use sudo: it prints the `apt` command for anything
+missing (the Python venv package, Qt's X11 libraries, `dialout` group
+membership for the power supply).
+
+To do the same by hand:
+
 Windows:
 
 ```powershell
