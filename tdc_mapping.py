@@ -45,6 +45,8 @@ FPGA_TDC_SUBTYPES = {
 }
 
 _SIGNAL_NAMES = ("pulse_trigger", "etof", "itof")
+# Signals the user may switch off; the pulse trigger is always required.
+OPTIONAL_SIGNALS = ("etof", "itof")
 
 
 @dataclasses.dataclass
@@ -66,6 +68,9 @@ class SignalMapping:
     time_edge: str = "rising"
     gate_min_ns: Optional[float] = None
     gate_max_ns: Optional[float] = None
+    # False = this signal isn't recorded at all (classify_tdcs returns no
+    # hits for it). Only e-ToF / i-ToF can be disabled -- see OPTIONAL_SIGNALS.
+    enabled: bool = True
 
     def to_dict(self):
         return {
@@ -73,6 +78,7 @@ class SignalMapping:
             "time_edge": self.time_edge,
             "gate_min_ns": self.gate_min_ns,
             "gate_max_ns": self.gate_max_ns,
+            "enabled": self.enabled,
         }
 
     @classmethod
@@ -82,6 +88,7 @@ class SignalMapping:
             time_edge=d.get("time_edge", "rising"),
             gate_min_ns=d.get("gate_min_ns"),
             gate_max_ns=d.get("gate_max_ns"),
+            enabled=bool(d.get("enabled", True)),
         )
 
 
@@ -157,5 +164,7 @@ def get_active_mapping():
             gate_max_ns=parse_optional_float(
                 app_settings.get(_settings_key(name, "gate_max_ns"), default_signal.gate_max_ns)
             ),
+            enabled=name not in OPTIONAL_SIGNALS
+            or bool(app_settings.get(_settings_key(name, "enabled"), default_signal.enabled)),
         )
     return TdcMapping(**signals)

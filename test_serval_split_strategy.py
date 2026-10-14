@@ -40,8 +40,10 @@ import sys
 
 import requests
 
+import platform_paths
+
 DEFAULT_SERVER = "http://localhost:8080"
-TEST_FOLDER = "file:/C:/DATA/split_strategy_test"
+TEST_FOLDER = platform_paths.file_uri(platform_paths.DATA_ROOT / "split_strategy_test")
 
 # Plausible real values for "split output into a separate file per frame",
 # given the confirmed existing constant is named SINGLE_FILE. Ordered

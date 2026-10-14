@@ -8,6 +8,8 @@ import time
 
 import requests
 
+import platform_paths
+
 # Shared, reused connection to Serval. Two reasons to use this instead of
 # bare requests.get/put() (which each open a brand-new TCP connection and
 # throw it away -- requests.api.request() literally does
@@ -109,7 +111,7 @@ def _configure_destination(server, frame_time, dest_dir, file_pattern, n_trigger
     destination = {
         "Raw": [
             {
-                "Base": pathlib.Path(dest_dir).as_uri(),
+                "Base": platform_paths.file_uri(dest_dir),
                 "FilePattern": file_pattern,
                 # Undocumented field (found by hand -- not in the manual or
                 # searchable anywhere); "SINGLE_FILE" is the default and

@@ -11,7 +11,10 @@ from qtk import ttk
 from qtk import filedialog, messagebox
 
 import app_settings
+import chip_layout
+import platform_paths
 import serval_client
+import shared_state
 import tdc_mapping
 import ui_style
 from plot_panel import HistogramPlotPanel
@@ -45,6 +48,7 @@ class DiagnosticsInterface(ttk.Frame):
         if coordinator is not None:
             coordinator.register(self)
         self._plot_shared_vars = plot_shared_vars
+        self.min_cluster_size_var = shared_state.min_cluster_size_var(self, plot_shared_vars)
 
         # Loaded from whatever was last saved via the "Save current as
         # default" button (next to the tab bar); untouched until then.
@@ -53,7 +57,7 @@ class DiagnosticsInterface(ttk.Frame):
         self.accumulate_var = tk.BooleanVar(self, value=False)
         self.use_test_file_var = tk.BooleanVar(self, value=app_settings.get("diag.use_test_file", False))
         self.test_file_var = tk.StringVar(
-            self, value=app_settings.get("diag.test_file", r"C:\Temp\serval_diag\test.tpx3")
+            self, value=app_settings.get("diag.test_file", str(platform_paths.SCRATCH_ROOT / "serval_diag" / "test.tpx3"))
         )
         self.mask_threshold_var = tk.StringVar(self, value=app_settings.get("diag.mask_threshold", "100"))
         self.status_var = tk.StringVar(self, value="Idle")
@@ -105,6 +109,7 @@ class DiagnosticsInterface(ttk.Frame):
         ui_style.build_path_field(params, self.timewalk_path_var, self._browse_timewalk).grid(
             row=6, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
+        ui_style.add_form_row(params, 7, "Min cluster size (hits):", ttk.Entry(params, textvariable=self.min_cluster_size_var, width=18))
 
         # An occasional maintenance action, not an every-session one.
         mask = ui_style.build_section(sidebar, 3, "Hot pixel masking", collapsed=True)
@@ -294,11 +299,7 @@ class DiagnosticsInterface(ttk.Frame):
             return False
 
     def _create_temp_dir(self):
-        base = pathlib.Path(r"C:\Temp")
-        base.mkdir(parents=True, exist_ok=True)
-        temp_dir = base / "serval_diag"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        return str(temp_dir)
+        return str(platform_paths.scratch_folder("serval_diag"))
 
     def _start_measurement(self):
         try:
@@ -529,9 +530,8 @@ class DiagnosticsInterface(ttk.Frame):
             self.status_var.set("No pixel histogram to mask.")
             return
 
-        cfg = self._accumulated.get("settings", self._plot_panel.hist_snapshot())["pixel"]
-        if int(cfg["bins"]) != 256 or float(cfg["min"]) != 0.0 or float(cfg["max"]) != 256.0:
-            self.status_var.set("Masking needs the pixel map at 256 bins over 0-256.")
+        layout = self._mask_layout()
+        if layout is None:
             return
 
         hot_coords = np.argwhere(pixel_hist > threshold)
@@ -544,7 +544,7 @@ class DiagnosticsInterface(ttk.Frame):
             "Confirm Masking",
             f"Pixels to be masked: {mask_count}\n"
             f"Threshold: counts > {threshold}\n"
-            "Proceed with masking on chip 0?",
+            "Proceed with masking?",
             parent=self,
         ):
             self.status_var.set("Mask canceled.")
@@ -554,12 +554,28 @@ class DiagnosticsInterface(ttk.Frame):
             server = self._server_url()
             masked = 0
             for x, y in hot_coords:
-                url = f"{server}/detector/chips/0/mask/{int(y)}/{int(x)}"
+                local = layout.to_local(int(x), int(y))
+                if local is None:
+                    continue
+                chip, lx, ly = local
+                url = f"{server}/detector/chips/{chip}/mask/{ly}/{lx}"
                 serval_client.SESSION.put(url, data="1", timeout=2)
                 masked += 1
             self.status_var.set(f"Masked {masked} pixels (>{threshold}).")
         except Exception as exc:
             self.status_var.set(f"Mask failed: {type(exc).__name__}: {exc}")
+
+    def _mask_layout(self):
+        """The chip layout to map pixel-map bins back to Serval's per-chip
+        pixels, or None (with a status message) if the pixel map isn't one
+        bin per detector pixel."""
+        layout = chip_layout.get_active_layout()
+        size = layout.size
+        cfg = self._accumulated.get("settings", self._plot_panel.hist_snapshot())["pixel"]
+        if int(cfg["bins"]) != size or float(cfg["min"]) != 0.0 or float(cfg["max"]) != float(size):
+            self.status_var.set(f"Masking needs the pixel map at {size} bins over 0-{size}.")
+            return None
+        return layout
 
     def _mask_max_pixel(self):
         was_running = self.is_running()
@@ -581,9 +597,8 @@ class DiagnosticsInterface(ttk.Frame):
             self.status_var.set("No pixel histogram to mask.")
             return
 
-        cfg = self._accumulated.get("settings", self._plot_panel.hist_snapshot())["pixel"]
-        if int(cfg["bins"]) != 256 or float(cfg["min"]) != 0.0 or float(cfg["max"]) != 256.0:
-            self.status_var.set("Masking needs the pixel map at 256 bins over 0-256.")
+        layout = self._mask_layout()
+        if layout is None:
             return
 
         max_count = float(pixel_hist.max())
@@ -593,10 +608,18 @@ class DiagnosticsInterface(ttk.Frame):
 
         x, y = (int(v) for v in np.unravel_index(np.argmax(pixel_hist), pixel_hist.shape))
 
+        local = layout.to_local(x, y)
+        if local is None:
+            self.status_var.set(f"Pixel ({x}, {y}) isn't on any chip.")
+            return
+        chip, lx, ly = local
+
         try:
             server = self._server_url()
-            url = f"{server}/detector/chips/0/mask/{y}/{x}"
+            url = f"{server}/detector/chips/{chip}/mask/{ly}/{lx}"
             serval_client.SESSION.put(url, data="1", timeout=2)
-            self.status_var.set(f"Masked hottest pixel ({x}, {y}) with {int(max_count)} counts.")
+            self.status_var.set(
+                f"Masked hottest pixel ({x}, {y}) -- chip {chip} ({lx}, {ly}) -- with {int(max_count)} counts."
+            )
         except Exception as exc:
             self.status_var.set(f"Mask failed: {type(exc).__name__}: {exc}")

@@ -29,12 +29,14 @@ Any other header nibble (including an as-yet unidentified packet family
 seen on some files) is skipped.
 """
 import dataclasses
+import json
 import pathlib
 import time
 
 import h5py
 import numpy as np
 
+import chip_layout
 from raw_conversion import list_raw_files, _SWEEP_VISIT_RE
 from tdc_mapping import FPGA_TDC_NS_PER_COUNT, FPGA_TDC_SUBTYPES, PICOTDC_NS_PER_COUNT
 from tpx_processing import PIXEL_RES_NS
@@ -112,13 +114,17 @@ def iter_chip_tagged_chunks(path, chunk_bytes=64 * 1024 * 1024):
                     yield chip, np.frombuffer(payload, dtype="<u8", count=n_words)
 
 
-def decode_raw_file(path):
+def decode_raw_file(path, layout=None):
     """Decode one raw file by its packets' literal header nibbles -- no
     clustering, pulse-grouping, or timewalk correction, and no guessing at
     which nibble means what (see module docstring).
 
+    Pixel coordinates are on the whole detector's canvas: each chip's
+    local x/y placed and oriented per `layout` (default
+    chip_layout.get_active_layout()), e.g. 0-511 on a quad.
+
     Returns a dict of 1D arrays:
-      pixel_x, pixel_y       : uint16, 0-255
+      pixel_x, pixel_y       : uint16, detector-canvas pixel
       pixel_toa_ns, pixel_tot: float64 (ns), float64 (ns)
       pixel_chip             : uint8, chip stream (0-3) each hit came from
       tdc_time_ns            : float64, each TDC hit's time (ns) in its own
@@ -134,6 +140,8 @@ def decode_raw_file(path):
     """
     px_x, px_y, px_toa, px_tot, px_chip = [], [], [], [], []
     tdc_time, tdc_type, tdc_channel, tdc_edge, tdc_chip = [], [], [], [], []
+    if layout is None:
+        layout = chip_layout.get_active_layout()
 
     for chip, words in iter_chip_tagged_chunks(path):
         nib = (words >> np.uint64(60)) & np.uint64(0xF)
@@ -141,12 +149,15 @@ def decode_raw_file(path):
         pix_mask = nib == np.uint64(0xB)
         if np.any(pix_mask):
             pw = words[pix_mask]
-            encoded = pw >> np.uint64(44)
-            dcol = (encoded >> np.uint64(8)) & np.uint64(0x7F)
-            spix = (encoded >> np.uint64(1)) & np.uint64(0xFF)
-            pix = encoded & np.uint64(0x7)
-            xs = dcol + pix // np.uint64(4)
-            ys = spix + (pix & np.uint64(3))
+            # PixAddr (bits 59-44): 7-bit double column, 6-bit super
+            # pixel, 3-bit pixel -- same split as tpx_processing.decode_tpx3.
+            addr = (pw >> np.uint64(44)) & np.uint64(0xFFFF)
+            dcol = (addr & np.uint64(0xFE00)) >> np.uint64(8)
+            spix = (addr & np.uint64(0x01F8)) >> np.uint64(1)
+            pix = addr & np.uint64(0x7)
+            xs = (dcol + pix // np.uint64(4)).astype(np.int64)
+            ys = (spix + (pix & np.uint64(3))).astype(np.int64)
+            xs, ys = layout.to_global(chip, xs, ys)
 
             ftoa = (pw >> np.uint64(16)) & np.uint64(0xF)
             toa = (pw >> np.uint64(30)) & np.uint64(0x3FFF)
@@ -219,12 +230,14 @@ def decode_raw_file(path):
     }
 
 
-def convert_file(raw_path, h5_path):
+def convert_file(raw_path, h5_path, layout=None):
     """Decode one raw file and write its pixel hits and TDC markers
     straight to `h5_path` (see decode_raw_file for what's kept and the
     dataset names). Returns counts for display."""
     start = time.perf_counter()
-    data = decode_raw_file(str(raw_path))
+    if layout is None:
+        layout = chip_layout.get_active_layout()
+    data = decode_raw_file(str(raw_path), layout)
 
     h5_path = pathlib.Path(h5_path)
     h5_path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,6 +253,7 @@ def convert_file(raw_path, h5_path):
         f.create_dataset("tdc_edge", data=data["tdc_edge"])
         f.create_dataset("tdc_chip", data=data["tdc_chip"])
         f.attrs["Source Raw File"] = str(raw_path)
+        f.attrs["Chip Layout"] = json.dumps(layout.to_dict())
         f.attrs["Conversion Time (s)"] = time.perf_counter() - start
 
     return {

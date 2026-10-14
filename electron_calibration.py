@@ -32,6 +32,8 @@ import numpy as np
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from scipy.signal import fftconvolve, find_peaks, peak_widths, savgol_filter
 
+import chip_layout
+
 EV_TO_HARTREE = 0.0367493
 HC_EV_NM = 1239.841984
 FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
@@ -130,11 +132,14 @@ def load_electron_events(path, time_source=TIME_SOURCE_ETOF, single_hit_only=Tru
 # Step 1: center and angle
 # ---------------------------------------------------------------------------
 
-def symmetry_center(x, y, extent=(0.0, 256.0), bin_px=1.0, background_sigma_px=6.0):
+def symmetry_center(x, y, extent=None, bin_px=1.0, background_sigma_px=6.0):
     """Center of the (x, y) image from point symmetry, not from the center of
     mass. The log image minus a blurred copy keeps the ring structure and
     drops smooth backgrounds. The autoconvolution C(s) = sum_i I(i) I(s - i)
-    peaks at s = 2c when the image is symmetric about c."""
+    peaks at s = 2c when the image is symmetric about c. `extent` defaults
+    to the whole detector canvas (chip_layout)."""
+    if extent is None:
+        extent = (0.0, float(chip_layout.get_active_layout().size))
     bins = max(8, int(round((extent[1] - extent[0]) / bin_px)))
     hist, edges, _ = np.histogram2d(x, y, bins=bins, range=[extent, extent])
     if not hist.any():

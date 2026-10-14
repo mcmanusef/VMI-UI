@@ -17,7 +17,7 @@ from scrollable_frame import ScrollableFrame
 
 # ---- tokens -------------------------------------------------------------
 
-SMALL_FONT = ("Segoe UI", 8)
+SMALL_FONT = ("TkDefaultFont", 8)  # the platform's UI font, at 8 pt
 SIDEBAR_WIDTH = 400
 PAGE_MAX_WIDTH = 640
 
@@ -264,7 +264,7 @@ def make_wrapping_label(parent, text="", textvariable=None, font=None):
 
 
 def add_note(parent, row, text="", textvariable=None, column=0, columnspan=2, pady=(0, 4)):
-    """Small-print (Segoe UI 8) wrapping text: helper notes, file paths."""
+    """Small-print (8 pt) wrapping text: helper notes, file paths."""
     label = make_wrapping_label(parent, text, textvariable, SMALL_FONT)
     label.grid(row=row, column=column, columnspan=columnspan, sticky="ew", pady=pady)
     return label

@@ -7,6 +7,7 @@ from qtk import ttk, filedialog
 
 import requests
 
+import platform_paths
 import serval_client
 import ui_style
 
@@ -78,7 +79,7 @@ class ServalInterface(ttk.Frame):
         chosen = filedialog.askopenfilename(
             title=title,
             initialdir=str(pathlib.Path(initial).parent) if initial else None,
-            filetypes=filetypes + [("All files", "*.*")],
+            filetypes=filetypes + [("All files", "*")],
             parent=self,
         )
         if chosen:
@@ -87,10 +88,12 @@ class ServalInterface(ttk.Frame):
     def _load_defaults(self):
         defaults = {
             "server": "http://localhost:8080",
-            "bpc_file": r"C:\SoPhy\pixelconfig_20240514.bpc",
-            "dacs_file": r"C:\SoPhy\pixelconfig_20240514.bpc.dacs",
+            "bpc_file": r"C:\SoPhy\pixelconfig_20240514.bpc" if platform_paths.IS_WINDOWS else "",
+            "dacs_file": r"C:\SoPhy\pixelconfig_20240514.bpc.dacs" if platform_paths.IS_WINDOWS else "",
             "bias_voltage": 100,
-            "destination": r"C:\serval_test",
+            "destination": (
+                r"C:\serval_test" if platform_paths.IS_WINDOWS else str(platform_paths.SCRATCH_ROOT / "serval_test")
+            ),
             "file_pattern": "raw%Hms_",
         }
 
@@ -104,7 +107,9 @@ class ServalInterface(ttk.Frame):
             return defaults
 
         for key in defaults:
-            if key in data and data[key] is not None:
+            # serval_config.json is shared through git, so off Windows
+            # skip the Windows drive paths it holds rather than use them.
+            if key in data and data[key] is not None and not platform_paths.is_foreign_path(data[key]):
                 defaults[key] = data[key]
         return defaults
 
@@ -206,7 +211,7 @@ class ServalInterface(ttk.Frame):
         destination = {
             "Raw": [
                 {
-                    "Base": pathlib.Path(dest).as_uri(),
+                    "Base": platform_paths.file_uri(dest),
                     "FilePattern": pattern or "raw%Hms_",
                 }
             ],

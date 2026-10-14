@@ -9,9 +9,12 @@ from qtk import ttk, messagebox, filedialog
 
 import app_settings
 import cv4_writer
+import platform_paths
 import raw_conversion
 import serval_client
+import shared_state
 import time_estimate
+import tpx_processing
 import ui_style
 from cv4_writer import Cv4Writer
 from plot_panel import HistogramPlotPanel
@@ -36,6 +39,8 @@ class AcquisitionInterface(ttk.Frame):
         if coordinator is not None:
             coordinator.register(self)
         self._plot_shared_vars = plot_shared_vars
+        self._run_min_cluster_size = None
+        self.min_cluster_size_var = shared_state.min_cluster_size_var(self, plot_shared_vars)
 
         # Shared live with the Collection parameters tab (see shared_state.py)
         # when acq_shared_vars is given; otherwise falls back to independent,
@@ -98,7 +103,7 @@ class AcquisitionInterface(ttk.Frame):
         self._poll_queue()
 
     def _default_save_folder(self):
-        return rf"C:\DATA\{datetime.date.today().strftime('%Y%m%d')}\acquisition"
+        return platform_paths.dated_data_folder("acquisition")
 
     # ---- UI construction --------------------------------------------------
 
@@ -149,6 +154,7 @@ class AcquisitionInterface(ttk.Frame):
         ui_style.build_path_field(params, self.timewalk_path_var, self._browse_timewalk).grid(
             row=5, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
+        ui_style.add_form_row(params, 6, "Min cluster size (hits):", ttk.Entry(params, textvariable=self.min_cluster_size_var, width=18))
 
         self.notes = ui_style.build_metadata_section(sidebar, 3, self)
 
@@ -271,6 +277,9 @@ class AcquisitionInterface(ttk.Frame):
         metadata["Target Frames"] = target_frames
         if self._active_timewalk is not None:
             metadata["Timewalk Correction File"] = self.timewalk_path_var.get().strip()
+        # Fixed for the whole run, so every frame matches what's recorded.
+        self._run_min_cluster_size = tpx_processing.get_min_cluster_size()
+        metadata[tpx_processing.MIN_CLUSTER_SIZE_ATTR] = self._run_min_cluster_size
 
         try:
             server = self._server_url()
@@ -577,7 +586,9 @@ class AcquisitionInterface(ttk.Frame):
     def _process_file(self, path: pathlib.Path):
         # Shared with Analysis > conversion, so offline conversion of these
         # same raw files produces an identical cv4.
-        return raw_conversion.process_raw_file(path, self._plot_panel.hist_snapshot(), self._active_timewalk)
+        return raw_conversion.process_raw_file(
+            path, self._plot_panel.hist_snapshot(), self._active_timewalk, self._run_min_cluster_size
+        )
 
     # ---- main-thread queue handling ---------------------------------------
 

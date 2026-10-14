@@ -26,6 +26,7 @@ import qtk as tk
 from qtk import ttk, filedialog, messagebox, grid_into
 
 import app_settings
+import chip_layout
 import electron_calibration as ec
 import mass_calibration as mc
 import ui_style
@@ -1132,7 +1133,7 @@ class MomentumCalibrationInterface(ttk.Frame):
         image_events = self._image_events()
         time_events = self._time_events()
         r, _, _ = ec.ring_radii(self._r_peaks)
-        extent = (0.0, 256.0)
+        extent = (0.0, float(chip_layout.get_active_layout().size))
         ring_angle = self._ring_axis_angle(s)
 
         if image_events is not None:

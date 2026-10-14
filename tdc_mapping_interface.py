@@ -58,7 +58,8 @@ class TdcMappingInterface(ttk.Frame):
             page, 0,
             "Which physical TDC line (PicoTDC channel 0-63, or FPGA TDC channel 1/2) feeds each "
             "logical signal, and how multiple signals sharing one line are told apart by pulse "
-            "width. Leave a gate blank to take every hit on that line directly. With a gate set, "
+            "width. Uncheck e-ToF or i-ToF if that signal isn't connected, so no hits are recorded "
+            "for it. Leave a gate blank to take every hit on that line directly. With a gate set, "
             "each rising edge is paired with the next falling edge on the same line and kept only "
             "if that pulse's width falls in range -- e.g. a long trigger pulse and a short i-ToF "
             "pulse can share one FPGA TDC channel this way. These settings apply everywhere "
@@ -105,17 +106,28 @@ class TdcMappingInterface(ttk.Frame):
             "gate_min_ns": gate_min_var, "gate_max_ns": gate_max_var,
         }
 
+        row = 0
+        if name in tdc_mapping.OPTIONAL_SIGNALS:
+            enabled_var = app_settings.persistent_var(
+                self, tk.BooleanVar, f"tdc_mapping.{name}.enabled", default.enabled
+            )
+            self._vars[name]["enabled"] = enabled_var
+            ttk.Checkbutton(
+                section, text="Record this signal (uncheck if it isn't connected)", variable=enabled_var,
+            ).grid(row=row, column=0, columnspan=2, sticky="w", pady=4)
+            row += 1
+
         family_display_var = tk.StringVar(self, value=_FAMILY_LABELS[family_var.get()])
         family_box = ttk.Combobox(
             section, textvariable=family_display_var, state="readonly",
             values=list(_FAMILY_LABELS.values()),
         )
-        ui_style.add_form_row(section, 0, "TDC family:", family_box)
+        ui_style.add_form_row(section, row, "TDC family:", family_box)
 
         channel_box = ttk.Combobox(
             section, textvariable=channel_var, state="readonly", values=_channels_for(family_var.get()),
         )
-        ui_style.add_form_row(section, 1, "Channel:", channel_box)
+        ui_style.add_form_row(section, row + 1, "Channel:", channel_box)
         self._channel_boxes[name] = channel_box
 
         def _on_family_change(*_args, family_var=family_var, channel_var=channel_var, channel_box=channel_box):
@@ -133,7 +145,7 @@ class TdcMappingInterface(ttk.Frame):
             section, textvariable=edge_display_var, state="readonly",
             values=list(_EDGE_LABELS.values()),
         )
-        ui_style.add_form_row(section, 2, "Event edge:", edge_box)
+        ui_style.add_form_row(section, row + 2, "Event edge:", edge_box)
         edge_display_var.trace_add(
             "write", lambda *_a, v=edge_display_var, ev=edge_var: ev.set(_EDGE_BY_LABEL[v.get()])
         )
@@ -144,7 +156,7 @@ class TdcMappingInterface(ttk.Frame):
         ttk.Entry(gate_row, textvariable=gate_min_var).grid(row=0, column=0, sticky="ew")
         ttk.Label(gate_row, text=" to ").grid(row=0, column=1)
         ttk.Entry(gate_row, textvariable=gate_max_var).grid(row=0, column=2, sticky="ew")
-        ui_style.add_form_row(section, 3, "Pulse-width gate (ns):", gate_row)
+        ui_style.add_form_row(section, row + 3, "Pulse-width gate (ns):", gate_row)
 
     # ---- presets ------------------------------------------------------------
 
@@ -157,6 +169,7 @@ class TdcMappingInterface(ttk.Frame):
                 time_edge=v["time_edge"].get(),
                 gate_min_ns=tdc_mapping.parse_optional_float(v["gate_min_ns"].get()),
                 gate_max_ns=tdc_mapping.parse_optional_float(v["gate_max_ns"].get()),
+                enabled=v["enabled"].get() if "enabled" in v else True,
             )
         return tdc_mapping.TdcMapping(**signals)
 
@@ -170,6 +183,8 @@ class TdcMappingInterface(ttk.Frame):
             v["time_edge"].set(signal.time_edge)
             v["gate_min_ns"].set("" if signal.gate_min_ns is None else str(signal.gate_min_ns))
             v["gate_max_ns"].set("" if signal.gate_max_ns is None else str(signal.gate_max_ns))
+            if "enabled" in v:
+                v["enabled"].set(signal.enabled)
 
     def _save_preset(self):
         chosen = filedialog.asksaveasfilename(

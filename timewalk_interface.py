@@ -11,6 +11,7 @@ import pyqtgraph as pg
 from PyQt5 import QtCore
 
 import app_settings
+import platform_paths
 import serval_client
 import tdc_mapping
 import ui_style
@@ -44,7 +45,7 @@ class TimewalkInterface(ttk.Frame):
         self.max_packets_var = tk.StringVar(self, value=app_settings.get("timewalk.max_packets", "10000"))
         self.use_test_file_var = tk.BooleanVar(self, value=app_settings.get("timewalk.use_test_file", False))
         self.test_file_var = tk.StringVar(
-            self, value=app_settings.get("timewalk.test_file", r"C:\Temp\serval_diag\test.tpx3")
+            self, value=app_settings.get("timewalk.test_file", str(platform_paths.SCRATCH_ROOT / "serval_diag" / "test.tpx3"))
         )
         self.status_var = tk.StringVar(self, value="Idle")
 
@@ -192,11 +193,7 @@ class TimewalkInterface(ttk.Frame):
         return url
 
     def _create_temp_dir(self):
-        base = pathlib.Path(r"C:\Temp")
-        base.mkdir(parents=True, exist_ok=True)
-        temp_dir = base / "serval_timewalk"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        return str(temp_dir)
+        return str(platform_paths.scratch_folder("serval_timewalk"))
 
     def _poll_queue(self):
         try:

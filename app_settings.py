@@ -19,6 +19,8 @@ creation, and saves on every change):
 import json
 import pathlib
 
+import platform_paths
+
 SETTINGS_PATH = pathlib.Path(__file__).with_name("app_settings.json")
 
 _cache = None
@@ -49,7 +51,12 @@ def _write_to_disk():
 
 
 def get(key, default=None):
-    return _cache_ref().get(key, default)
+    value = _cache_ref().get(key, default)
+    # A settings file carried over from a Windows machine can hold
+    # "C:\..." paths, which mean nothing off Windows -- use the default.
+    if platform_paths.is_foreign_path(value):
+        return default
+    return value
 
 
 def set(key, value):

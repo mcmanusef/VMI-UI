@@ -43,6 +43,7 @@ import pyqtgraph as pg
 from PIL import Image as PILImage
 
 import app_settings
+import platform_paths
 import serval_client
 from qt_plots import image_to_rgba, ZoomFocusViewBox
 
@@ -148,7 +149,7 @@ class QuickMonitorInterface(ttk.Frame):
         self._poll_dashboard()
 
     def _default_save_folder(self):
-        return rf"C:\DATA\{datetime.date.today().strftime('%Y%m%d')}\quick_monitor"
+        return platform_paths.dated_data_folder("quick_monitor")
 
     # ---- UI construction --------------------------------------------------
 
@@ -204,7 +205,7 @@ class QuickMonitorInterface(ttk.Frame):
         ttk.Entry(rate_row, textvariable=self.repetition_rate_var, width=8).grid(row=0, column=3, padx=(0, 12))
 
         ttk.Label(rate_row, text="Est. clusters/shot:").grid(row=0, column=4, sticky="w", padx=(0, 4))
-        ttk.Label(rate_row, textvariable=self.cluster_rate_var, font=("Segoe UI", 10, "bold")).grid(
+        ttk.Label(rate_row, textvariable=self.cluster_rate_var, font=("TkDefaultFont", 10, "bold")).grid(
             row=0, column=5, sticky="w", padx=(0, 6)
         )
 
@@ -239,7 +240,7 @@ class QuickMonitorInterface(ttk.Frame):
             self,
             text="Mode takes effect on the next Start. \"Integrated\" is summed client-side from the "
                  "raw frames since Start/Reset (Serval only serves one live HTTP channel at a time).",
-            font=("Segoe UI", 8),
+            font=("TkDefaultFont", 8),
         ).grid(row=3, column=0, sticky="w", padx=10, pady=(28, 0))
 
         plot_frame = ttk.Frame(self)
@@ -341,7 +342,7 @@ class QuickMonitorInterface(ttk.Frame):
             folder = pathlib.Path(folder_text)
             folder.mkdir(parents=True, exist_ok=True)
             image_channels.append(
-                _output_channel(folder.as_uri(), mode, accumulate=False, file_pattern="quick%Hms_")
+                _output_channel(platform_paths.file_uri(folder), mode, accumulate=False, file_pattern="quick%Hms_")
             )
 
         # No single CONTINUOUS-mode measurement is left running indefinitely

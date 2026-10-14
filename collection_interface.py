@@ -8,6 +8,7 @@ from qtk import ttk, filedialog
 
 import requests
 
+import platform_paths
 import serval_client
 import time_estimate
 import ui_style
@@ -52,7 +53,7 @@ class CollectionInterface(ttk.Frame):
         self._build_ui()
 
     def _default_save_folder(self):
-        return rf"C:\DATA\{date.today().strftime('%Y%m%d')}\test"
+        return platform_paths.dated_data_folder("test")
 
     def _build_ui(self):
         # No data view on this tab, so its controls get the whole tab as a
