@@ -27,6 +27,7 @@ from qtk import ttk, filedialog, messagebox, grid_into
 
 import app_settings
 import chip_layout
+import data_range
 import electron_calibration as ec
 import mass_calibration as mc
 import ui_style
@@ -336,7 +337,8 @@ class MomentumCalibrationInterface(ttk.Frame):
         self.ring_width_var = pvar(tk.StringVar, "ring_width_px", "2")
         self.r_max_var = pvar(tk.StringVar, "r_max_px", "128")
         self.r_bin_var = pvar(tk.StringVar, "r_bin_px", "0.5")
-        self.t_window_var = pvar(tk.StringVar, "t_window_ns", "50")
+        # Blank: wide enough to cover the loaded arrival times (auto_time_window).
+        self.t_window_var = pvar(tk.StringVar, "t_window_ns", "")
         self.t_bin_var = pvar(tk.StringVar, "t_bin_ns", "0.26")
         self.t_ignore_var = pvar(tk.StringVar, "t_ignore_ns", "1")
         # Radius smoothing keeps the keys the single shared setting used; time
@@ -373,6 +375,9 @@ class MomentumCalibrationInterface(ttk.Frame):
         self._early_fit = None
         self._late_fit = None
         self._k_fit = None
+        # dt range of a calibration loaded from JSON, used for an automatic
+        # time window until data is loaded.
+        self._loaded_t_window = None
         self._redraw_after = None
 
         self._build_ui()
@@ -483,6 +488,7 @@ class MomentumCalibrationInterface(ttk.Frame):
 
         ui_style.add_note(
             peaks, len(rows) + 1,
+            "Leave the time window blank to cover the loaded arrival times. "
             "Find Peaks keeps the most prominent peaks of the smoothed negative second derivative on each "
             "side. Ctrl+click a spectrum to add a peak, Shift+click to remove the nearest. A ring peak "
             "stays where you click, and those radii set the energy scale; time peaks snap to the nearest "
@@ -647,7 +653,13 @@ class MomentumCalibrationInterface(ttk.Frame):
         s.ring_width = read_number(self.ring_width_var, "Ring slice half-width", positive=True)
         s.r_max = read_number(self.r_max_var, "Max radius", positive=True)
         s.r_bin = read_number(self.r_bin_var, "Radius bin", positive=True)
-        s.t_window = read_number(self.t_window_var, "Time window", positive=True)
+        s.t_window = read_number(self.t_window_var, "Time window", positive=True, allow_blank=True)
+        if s.t_window is None:
+            events = self._time_events()
+            if events is not None and events.t.size:
+                s.t_window = ec.auto_time_window(events, s.tc)
+            else:
+                s.t_window = self._loaded_t_window
         s.t_bin = read_number(self.t_bin_var, "Time bin", positive=True)
         s.t_ignore = read_number(self.t_ignore_var, "Ignore |Δt| below")
         s.r_savgol = read_number(self.r_savgol_var, "Radius Savitzky–Golay window", integer=True)
@@ -664,6 +676,8 @@ class MomentumCalibrationInterface(ttk.Frame):
         return ec.make_spectrum(u, -s.r_max, s.r_max, s.r_bin, s.r_savgol, s.r_gauss)
 
     def _time_spectrum(self, s):
+        if s.t_window is None:
+            raise ValueError("Set a time window, or load data to size it automatically.")
         events = self._time_events()
         t = events.t[ec.on_axis_mask(events, s.xc, s.yc, s.on_axis)]
         return ec.make_spectrum(t, s.tc - s.t_window, s.tc + s.t_window, s.t_bin, s.t_savgol, s.t_gauss)
@@ -697,10 +711,14 @@ class MomentumCalibrationInterface(ttk.Frame):
         single_hit = self.single_hit_var.get()
 
         def work():
-            return {
+            events = {
                 key: ec.load_electron_events(path, time_source, single_hit, max(0.0, dither))
                 for key, path in paths.items()
             }
+            for ev in events.values():
+                if ev.t.size:
+                    ev.time_region()  # sorts every time once; done here, off the UI thread
+            return events
 
         self.status_var.set("Loading...")
         self._task.start(work, self._on_loaded, lambda exc: self.status_var.set(f"Error: could not load data: {exc}"))
@@ -710,7 +728,26 @@ class MomentumCalibrationInterface(ttk.Frame):
         self._center_estimates = {}
         self._clear_fits()
         counts = ", ".join(f"{pathlib.Path(ev.path).name}: {ev.x.size} hits" for ev in events.values())
-        self.status_var.set(f"Loaded {counts}.")
+        status = f"Loaded {counts}."
+        time_events = self._time_events()
+        if time_events is not None and time_events.t.size:
+            lo, hi = time_events.time_region()
+            status += f" Arrival times are mostly between {lo:.1f} and {hi:.1f} ns."
+            try:
+                tc = read_number(self.tc_var, "Time zero")
+            except ValueError:
+                tc = None
+            # A tc left over from other data (or the default) would put the
+            # time window where there are no hits.
+            if tc is None or not lo <= tc <= hi:
+                try:
+                    s = self._settings()
+                    tc = ec.estimate_time_zero(time_events, s.xc, s.yc, s.on_axis)
+                except ValueError:
+                    tc = ec.estimate_time_zero(time_events, 0.0, 0.0, 0.0)
+                self.tc_var.set(f"{tc:.3f}")
+                status += f" tc was outside that range, so it was set to {tc:.3f} ns."
+        self.status_var.set(status)
         self._schedule_redraw()
 
     # ---- step 1: center, tc, angle ------------------------------------------------
@@ -753,7 +790,10 @@ class MomentumCalibrationInterface(ttk.Frame):
             self.status_var.set(f"Error: {exc}")
             return
         self.tc_var.set(f"{tc:.3f}")
-        self.status_var.set("tc set to the median on-axis arrival time. Refine it by dragging the red line.")
+        self.status_var.set(
+            "tc set to the median on-axis arrival time within the data's time range. "
+            "Refine it by dragging the red line."
+        )
 
     def estimate_angle(self):
         events = self._image_events()
@@ -956,7 +996,7 @@ class MomentumCalibrationInterface(ttk.Frame):
             late_coeffs=list(self._late_fit.coeffs) if self._late_fit else [],
             time_source=self.time_source_var.get(),
             dither_ns=max(0.0, dither),
-            dt_range=(-s.t_window, s.t_window),
+            dt_range=(-s.t_window, s.t_window) if s.t_window is not None else None,
         )
 
     # ---- step 7: export ----------------------------------------------------------
@@ -1025,6 +1065,7 @@ class MomentumCalibrationInterface(ttk.Frame):
             self.status_var.set(f"Load failed: {exc}")
             return
         meta = calibration.meta or {}
+        self._loaded_t_window = max(abs(v) for v in calibration.dt_range) if calibration.dt_range else None
         xc, yc, tc = calibration.center
         self.xc_var.set(f"{xc:.4f}")
         self.yc_var.set(f"{yc:.4f}")
@@ -1201,8 +1242,10 @@ class MomentumCalibrationInterface(ttk.Frame):
                     side.dt, side.r ** 2, symbol="o", size=8, pen=pg.mkPen(color), brush=pg.mkBrush(color), name=name,
                 ))
                 span = np.abs(side.dt).max() * 1.1
-            else:
+            elif s.t_window is not None:
                 span = s.t_window
+            else:
+                continue
             dt = np.linspace(-span, 0, 200) if name == "Early" else np.linspace(0, span, 200)
             self._plot_fit.addItem(pg.PlotDataItem(dt, ec.z2_polyval(side.coeffs, dt), pen=pg.mkPen(color, width=1.5)))
             drawn.add(self._plot_fit)
@@ -1286,7 +1329,7 @@ class MassCalibrationInterface(ttk.Frame):
 
         self.path_var = pvar(tk.StringVar, "path", "")
         self.bin_var = pvar(tk.StringVar, "bin_ns", "5")
-        self.t_min_var = pvar(tk.StringVar, "t_min_ns", "0")
+        self.t_min_var = pvar(tk.StringVar, "t_min_ns", "")
         self.t_max_var = pvar(tk.StringVar, "t_max_ns", "")
         self.log_var = pvar(tk.BooleanVar, "log_scale", False)
         self.snap_var = pvar(tk.StringVar, "snap_ns", "50")
@@ -1300,6 +1343,7 @@ class MassCalibrationInterface(ttk.Frame):
 
         self._task = BackgroundTask(self)
         self._tof = None
+        self._tof_region = None
         self._centers = None
         self._counts = None
         self._peaks = []
@@ -1327,7 +1371,7 @@ class MassCalibrationInterface(ttk.Frame):
         ttk.Checkbutton(data, text="Log scale", variable=self.log_var).grid(
             row=4, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
-        ui_style.add_note(data, 5, "Leave t max blank to fit the spectrum.", pady=(4, 4))
+        ui_style.add_note(data, 5, "Leave t min or t max blank to fit the spectrum.", pady=(4, 4))
 
         peaks = ui_style.build_section(sidebar, 3, "Peaks")
         ui_style.add_note(
@@ -1393,13 +1437,22 @@ class MassCalibrationInterface(ttk.Frame):
             return
         self.status_var.set("Loading...")
         self._task.start(
-            lambda: mc.load_ion_tof(path), self._on_loaded,
+            lambda: self._load_tof(path), self._on_loaded,
             lambda exc: self.status_var.set(f"Error: could not load data: {exc}"),
         )
 
-    def _on_loaded(self, tof):
-        self._tof = tof
-        self.status_var.set(f"Loaded {tof.size} ion hits from {pathlib.Path(self.path_var.get()).name}.")
+    @staticmethod
+    def _load_tof(path):
+        """Ion times and the (lo, hi) the automatic t min / t max use."""
+        tof = mc.load_ion_tof(path)
+        return tof, data_range.padded(*data_range.dense_range(tof)) if tof.size else None
+
+    def _on_loaded(self, result):
+        self._tof, self._tof_region = result
+        status = f"Loaded {self._tof.size} ion hits from {pathlib.Path(self.path_var.get()).name}."
+        if self._tof_region is not None:
+            status += f" Times are mostly between {self._tof_region[0]:.0f} and {self._tof_region[1]:.0f} ns."
+        self.status_var.set(status)
         self._redraw()
 
     # ---- peaks and fit ----------------------------------------------------------
@@ -1587,13 +1640,14 @@ class MassCalibrationInterface(ttk.Frame):
 
         if self._tof is not None and self._tof.size:
             bin_ns = read_number(self.bin_var, "Bin width", positive=True)
-            lo = read_number(self.t_min_var, "t min", allow_blank=True) or 0.0
+            lo = read_number(self.t_min_var, "t min", allow_blank=True)
             hi = read_number(self.t_max_var, "t max", allow_blank=True)
-            if hi is None:
-                hi = float(np.percentile(self._tof, 99.9)) * 1.05
+            auto_lo, auto_hi = self._tof_region
+            lo = auto_lo if lo is None else lo
+            hi = auto_hi if hi is None else hi
             if hi <= lo:
                 raise ValueError("t max must be greater than t min.")
-            n_bins = max(8, int(np.ceil((hi - lo) / bin_ns)))
+            n_bins = data_range.bin_count(lo, hi, bin_ns)
             counts, edges = np.histogram(self._tof, bins=n_bins, range=(lo, lo + n_bins * bin_ns))
             self._centers = 0.5 * (edges[:-1] + edges[1:])
             self._counts = counts
@@ -1629,10 +1683,10 @@ class MassCalibrationInterface(ttk.Frame):
                 mq_max = read_number(self.mq_max_var, "m/q max", allow_blank=True)
                 if mq_max is None:
                     top = max((p["mq"] for p in self._peaks), default=0.0)
-                    mq_max = max(top * 1.3, float(np.percentile(mq, 99.5)) if mq.size else 1.0)
+                    mq_max = max(top * 1.3, data_range.padded(*data_range.dense_range(mq))[1] if mq.size else 1.0)
                 if mq_max <= 0:
                     raise ValueError("m/q max must be positive.")
-                n_bins = max(8, int(np.ceil(mq_max / mq_bin)))
+                n_bins = data_range.bin_count(0.0, mq_max, mq_bin)
                 counts, edges = np.histogram(mq, bins=n_bins, range=(0.0, n_bins * mq_bin))
                 self._plot_mq.addItem(pg.PlotDataItem(
                     0.5 * (edges[:-1] + edges[1:]), self._plot_counts(counts, log),

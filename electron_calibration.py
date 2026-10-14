@@ -33,6 +33,7 @@ from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from scipy.signal import fftconvolve, find_peaks, peak_widths, savgol_filter
 
 import chip_layout
+import data_range
 
 EV_TO_HARTREE = 0.0367493
 HC_EV_NM = 1239.841984
@@ -69,6 +70,14 @@ class ElectronEvents:
     t: np.ndarray
     path: str
     time_source: str
+    _time_region: tuple = dataclasses.field(default=None, repr=False, compare=False)
+
+    def time_region(self):
+        """(lo, hi) of where the arrival times actually are, from the data
+        (data_range.dense_range), ignoring stray far-off times."""
+        if self._time_region is None:
+            self._time_region = data_range.dense_range(self.t)
+        return self._time_region
 
 
 def pair_by_pulse(cluster_corr, etof_corr, single_hit_only):
@@ -176,14 +185,28 @@ def on_axis_mask(events, xc, yc, radius_px):
 
 
 def estimate_time_zero(events, xc, yc, radius_px, t_window=None):
-    """Starting guess for tc: the median on-axis arrival time. The user
-    refines it so that it sits between the early and late peak series."""
-    t = events.t[on_axis_mask(events, xc, yc, radius_px)]
-    if t_window is not None:
-        t = t[(t >= t_window[0]) & (t <= t_window[1])]
+    """Starting guess for tc: the median on-axis arrival time within
+    t_window, which defaults to the data's time region. With no on-axis
+    hits there (center not set yet) it falls back to all hits in the
+    region. The user refines it so that it sits between the early and
+    late peak series."""
+    if events.t.size == 0:
+        raise ValueError("No hits loaded.")
+    lo, hi = t_window if t_window is not None else events.time_region()
+    in_window = (events.t >= lo) & (events.t <= hi)
+    t = events.t[in_window & on_axis_mask(events, xc, yc, radius_px)]
     if t.size == 0:
-        raise ValueError("No on-axis hits; check the center and on-axis radius.")
+        t = events.t[in_window]
+    if t.size == 0:
+        raise ValueError("No hits in the time window.")
     return float(np.median(t))
+
+
+def auto_time_window(events, tc, margin=0.1):
+    """Half-width (ns) of a window about tc that covers the data's time
+    region, plus `margin` of it."""
+    lo, hi = events.time_region()
+    return max(tc - lo, hi - tc) * (1.0 + margin)
 
 
 def principal_axis_angle(events, xc, yc, tc, slice_ns, r_max_px):
@@ -261,9 +284,7 @@ class Spectrum:
 
 
 def make_spectrum(values, lo, hi, bin_width, savgol_window=7, gauss_sigma=1.0):
-    if hi <= lo or bin_width <= 0:
-        raise ValueError("Histogram max must exceed min, and bin width must be positive.")
-    n_bins = max(8, int(np.ceil((hi - lo) / bin_width)))
+    n_bins = data_range.bin_count(lo, hi, bin_width)
     counts, edges = np.histogram(values, bins=n_bins, range=(lo, lo + n_bins * bin_width))
     smoothed = smooth_counts(counts, savgol_window, gauss_sigma)
     return Spectrum(0.5 * (edges[:-1] + edges[1:]), counts, smoothed, peak_curve(smoothed))
