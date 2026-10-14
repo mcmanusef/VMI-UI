@@ -14,11 +14,14 @@ import time
 from dataclasses import dataclass, field
 
 import cv4_writer
+import tdc_mapping
 from cv4_writer import Cv4Writer
 from timewalk import apply_timewalk_correction
 from tpx_processing import (
+    MIN_CLUSTER_SIZE_ATTR,
+    get_min_cluster_size,
     decode_tpx3,
-    sort_tdcs,
+    classify_tdcs,
     group_pixels_by_pulse,
     group_times_relative,
     cluster_pixels_by_pulse,
@@ -37,10 +40,11 @@ from tpx_processing import (
 
 # ---- per-file pipeline ----------------------------------------------------
 
-def process_raw_file(path, settings, timewalk=None):
+def process_raw_file(path, settings, timewalk=None, min_cluster_size=None):
     """Decode one raw file, optionally timewalk-correct its pixels, cluster
     it, and bin its plot histograms with `settings` (a
-    HistogramPlotPanel.hist_snapshot()). Returns pulses_sorted /
+    HistogramPlotPanel.hist_snapshot()), dropping clusters under
+    `min_cluster_size` hits (default: the saved setting). Returns pulses_sorted /
     clusters_by_pulse / etof_by_pulse / itof_by_pulse (what
     Cv4Writer.append_frame takes) plus plot_result."""
     start = time.perf_counter()
@@ -49,11 +53,13 @@ def process_raw_file(path, settings, timewalk=None):
     pixels, tdcs, processed_packets, total_packets = decode_tpx3(str(path), max_packets=None)
     if timewalk is not None:
         pixels = apply_timewalk_correction(pixels, timewalk)
-    etof, itof, pulses = sort_tdcs(300.0, tdcs)
+    etof, itof, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
 
     pulses_sorted = sorted(pulses)
     pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)
-    clusters_by_pulse, cluster_size_sum, cluster_count = cluster_pixels_by_pulse(pixels_by_pulse)
+    clusters_by_pulse, cluster_size_sum, cluster_count = cluster_pixels_by_pulse(
+        pixels_by_pulse, min_size=min_cluster_size
+    )
     etof_by_pulse = group_times_relative(etof, pulses_sorted)
     itof_by_pulse = group_times_relative(itof, pulses_sorted)
 
@@ -229,15 +235,19 @@ def convert_job(job, hist_settings, timewalk=None, stop_event=None, on_file=None
     result is binned with. `on_file(path, frame, error)` is called after
     every raw file, with `frame` None and `error` set if it failed.
     Returns (final_path, files_processed)."""
+    # One minimum for the whole file, read once: editing the field
+    # mid-conversion mustn't leave the file's frames clustered differently
+    # from what it records.
+    min_cluster_size = get_min_cluster_size()
     partial_path = cv4_writer.partial_path_for(job.cv4_path)
-    writer = Cv4Writer(partial_path, metadata=job.metadata)
+    writer = Cv4Writer(partial_path, metadata={**job.metadata, MIN_CLUSTER_SIZE_ATTR: min_cluster_size})
     processed = 0
     try:
         for path in job.raw_files:
             if stop_event is not None and stop_event.is_set():
                 break
             try:
-                frame = process_raw_file(path, hist_settings(), timewalk)
+                frame = process_raw_file(path, hist_settings(), timewalk, min_cluster_size)
                 writer.append_frame(
                     frame["pulses_sorted"],
                     frame["clusters_by_pulse"],

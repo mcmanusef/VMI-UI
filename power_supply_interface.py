@@ -36,6 +36,7 @@ except ImportError:  # pyserial not installed -- tab loads but can't connect
     serial = None
 
 import app_settings
+import platform_paths
 import ui_style
 
 
@@ -60,7 +61,7 @@ class SY127:
     USB-serial cable doesn't drive it, or the SY127 may stall.
     """
 
-    def __init__(self, port="COM3", baudrate=9600,
+    def __init__(self, port=platform_paths.DEFAULT_SERIAL_PORT, baudrate=9600,
                  parity=None, bytesize=None, stopbits=None,
                  xonxoff=True, timeout=0.1):
         if serial is None:
@@ -594,7 +595,7 @@ class PowerSupplyInterface(ttk.Frame):
 
         # Connection settings, persisted via the global "Save current as
         # default" button (see default_fields).
-        self.port_var = tk.StringVar(self, value=app_settings.get("power_supply.port", "COM3"))
+        self.port_var = tk.StringVar(self, value=app_settings.get("power_supply.port", platform_paths.DEFAULT_SERIAL_PORT))
         self.baud_var = tk.StringVar(self, value=app_settings.get("power_supply.baud", "9600"))
         self.parity_var = tk.StringVar(self, value=app_settings.get("power_supply.parity", "N"))
         self.bits_var = tk.StringVar(self, value=app_settings.get("power_supply.bits", "8"))

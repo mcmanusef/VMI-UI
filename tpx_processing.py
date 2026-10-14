@@ -5,10 +5,21 @@ any UI (diagnostics, monitored acquisition, offline reprocessing, ...).
 """
 import bisect
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable, List, Tuple
 
 import numpy as np
+
+import app_settings
+import chip_layout
+from tdc_mapping import (
+    FAMILY_FPGA_TDC,
+    FAMILY_PICOTDC,
+    FPGA_TDC_NS_PER_COUNT,
+    FPGA_TDC_SUBTYPES,
+    PICOTDC_NS_PER_COUNT,
+)
 
 
 @dataclass
@@ -20,13 +31,36 @@ class PixelData:
 
 
 PIXEL_RES_NS = 25 / 16
+# Pixel ToA (16-bit coarse + 14-bit mid, in 1.5625 ns steps) wraps every
+# 2^34 * 1.5625 ns = 2^30 * 25 ns (~26.8 s); TDC times are folded onto the
+# same period so pulses and pixels line up.
+TIME_ROLLOVER_NS = (1 << 34) * PIXEL_RES_NS
 
 # Dither widths used to smear out the quantization of the raw timestamps.
 TDC_JITTER_NS = 0.26          # applied to every e-ToF and i-ToF time
 CLUSTER_T_JITTER_NS = 1.56    # applied to every cluster time
 
+# Clusters with fewer hits than this are dropped. User-editable (the
+# "Min cluster size" field, shared across tabs) and saved under this key.
+DEFAULT_MIN_CLUSTER_SIZE = 5
+MIN_CLUSTER_SIZE_KEY = "clustering.min_size"
+# The cv4 root attribute recording which minimum a file's clusters used.
+MIN_CLUSTER_SIZE_ATTR = "Min Cluster Size (hits)"
 
-def iter_packet_arrays(path: str) -> Iterable[np.ndarray]:
+
+def get_min_cluster_size() -> int:
+    """The saved minimum cluster size (hits), or the default if it's unset
+    or not a whole number >= 1."""
+    try:
+        value = int(str(app_settings.get(MIN_CLUSTER_SIZE_KEY, DEFAULT_MIN_CLUSTER_SIZE)).strip())
+    except ValueError:
+        return DEFAULT_MIN_CLUSTER_SIZE
+    return value if value >= 1 else DEFAULT_MIN_CLUSTER_SIZE
+
+
+def iter_packet_arrays(path: str) -> Iterable[Tuple[int, np.ndarray]]:
+    """(chip_index, packets) per chunk -- the chunk header's byte 4 names
+    the chip stream (0-3 on a quad) its pixel hits came from."""
     with open(path, "rb") as f:
         while True:
             header = f.read(8)
@@ -40,13 +74,13 @@ def iter_packet_arrays(path: str) -> Iterable[np.ndarray]:
                 break
             words = np.frombuffer(payload, dtype="<u8")
             packets = (words - (1 << 62)) & ((1 << 64) - 1)
-            yield packets
+            yield header[4], packets
 
 
 def detect_headers(path: str, sample_packets: int = 4096) -> Tuple[int, int]:
     counts = np.zeros(16, dtype=np.int64)
     total = 0
-    for packets in iter_packet_arrays(path):
+    for _chip, packets in iter_packet_arrays(path):
         headers = (packets >> 60).astype(np.int64)
         counts += np.bincount(headers, minlength=16)
         total += len(headers)
@@ -66,14 +100,20 @@ def detect_headers(path: str, sample_packets: int = 4096) -> Tuple[int, int]:
     return 0x7, 0x2
 
 
-def decode_tpx3(path: str, max_packets: int = None):
+def decode_tpx3(path: str, max_packets: int = None, layout=None):
+    """Pixel hits (in detector-canvas coordinates: each chip's local x/y
+    placed and oriented per `layout`, default chip_layout.get_active_layout())
+    and TDC hits of one raw file."""
+    if layout is None:
+        layout = chip_layout.get_active_layout()
     pixels: List[PixelData] = []
-    tdcs: List[Tuple[int, int, int, int]] = []
+    tdcs: List[Tuple[int, int, int, float]] = []
+    tdc_words: List[np.ndarray] = []
     processed = 0
     total = 0
     pixel_header, tdc_header = detect_headers(path)
 
-    for packets in iter_packet_arrays(path):
+    for chip, packets in iter_packet_arrays(path):
         total += len(packets)
         if max_packets is not None and processed >= max_packets:
             continue
@@ -105,6 +145,7 @@ def decode_tpx3(path: str, max_packets: int = None):
             pix = pix_addr & 0x0007
             xs = dcol + (pix // 4)
             ys = spix + (pix & 0x3)
+            xs, ys = layout.to_global(chip, xs, ys)
 
             pixels.extend(
                 PixelData(time_ns=float(t), x=int(x), y=int(y), tot=int(tt))
@@ -113,21 +154,82 @@ def decode_tpx3(path: str, max_packets: int = None):
 
         tdc_mask = headers == tdc_header
         if np.any(tdc_mask):
-            reduced_tdcs = reduced[tdc_mask]
-            f_time = (reduced_tdcs >> 5) & 0xF
-            c_time = (reduced_tdcs >> 9) & ((1 << 35) - 1)
-            tdc_type = (reduced_tdcs >> 56) & 0xF
-            c_time = c_time & 0x1FFFFFFFF
-
-            tdcs.extend(
-                (int(t), int(c), int(f) - 1, 0)
-                for t, c, f in zip(tdc_type, c_time, f_time)
-            )
+            tdc_words.append(reduced[tdc_mask])
 
         if max_packets is not None and processed >= max_packets:
             continue
 
+    if tdc_words:
+        tdcs = _decode_tdc_words(_drop_repeated_tdc_words(np.concatenate(tdc_words)))
+
     return pixels, tdcs, processed, total
+
+
+def _drop_repeated_tdc_words(words: np.ndarray) -> np.ndarray:
+    """Every chip stream in a multi-chip file carries its own bit-identical
+    copy of each TDC packet (4x on a quad), so keep only the first
+    occurrence of each word, still in file order. A genuine hit can't
+    repeat a word exactly: its timestamp (plus, for the FPGA TDC, its
+    trigger counter) differs from every other hit's, so this only drops
+    the per-chip copies -- and works however many chips carry them."""
+    _, first = np.unique(words, return_index=True)
+    return words[np.sort(first)]
+
+
+def _decode_tdc_words(words: np.ndarray) -> List[Tuple[int, int, int, float]]:
+    """(sub_nibble, channel, edge, time_ns) for each TDC word, in the
+    order given. Each family/subtype is decoded separately, then the hits
+    are put back in file order: classify_tdcs pairs each rising edge with
+    the next falling edge on its line, which needs them interleaved as
+    they arrived."""
+    sub = (words >> 56) & 0xF
+    order = np.arange(len(words))
+    parts = []
+
+    pico_sel = sub == 0xC
+    pico = words[pico_sel]
+    pico_order = order[pico_sel]
+    if len(pico):
+        valid = ((pico >> 52) & 1) == 0
+        pico = pico[valid]
+        pico_order = pico_order[valid]
+    if len(pico):
+        channel = (((pico >> 53) & 0x3) << 4) | ((pico >> 48) & 0xF)
+        edge = (pico >> 47) & 1
+        ts_lower = (pico >> 21) & 0x3FFFFFF
+        spidr = pico & 0x1FFFFF
+        ts = (spidr << 26) | ts_lower
+        time_ns = np.mod(ts.astype(np.float64) * PICOTDC_NS_PER_COUNT, TIME_ROLLOVER_NS)
+        parts.extend(
+            (int(i), (0xC, int(c), int(e), float(t)))
+            for i, c, e, t in zip(pico_order, channel, edge, time_ns)
+        )
+
+    for sub_value, (channel_id, edge_value) in FPGA_TDC_SUBTYPES.items():
+        sel = sub == sub_value
+        fw = words[sel]
+        fw_order = order[sel]
+        if len(fw) == 0:
+            continue
+        fine = (fw >> 5) & 0xF
+        ok = (fine > 0) & (fine <= 12)
+        fw = fw[ok]
+        fine = fine[ok]
+        fw_order = fw_order[ok]
+        if len(fw) == 0:
+            continue
+        # Keep only the low 33 bits of the 35-bit coarse counter
+        # (3.125 ns steps) so it wraps with the pixel ToA.
+        coarse = (fw >> 9) & 0x1FFFFFFFF
+        combined = coarse.astype(np.int64) * 12 + (fine.astype(np.int64) - 1)
+        time_ns = combined.astype(np.float64) * FPGA_TDC_NS_PER_COUNT
+        parts.extend(
+            (int(i), (sub_value, channel_id, edge_value, float(t)))
+            for i, t in zip(fw_order, time_ns)
+        )
+
+    parts.sort(key=lambda item: item[0])
+    return [hit for _, hit in parts]
 
 
 def apply_jitter(values, width):
@@ -139,28 +241,54 @@ def apply_jitter(values, width):
     return arr.tolist()
 
 
-def sort_tdcs(cutoff_ns: float, tdcs: List[Tuple[int, int, int, int]], jitter_ns: float = TDC_JITTER_NS):
-    start_time = 0.0
-    pulses = []
-    etof = []
-    itof = []
-    for tdc_type, c_time, ftime, _ in tdcs:
-        tdc_time = 3.125 * c_time + 0.260 * ftime
-        if tdc_type == 15:
-            start_time = tdc_time
-        elif tdc_type == 14:
-            etof.append(tdc_time)
-        elif tdc_type == 10:
-            pulse_len = tdc_time - start_time
-            if pulse_len > cutoff_ns:
-                if start_time > 0:
-                    pulses.append(start_time)
-            else:
-                if start_time > 0:
-                    itof.append(start_time)
+def classify_tdcs(tdcs: List[Tuple[int, int, int, float]], mapping, jitter_ns: float = TDC_JITTER_NS):
+    """Splits raw TDC hits -- (sub_nibble, channel, edge, time_ns) tuples
+    from decode_tpx3's TDC branch, where sub_nibble 0xC is a PicoTDC hit and
+    0xf/0xa/0xe/0xb is an FPGA TDC hit (edge: 1 = rising, 0 = falling) -- into
+    pulse/etof/itof time lists per `mapping` (a tdc_mapping.TdcMapping).
 
-    etof = apply_jitter(etof, jitter_ns)
-    itof = apply_jitter(itof, jitter_ns)
+    Each signal's physical TDC line (family + channel) is matched; a signal
+    with no pulse-width gate takes every hit on its line (matching its
+    time_edge) directly, while a gated signal pairs each rising edge with
+    the next falling edge on that same line and keeps the pairing's start
+    (or end) time only when the resulting width falls in
+    [gate_min_ns, gate_max_ns] -- so multiple signals can share one
+    physical line and be told apart purely by pulse length (e.g. a long
+    trigger pulse vs a short i-ToF pulse on the same FPGA TDC channel)."""
+    hits_by_line = defaultdict(list)
+    for sub, channel, edge, t in tdcs:
+        family = FAMILY_PICOTDC if sub == 0xC else FAMILY_FPGA_TDC
+        hits_by_line[(family, channel)].append((edge, t))
+
+    def paired_pulses(key):
+        start = None
+        pulses_ = []
+        for edge, t in hits_by_line.get(key, ()):
+            if edge == 1:
+                start = t
+            elif start is not None:
+                pulses_.append((start, t - start))
+                start = None
+        return pulses_
+
+    def resolve(signal):
+        if not signal.enabled:
+            return []
+        key = (signal.source.family, signal.source.channel)
+        if signal.gate_min_ns is None and signal.gate_max_ns is None:
+            want_edge = 1 if signal.time_edge == "rising" else 0
+            return [t for edge, t in hits_by_line.get(key, ()) if edge == want_edge]
+        lo = signal.gate_min_ns if signal.gate_min_ns is not None else float("-inf")
+        hi = signal.gate_max_ns if signal.gate_max_ns is not None else float("inf")
+        out = []
+        for start, width in paired_pulses(key):
+            if lo <= width <= hi:
+                out.append(start if signal.time_edge == "rising" else start + width)
+        return out
+
+    pulses = resolve(mapping.pulse_trigger)
+    etof = apply_jitter(resolve(mapping.etof), jitter_ns)
+    itof = apply_jitter(resolve(mapping.itof), jitter_ns)
     return etof, itof, pulses
 
 
@@ -186,7 +314,12 @@ def group_pixels_by_pulse(pixels: List[PixelData], pulses_sorted):
     return grouped
 
 
-def cluster_pixels_by_pulse(pixels_by_pulse, t_jitter_ns: float = CLUSTER_T_JITTER_NS):
+def cluster_pixels_by_pulse(pixels_by_pulse, t_jitter_ns: float = CLUSTER_T_JITTER_NS, min_size: int = None):
+    """Groups each pulse's pixel hits into clusters of touching pixels and
+    keeps those with at least `min_size` hits (default
+    get_min_cluster_size())."""
+    if min_size is None:
+        min_size = get_min_cluster_size()
     clusters_by_pulse = {}
     cluster_size_sum = 0
     cluster_count = 0
@@ -231,7 +364,7 @@ def cluster_pixels_by_pulse(pixels_by_pulse, t_jitter_ns: float = CLUSTER_T_JITT
             avg_t = sum(t * w for _, _, t, w in cluster_pixels) / weight_sum
             avg_tot = sum(tot * w for _, _, _, w in cluster_pixels) / weight_sum
             n_pixels = len(cluster_pixels)
-            if n_pixels < 5:
+            if n_pixels < min_size:
                 continue
 
             if t_jitter_ns > 0:
@@ -261,7 +394,7 @@ def cluster_pixels_by_pulse(pixels_by_pulse, t_jitter_ns: float = CLUSTER_T_JITT
 def make_pixel_hist_from_pulses(pixels_by_pulse, bins: int = 256, range_min: float = 0.0, range_max: float = 256.0):
     bins = max(1, int(bins))
     if range_max <= range_min:
-        range_min, range_max = 0.0, 256.0
+        range_min, range_max = 0.0, float(chip_layout.get_active_layout().size)
     points = []
     for pix_list in pixels_by_pulse.values():
         for _, x, y, _ in pix_list:
@@ -287,7 +420,7 @@ def make_cluster_hists(
 ):
     xy_bins = max(1, int(xy_bins))
     if xy_max <= xy_min:
-        xy_min, xy_max = 0.0, 256.0
+        xy_min, xy_max = 0.0, float(chip_layout.get_active_layout().size)
 
     cluster_points = []
     cluster_times = []

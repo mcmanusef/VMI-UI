@@ -1,6 +1,7 @@
 # Runtime dependencies for the VMI experiment control UI.
 # Python >= 3.13. GUI is PyQt5 (see qtk.py) -- pinned Qt5 runtime for
 # Windows wheel availability; PyQt5-Qt5 5.15.19+ has no win_amd64 wheel.
+# Linux / macOS take whichever 5.15.x wheel exists for their platform.
 cmasher>=1.9.2
 h5py>=3.11.0
 ipykernel>=7.2.0
@@ -9,7 +10,8 @@ pandas>=3.0.0
 pandas-stubs~=3.0.0
 pillow>=10.0.0
 pyqt5==5.15.10
-pyqt5-qt5==5.15.2
+pyqt5-qt5==5.15.2; sys_platform == "win32"
+pyqt5-qt5>=5.15.2,<5.16; sys_platform != "win32"
 pyqtgraph==0.14.0
 pyserial>=3.5
 requests>=2.32.5

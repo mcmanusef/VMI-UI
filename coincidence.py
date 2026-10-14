@@ -1,7 +1,10 @@
 """Electron-ion coincidence analysis of a calibrated dataset. Headless (no Qt).
 
 Input is an HDF5 file written by the apply calibration tab
-(apply_calibration.py). Each electron is joined to the ions of its own
+(apply_calibration.py), or a cv4 file calibrated in memory the same way. A
+cv4 file can also be read without a momentum calibration: then each row is
+a detector cluster with its raw columns, and there is no p_x for the
+asymmetry. Each electron is joined to the ions of its own
 pulse, so m/q is a per-row coincidence quantity: an electron in a pulse
 with two ions gives two rows, and one with no ion keeps a NaN m/q (gating
 on m/q then drops it). Rows whose momenta are NaN, i.e. outside the
@@ -20,6 +23,8 @@ import pathlib
 
 import numpy as np
 import pandas as pd
+
+import apply_calibration as ac
 
 
 @dataclasses.dataclass(frozen=True)
@@ -46,6 +51,7 @@ KNOWN = {
 # Shown in the gate plots and offered as main-plot axes unless the user says
 # otherwise.
 DEFAULT_KEYS = ("px", "py", "pz", "pr", "t", "mq", "parameter")
+RAW_DEFAULT_KEYS = ("x", "y", "t", "t_etof", "t_tof", "mq", "parameter")
 PREFERRED_ORDER = (
     "px", "py", "pz", "pr", "energy", "t", "dt", "t_etof", "mq", "t_tof", "parameter",
     "x", "y", "pulse", "t_pulse", "n_clusters", "n_etof", "n_tof",
@@ -83,6 +89,11 @@ class Dataset:
     path: str = ""
 
     @property
+    def calibrated(self):
+        """True when the rows have momenta."""
+        return FORWARD_KEY in self.arrays
+
+    @property
     def n_rows(self):
         return int(next(iter(self.arrays.values())).size) if self.arrays else 0
 
@@ -98,9 +109,8 @@ class Dataset:
 
 
 def load_dataset(path):
-    """Electron rows joined to their pulse's ions (see the module docstring).
-    Every numeric column of both tables is kept, so any of them can be
-    plotted or gated on."""
+    """Electron rows joined to their pulse's ions (see the module docstring),
+    from a file the apply calibration tab wrote."""
     path = str(path)
     with pd.HDFStore(path, "r") as store:
         keys = {key.strip("/") for key in store.keys()}
@@ -108,10 +118,29 @@ def load_dataset(path):
             raise ValueError(f"{pathlib.Path(path).name} has no electrons table.")
         parameter_label = str(getattr(store.get_storer("electrons").attrs, "parameter_label", "") or "")
     electrons = pd.read_hdf(path, "electrons")
-    missing = [column for column in MOMENTUM_COLUMNS if column not in electrons.columns]
-    if missing:
-        raise ValueError(f"The electrons table has no {', '.join(missing)} column(s).")
     ions = pd.read_hdf(path, "ions") if "ions" in keys else pd.DataFrame()
+    return dataset_from_tables(electrons, ions, parameter_label, path)
+
+
+def load_cv4_dataset(path, momentum=None, mq=None, progress=None, stop_event=None):
+    """As load_dataset, but straight from a cv4 (or grouped) file: the
+    calibrations are applied in memory the way the apply calibration tab
+    would (apply_calibration.calibrate_in_memory), with nothing saved.
+    Either calibration can be None to leave that part uncalibrated."""
+    electrons, ions, parameter_label = ac.calibrate_in_memory(
+        path, momentum, mq, progress=progress, stop_event=stop_event,
+    )
+    return dataset_from_tables(electrons, ions, parameter_label, str(path))
+
+
+def dataset_from_tables(electrons, ions, parameter_label="", path=""):
+    """The Dataset for an electrons and an ions DataFrame (as apply_calibration
+    builds them). Every numeric column of both tables is kept, so any of
+    them can be plotted or gated on. Without px, py and pz the rows are kept
+    as they are (uncalibrated)."""
+    missing = [column for column in MOMENTUM_COLUMNS if column not in electrons.columns]
+    if missing and len(missing) < len(MOMENTUM_COLUMNS):
+        raise ValueError(f"The electrons table has no {', '.join(missing)} column(s).")
 
     rows = electrons
     if not ions.empty and "pulse" in electrons.columns and "pulse" in ions.columns:
@@ -120,10 +149,14 @@ def load_dataset(path):
         extra = [column for column in ions.columns if column in electrons.columns and column not in on]
         rows = electrons.merge(ions.drop(columns=extra), on=on, how="left")
 
-    px, py, pz = (rows[column].to_numpy(dtype=np.float64) for column in MOMENTUM_COLUMNS)
-    keep = np.isfinite(px) & np.isfinite(py) & np.isfinite(pz)
-    px, py, pz = px[keep], py[keep], pz[keep]
-    arrays = {"px": px, "py": py, "pz": pz, "pr": np.sqrt(px ** 2 + py ** 2 + pz ** 2)}
+    if missing:
+        keep = np.ones(len(rows), dtype=bool)
+        arrays = {}
+    else:
+        px, py, pz = (rows[column].to_numpy(dtype=np.float64) for column in MOMENTUM_COLUMNS)
+        keep = np.isfinite(px) & np.isfinite(py) & np.isfinite(pz)
+        px, py, pz = px[keep], py[keep], pz[keep]
+        arrays = {"px": px, "py": py, "pz": pz, "pr": np.sqrt(px ** 2 + py ** 2 + pz ** 2)}
     for column in rows.columns:
         if column not in arrays and pd.api.types.is_numeric_dtype(rows[column]):
             arrays[column] = rows[column].to_numpy(dtype=np.float64)[keep]
@@ -187,16 +220,26 @@ def counts_1d(index, inside, bins):
     return np.bincount(index[inside], minlength=int(bins)).astype(np.float64)
 
 
+def _with_forward(inside, forward, quantity):
+    """`inside`, less the rows with no forward momentum. forward is None
+    for uncalibrated data, which has no asymmetry."""
+    if forward is None:
+        if quantity == QUANTITY_ASYMMETRY:
+            raise ValueError("The forward–backward asymmetry needs momenta; load the data with a momentum calibration.")
+        return inside
+    return inside & np.isfinite(forward)
+
+
 def histogram_1d(x, forward, bins, lo, hi, quantity=QUANTITY_DENSITY, binning=None):
     """(bin centers, values) of `quantity` against x. `forward` is the
     momentum along the propagation axis, whose sign splits forward from
-    backward. `binning` is a cached (index, inside) from bin_index() for the
-    same x, range and bin count."""
+    backward, or None for uncalibrated data. `binning` is a cached (index,
+    inside) from bin_index() for the same x, range and bin count."""
     bins = int(bins)
     edges = np.linspace(lo, hi, bins + 1)
     centers = 0.5 * (edges[:-1] + edges[1:])
     index, inside = bin_index(x, lo, hi, bins) if binning is None else binning
-    inside = inside & np.isfinite(forward)
+    inside = _with_forward(inside, forward, quantity)
     if quantity == QUANTITY_ASYMMETRY:
         ahead = counts_1d(index, inside & (forward > 0), bins)
         behind = counts_1d(index, inside & (forward < 0), bins)
@@ -213,8 +256,9 @@ def histogram_2d(x, y, forward, bins, x_range, y_range, quantity=QUANTITY_DENSIT
     """(values[x bin, y bin], x edges, y edges) of `quantity` in 2D. `bins`
     is one count for both axes, or (x bins, y bins). `forward` is the
     momentum along the propagation axis, whose sign splits forward from
-    backward. `binning` is a cached (x index, y index, inside) for the same
-    columns, ranges and bin counts, in which case x and y are not read."""
+    backward, or None for uncalibrated data. `binning` is a cached (x index,
+    y index, inside) for the same columns, ranges and bin counts, in which
+    case x and y are not read."""
     x_bins, y_bins = (int(bins), int(bins)) if np.isscalar(bins) else (int(bins[0]), int(bins[1]))
     x_edges = np.linspace(x_range[0], x_range[1], x_bins + 1)
     y_edges = np.linspace(y_range[0], y_range[1], y_bins + 1)
@@ -224,7 +268,7 @@ def histogram_2d(x, y, forward, bins, x_range, y_range, quantity=QUANTITY_DENSIT
         inside = x_inside & y_inside
     else:
         x_index, y_index, inside = binning
-    inside = inside & np.isfinite(forward)
+    inside = _with_forward(inside, forward, quantity)
     flat = x_index * y_bins + y_index
 
     def counts_2d(selected):

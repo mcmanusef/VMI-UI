@@ -12,6 +12,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui
 
+import chip_layout
 from collapsible_frame import CollapsibleFrame, set_background
 from qt_plots import hist_to_rgba, ZoomFocusViewBox
 
@@ -28,11 +29,14 @@ PLOT_SPECS = [
 PLOT_LABELS = {key: label for key, label in PLOT_SPECS}
 PLOT_KEYS_BY_LABEL = {label: key for key, label in PLOT_SPECS}
 
+# Pixel/cluster maps span the whole detector canvas (512 px on a quad).
+_DETECTOR_PX = chip_layout.get_active_layout().size
+
 # "counts" uses max <= min to mean "scale to the data", and bins <= 0 to mean
 # "one bin per integer count value, scaled to the range".
 DEFAULT_HIST_SETTINGS = {
-    "pixel": {"bins": 256, "min": 0.0, "max": 256.0},
-    "cluster": {"bins": 256, "min": 0.0, "max": 256.0},
+    "pixel": {"bins": _DETECTOR_PX, "min": 0.0, "max": float(_DETECTOR_PX)},
+    "cluster": {"bins": _DETECTOR_PX, "min": 0.0, "max": float(_DETECTOR_PX)},
     "counts": {"bins": 0, "min": 0.0, "max": 0.0},
     "itof": {"bins": 2000, "min": 0.0, "max": 20000.0},
     "cluster_t": {"bins": 1000, "min": 0.0, "max": 1000.0},

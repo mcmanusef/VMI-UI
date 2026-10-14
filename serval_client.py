@@ -8,6 +8,8 @@ import time
 
 import requests
 
+import platform_paths
+
 # Shared, reused connection to Serval. Two reasons to use this instead of
 # bare requests.get/put() (which each open a brand-new TCP connection and
 # throw it away -- requests.api.request() literally does
@@ -109,7 +111,7 @@ def _configure_destination(server, frame_time, dest_dir, file_pattern, n_trigger
     destination = {
         "Raw": [
             {
-                "Base": pathlib.Path(dest_dir).as_uri(),
+                "Base": platform_paths.file_uri(dest_dir),
                 "FilePattern": file_pattern,
                 # Undocumented field (found by hand -- not in the manual or
                 # searchable anywhere); "SINGLE_FILE" is the default and
@@ -164,14 +166,16 @@ def wait_for_measurement_idle(server, timeout=30.0, poll=0.2):
     return None
 
 
-def wait_for_new_file(directory: pathlib.Path, stop_event, last_path, last_mtime, timeout=5.0, settle=0.2, poll=0.1):
-    """Poll `directory` for a *.tpx3 file that is newer than (last_path,
-    last_mtime) and appears to have finished being written (settle seconds
-    since its mtime). Returns None if stopped or nothing shows up in time.
+def wait_for_new_file(directory: pathlib.Path, stop_event, last_path, last_mtime, timeout=5.0, settle=0.2, poll=0.1,
+                      pattern="*.tpx3"):
+    """Poll `directory` for a file matching `pattern` that is newer than
+    (last_path, last_mtime) and appears to have finished being written
+    (settle seconds since its mtime). Returns None if stopped or nothing
+    shows up in time.
     """
     start = time.time()
     while not stop_event.is_set():
-        files = sorted(directory.glob("*.tpx3"), key=lambda p: p.stat().st_mtime)
+        files = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime)
         if files:
             newest = files[-1]
             newest_stat = newest.stat()

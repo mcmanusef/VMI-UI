@@ -17,6 +17,7 @@ from qtk import ttk, messagebox, filedialog
 import app_settings
 import cv4_writer
 import raw_conversion
+import shared_state
 import time_estimate
 import ui_style
 from plot_panel import HistogramPlotPanel
@@ -45,6 +46,7 @@ class ConversionInterface(ttk.Frame):
             self, tk.StringVar, "analysis.timewalk_path", str(DEFAULT_CORRECTION_PATH)
         )
         self._plot_shared_vars = plot_shared_vars
+        self.min_cluster_size_var = shared_state.min_cluster_size_var(self, plot_shared_vars)
 
         self.status_var = tk.StringVar(self, value="Idle")
         self._progress_var = tk.DoubleVar(self, value=0.0)
@@ -122,6 +124,7 @@ class ConversionInterface(ttk.Frame):
         ui_style.build_path_field(params, self.timewalk_path_var, self._browse_timewalk).grid(
             row=4, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
+        ui_style.add_form_row(params, 5, "Min cluster size (hits):", ttk.Entry(params, textvariable=self.min_cluster_size_var, width=18))
 
         found = ui_style.build_section(sidebar, 3, "Detected files")
         list_row = ui_style.add_stat_rows(found, [

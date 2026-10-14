@@ -33,9 +33,23 @@ Everything is one PyQt5 process, organised as three groups of tabs:
 
 ## Quick start
 
-Requires **Python ≥ 3.13** on Windows (paths, the serial port and the
-default data folders all assume Windows; the analysis modules themselves
-are platform-independent).
+Requires **Python ≥ 3.13**, on Windows or Linux.
+
+The quickest way: run the install script once, then the run script to
+start the app. Both work from any folder and are safe to re-run.
+
+| | Install (creates `.venv`, installs `requirements.txt`) | Start |
+|---|---|---|
+| Windows | double-click `install.bat` | double-click `run.bat` |
+| Linux | `./install.sh` | `./run.sh` |
+
+`install.sh` doesn't use sudo: it prints the `apt` command for anything
+missing (the Python venv package, Qt's X11 libraries, `dialout` group
+membership for the power supply).
+
+To do the same by hand:
+
+Windows:
 
 ```powershell
 python -m venv .venv
@@ -43,6 +57,30 @@ python -m venv .venv
 pip install -r requirements.txt
 python UI.py
 ```
+
+Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python UI.py
+```
+
+On Linux, Qt needs a few X11 libraries the wheels don't ship (Debian/Ubuntu:
+`sudo apt install libxcb-xinerama0 libxkbcommon-x11-0 libxcb-icccm4
+libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-cursor0`); without
+them startup fails with "Could not load the Qt platform plugin xcb". To use
+the power supply, add yourself to the `dialout` group (`sudo usermod -aG
+dialout $USER`, then log in again) and enter its port, e.g. `/dev/ttyUSB0`.
+
+Per-platform defaults live in `platform_paths.py`: data is saved under
+`C:\DATA\<date>\...` on Windows and `~/DATA/<date>/...` elsewhere, scratch
+raw files go to `C:\Temp` or the system temp folder, and the serial port
+defaults to `COM3` or `/dev/ttyUSB0`. Saved settings holding a Windows
+drive path (e.g. an `app_settings.json` copied from a Windows machine, or
+the Windows paths in `serval_config.json`) are ignored on Linux in favour
+of those defaults. The analysis code itself is platform-independent.
 
 `UI.py` is the entry point. (`main.py` is the leftover PyCharm sample
 script and is not used by anything.)

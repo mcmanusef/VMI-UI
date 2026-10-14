@@ -19,7 +19,8 @@ the actual cause), and we need to look elsewhere in the payload.
 
 Run directly:
     python test_configure_continuous_destination.py [server_url] [dest_folder] [frame_time]
-    (defaults: http://localhost:8080, C:\\DATA\\split_strategy_repro, 1.0)
+    (defaults: http://localhost:8080, <data root>/split_strategy_repro, 1.0 --
+    data root per platform_paths.py)
 """
 import json
 import pathlib
@@ -28,10 +29,11 @@ import time
 
 import requests
 
+import platform_paths
 import serval_client
 
 DEFAULT_SERVER = "http://localhost:8080"
-# DEFAULT_FOLDER = r"C:\DATA\split_strategy_repro"
+DEFAULT_FOLDER = str(platform_paths.DATA_ROOT / "split_strategy_repro")
 
 
 def server_url():
@@ -67,7 +69,7 @@ def main():
     ft = frame_time()
 
     print(f"Server: {server}")
-    print(f"Folder: {folder}  (Base URI: {folder.as_uri()})")
+    print(f"Folder: {folder}  (Base URI: {platform_paths.file_uri(folder)})")
     print(f"frame_time: {ft}")
     print(f"LONG_RUN_TRIGGERS currently: {serval_client.LONG_RUN_TRIGGERS}\n")
 
@@ -95,7 +97,7 @@ def main():
     destination = {
         "Raw": [
             {
-                "Base": folder.as_uri(),
+                "Base": platform_paths.file_uri(folder),
                 "FilePattern": "repro%Hms_",
                 "SplitStrategy": "FRAME",
             }

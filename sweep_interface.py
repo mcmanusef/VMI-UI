@@ -49,7 +49,9 @@ import pyqtgraph as pg
 
 import app_settings
 import cv4_writer
+import platform_paths
 import serval_client
+import tdc_mapping
 from power_supply_interface import PowerSupplyUnavailable
 from qt_plots import mpl_color, ZoomFocusViewBox
 import time_estimate
@@ -57,8 +59,10 @@ from cv4_writer import Cv4Writer
 import ui_style
 from stage_interface import describe_move_failure
 from tpx_processing import (
+    MIN_CLUSTER_SIZE_ATTR,
+    get_min_cluster_size,
     decode_tpx3,
-    sort_tdcs,
+    classify_tdcs,
     group_pixels_by_pulse,
     group_times_relative,
     cluster_pixels_by_pulse,
@@ -158,6 +162,7 @@ class SweepInterface(ttk.Frame):
     def __init__(self, parent, server_var=None, acq_shared_vars=None, stage_ui=None,
                  power_supply_ui=None, coordinator=None, **kwargs):
         super().__init__(parent, **kwargs)
+        self._run_min_cluster_size = None
 
         self._server_var = server_var
         self._fallback_server_var = tk.StringVar(self, value="http://localhost:8080")
@@ -244,7 +249,7 @@ class SweepInterface(ttk.Frame):
         self._poll_queue()
 
     def _default_save_folder(self):
-        return rf"C:\DATA\{datetime.date.today().strftime('%Y%m%d')}\sweep"
+        return platform_paths.dated_data_folder("sweep")
 
     # ---- UI construction --------------------------------------------------
 
@@ -577,6 +582,9 @@ class SweepInterface(ttk.Frame):
         raw_root.mkdir(parents=True, exist_ok=True)
 
         metadata_base = self._collect_metadata(frame_time, dwell_mode, dwell_value, passes)
+        # Fixed for the whole sweep, so every frame matches what's recorded.
+        self._run_min_cluster_size = get_min_cluster_size()
+        metadata_base[MIN_CLUSTER_SIZE_ATTR] = self._run_min_cluster_size
         if hv is not None:
             metadata_base.update(hv.metadata())
         server = self._server_url()
@@ -685,10 +693,12 @@ class SweepInterface(ttk.Frame):
         per-frame pipeline every other tab uses."""
         frame_start = time.perf_counter()
         pixels, tdcs, processed_packets, total_packets = decode_tpx3(str(path), max_packets=None)
-        etof, itof, pulses = sort_tdcs(300.0, tdcs)
+        etof, itof, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
         pulses_sorted = sorted(pulses)
         pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)
-        clusters_by_pulse, cluster_size_sum, cluster_count = cluster_pixels_by_pulse(pixels_by_pulse)
+        clusters_by_pulse, cluster_size_sum, cluster_count = cluster_pixels_by_pulse(
+            pixels_by_pulse, min_size=self._run_min_cluster_size
+        )
         etof_by_pulse = group_times_relative(etof, pulses_sorted)
         itof_by_pulse = group_times_relative(itof, pulses_sorted)
         pulse_records = [

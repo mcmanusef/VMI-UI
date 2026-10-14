@@ -164,5 +164,5 @@ def finalize_partial_path(partial_path, completed):
     if not completed:
         return partial_path
     final_path = partial_path.with_name(partial_path.name[: -len(".partial.cv4")] + ".cv4")
-    partial_path.rename(final_path)
+    partial_path.replace(final_path)
     return final_path

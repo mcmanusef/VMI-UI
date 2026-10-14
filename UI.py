@@ -9,15 +9,18 @@ from analysis_interface import ConversionInterface
 from coincidence_interface import CoincidenceInterface
 from calibration_apply_interface import CalibrationApplyInterface
 from calibration_interface import CalibrationHub, MassCalibrationInterface, MomentumCalibrationInterface
+from chip_layout_interface import ChipLayoutInterface
 from collection_interface import CollectionInterface
 from diagnostics_interface import DiagnosticsInterface
 from parameter_grouping_interface import ParameterGroupingInterface
 from power_supply_interface import PowerSupplyInterface
+from raw_to_h5_interface import RawToH5Interface
 from serval_interface import ServalInterface
 from shared_state import make_plot_shared_vars, make_acquisition_shared_vars
 from stage_interface import StageInterface
 from sweep_interface import SweepInterface
 from tab_coordinator import TabCoordinator
+from tdc_mapping_interface import TdcMappingInterface
 from timewalk_interface import TimewalkInterface
 
 def _prepare_tab(parent: ttk.Frame):
@@ -76,9 +79,13 @@ class App(tk.Tk):
         serval_tab = ttk.Frame(hardware)
         stage_tab = ttk.Frame(hardware)
         power_supply_tab = ttk.Frame(hardware)
+        tdc_mapping_tab = ttk.Frame(hardware)
+        chip_layout_tab = ttk.Frame(hardware)
         hardware.add(serval_tab, text="serval config")
         hardware.add(stage_tab, text="stage control")
         hardware.add(power_supply_tab, text="power supply")
+        hardware.add(tdc_mapping_tab, text="tdc mapping")
+        hardware.add(chip_layout_tab, text="chip layout")
 
         # Acquisition tabs
         collection_tab = ttk.Frame(acquisition)
@@ -94,12 +101,14 @@ class App(tk.Tk):
 
         # Analysis tabs
         conversion_tab = ttk.Frame(analysis)
+        raw_to_h5_tab = ttk.Frame(analysis)
         momentum_calibration_tab = ttk.Frame(analysis)
         mq_calibration_tab = ttk.Frame(analysis)
         apply_calibration_tab = ttk.Frame(analysis)
         grouping_tab = ttk.Frame(analysis)
         coincidence_tab = ttk.Frame(analysis)
         analysis.add(conversion_tab, text="conversion")
+        analysis.add(raw_to_h5_tab, text="tpx to h5")
         analysis.add(momentum_calibration_tab, text="momentum calibration")
         analysis.add(mq_calibration_tab, text="m/q calibration")
         analysis.add(apply_calibration_tab, text="apply calibration")
@@ -117,12 +126,15 @@ class App(tk.Tk):
         self._build_serval_config(serval_tab)
         self._build_stage(stage_tab)
         self._build_power_supply(power_supply_tab)
+        self._build_tdc_mapping(tdc_mapping_tab)
+        self._build_chip_layout(chip_layout_tab)
         self._build_collection_params(collection_tab)
         self._build_diagnostics(diagnostics_tab)
         self._build_acquisition(acquisition_tab)
         self._build_timewalk(timewalk_tab)
         self._build_sweep(sweep_tab)
         self._build_conversion(conversion_tab)
+        self._build_raw_to_h5(raw_to_h5_tab)
         self._build_momentum_calibration(momentum_calibration_tab)
         self._build_mq_calibration(mq_calibration_tab)
         self._build_apply_calibration(apply_calibration_tab)
@@ -219,6 +231,12 @@ class App(tk.Tk):
         )
         conversion_ui.grid(row=0, column=0, sticky="nsew")
 
+    def _build_raw_to_h5(self, parent: ttk.Frame):
+        _prepare_tab(parent)
+
+        raw_to_h5_ui = RawToH5Interface(parent, acq_shared_vars=self._acq_shared_vars)
+        raw_to_h5_ui.grid(row=0, column=0, sticky="nsew")
+
     def _build_momentum_calibration(self, parent: ttk.Frame):
         _prepare_tab(parent)
 
@@ -246,7 +264,7 @@ class App(tk.Tk):
     def _build_coincidence(self, parent: ttk.Frame):
         _prepare_tab(parent)
 
-        coincidence_ui = CoincidenceInterface(parent)
+        coincidence_ui = CoincidenceInterface(parent, hub=self._calibration_hub)
         coincidence_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_power_supply(self, parent: ttk.Frame):
@@ -254,6 +272,21 @@ class App(tk.Tk):
 
         self.power_supply_ui = PowerSupplyInterface(parent, coordinator=self._coordinator)
         self.power_supply_ui.grid(row=0, column=0, sticky="nsew")
+
+    def _build_tdc_mapping(self, parent: ttk.Frame):
+        _prepare_tab(parent)
+
+        tdc_mapping_ui = TdcMappingInterface(parent)
+        tdc_mapping_ui.grid(row=0, column=0, sticky="nsew")
+
+    def _build_chip_layout(self, parent: ttk.Frame):
+        _prepare_tab(parent)
+
+        server_var = getattr(self, "serval_ui", None)
+        chip_layout_ui = ChipLayoutInterface(
+            parent, server_var=server_var.server_var if server_var else None,
+        )
+        chip_layout_ui.grid(row=0, column=0, sticky="nsew")
 
 
 if __name__ == "__main__":

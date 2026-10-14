@@ -20,7 +20,8 @@ Tables (read back with pd.read_hdf(path, key)):
   ions          Every i-ToF hit: t_tof, pulse, t_pulse, n_tof, plus mq (u/e)
                 when an m/q calibration is given. Left out with electrons_only.
 Pulse indices are per cv4 file, so in grouped output (parameter, pulse)
-identifies a pulse.
+identifies a pulse. Pulse 0 means no matching pulse, which includes hits
+more than a pulse period after the last trigger.
 
 The output is still one file, but it is written a part (cv4 file or group)
 at a time: each part is calibrated and appended before the next is read, so
@@ -87,50 +88,82 @@ def _pulse_columns(corr, t_pulse):
     return pulse.astype(np.int32), t_pulse[pulse]
 
 
+def _matched_pulses(corr, t, t_pulse):
+    """corr with hits that belong to no pulse moved to pulse 0, cv4's "no
+    matching pulse" index. Hits after the last trigger are all given the
+    last pulse, however late they are; those more than a pulse period
+    (the median trigger spacing) after it are moved."""
+    corr = np.array(corr, dtype=np.int64)
+    triggers = t_pulse[1:]
+    if triggers.size >= 2:
+        period = float(np.median(np.diff(triggers)))
+        corr[(corr == t_pulse.size - 1) & (np.asarray(t, dtype=np.float64) >= period)] = 0
+    return corr
+
+
 def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, parameter=None):
     """The DataFrames described in the module docstring. With `parameter`,
-    each table starts with a "parameter" column holding that value."""
+    each table starts with a "parameter" column holding that value.
+
+    With momentum None the electrons are left uncalibrated: one row per
+    cluster/e-ToF pair as usual, plus a row with a NaN t_etof for each
+    cluster whose pulse has no e-ToF hit, and no dt, px, py, pz or energy."""
     t_pulse = np.asarray(raw["t_pulse"], dtype=np.float64)
     cluster_corr = np.asarray(raw["cluster_corr"], dtype=np.int64)
     etof_corr = np.asarray(raw["etof_corr"], dtype=np.int64)
     for name, corr in (("cluster_corr", cluster_corr), ("etof_corr", etof_corr)):
         if corr.size and (corr.min() < 0 or corr.max() >= t_pulse.size):
             raise ValueError(f"{name} points outside t_pulse.")
+    cluster_corr = _matched_pulses(cluster_corr, raw["t"], t_pulse)
+    etof_corr = _matched_pulses(etof_corr, raw["t_etof"], t_pulse)
 
-    c_rows, e_rows = ec.pair_by_pulse(cluster_corr, etof_corr, single_hit_only=False)
-    # Pulse 0 is cv4's "no matching pulse" sentinel, not a real pulse.
-    keep = cluster_corr[c_rows] != 0
-    c_rows, e_rows = c_rows[keep], e_rows[keep]
+    # Pulse 0 is cv4's "no matching pulse" sentinel, not a real pulse. It's
+    # left out before pairing: every unmatched cluster times every unmatched
+    # e-ToF hit can be billions of pairs.
+    c_valid = np.flatnonzero(cluster_corr != 0)
+    e_valid = np.flatnonzero(etof_corr != 0)
+    c_rows, e_rows = ec.pair_by_pulse(cluster_corr[c_valid], etof_corr[e_valid], single_hit_only=False)
+    c_rows, e_rows = c_valid[c_rows], e_valid[e_rows]
+    clusters_per_pulse = np.bincount(cluster_corr, minlength=t_pulse.size)
+    etof_per_pulse = np.bincount(etof_corr, minlength=t_pulse.size)
+    if momentum is None:
+        # Keep the clusters with no e-ToF hit to pair with, in cluster order.
+        lone = c_valid[etof_per_pulse[cluster_corr[c_valid]] == 0]
+        c_rows = np.concatenate([c_rows, lone])
+        e_rows = np.concatenate([e_rows, np.full(lone.size, -1, dtype=e_rows.dtype)])
+        order = np.argsort(c_rows, kind="stable")
+        c_rows, e_rows = c_rows[order], e_rows[order]
 
     x = np.asarray(raw["x"], dtype=np.float64)[c_rows]
     y = np.asarray(raw["y"], dtype=np.float64)[c_rows]
     t_etof = np.asarray(raw["t_etof"], dtype=np.float64)[e_rows]
-    t_used = t_etof
-    if momentum.dither_ns > 0 and t_etof.size:
-        rng = rng if rng is not None else np.random.default_rng()
-        t_used = t_etof + rng.uniform(0.0, momentum.dither_ns, size=t_etof.size)
-    px, py, pz = momentum.calibrate(x, y, t_used)
+    if momentum is None:
+        t_etof[e_rows < 0] = np.nan
     pulse = cluster_corr[c_rows]
-    clusters_per_pulse = np.bincount(cluster_corr, minlength=t_pulse.size)
-    etof_per_pulse = np.bincount(etof_corr, minlength=t_pulse.size)
-
-    tables = {
-        "electrons": pd.DataFrame({
-            "pulse": pulse.astype(np.int32),
-            "t_pulse": t_pulse[pulse],
-            "x": x,
-            "y": y,
-            "t": np.asarray(raw["t"], dtype=np.float64)[c_rows],
-            "t_etof": t_etof,
-            "n_clusters": clusters_per_pulse[pulse].astype(np.int32),
-            "n_etof": etof_per_pulse[pulse].astype(np.int32),
+    electrons = {
+        "pulse": pulse.astype(np.int32),
+        "t_pulse": t_pulse[pulse],
+        "x": x,
+        "y": y,
+        "t": np.asarray(raw["t"], dtype=np.float64)[c_rows],
+        "t_etof": t_etof,
+        "n_clusters": clusters_per_pulse[pulse].astype(np.int32),
+        "n_etof": etof_per_pulse[pulse].astype(np.int32),
+    }
+    if momentum is not None:
+        t_used = t_etof
+        if momentum.dither_ns > 0 and t_etof.size:
+            rng = rng if rng is not None else np.random.default_rng()
+            t_used = t_etof + rng.uniform(0.0, momentum.dither_ns, size=t_etof.size)
+        px, py, pz = momentum.calibrate(x, y, t_used)
+        electrons.update({
             "dt": t_used - momentum.center[2],
             "px": px,
             "py": py,
             "pz": pz,
             "energy": ec.energy_ev(px, py, pz),
-        }),
-    }
+        })
+    tables = {"electrons": pd.DataFrame(electrons)}
 
     pulse, pulse_time = _pulse_columns(cluster_corr, t_pulse)
     tables["raw/clusters"] = pd.DataFrame({
@@ -143,6 +176,7 @@ def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, paramet
         tof_corr = np.asarray(raw["tof_corr"], dtype=np.int64)
         if tof_corr.size and (tof_corr.min() < 0 or tof_corr.max() >= t_pulse.size):
             raise ValueError("tof_corr points outside t_pulse.")
+        tof_corr = _matched_pulses(tof_corr, raw["t_tof"], t_pulse)
         pulse, pulse_time = _pulse_columns(tof_corr, t_pulse)
         ions = {
             "t_tof": np.asarray(raw["t_tof"], dtype=np.float64),
@@ -162,6 +196,48 @@ def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, paramet
 
 class ApplyStopped(Exception):
     """Applying was stopped before the output file was complete."""
+
+
+def has_ion_fields(node):
+    return all(field in node for field in ION_FIELDS)
+
+
+def calibrate_in_memory(cv4_path, momentum=None, mq=None, rng=None, progress=None, stop_event=None):
+    """The electrons and ions tables apply_to_file would write, kept in
+    memory instead: (electrons, ions, parameter label). Either calibration
+    can be None, which leaves that part uncalibrated (see build_tables).
+    ions is an empty DataFrame when the file has no i-ToF data. The raw/
+    tables are left out. progress and stop_event work as in apply_to_file."""
+    source_name = pathlib.Path(cv4_path).name
+    if pgr.is_grouped(cv4_path):
+        label, _, groups = pgr.read_group_info(cv4_path)
+        parts = [(name, value) for name, value, _ in groups]
+    else:
+        label, parts = "", [(None, None)]
+
+    electrons, ions = [], []
+    with h5py.File(str(cv4_path), "r") as source:
+        for index, (name, value) in enumerate(parts):
+            if stop_event is not None and stop_event.is_set():
+                raise ApplyStopped()
+            if progress is not None:
+                progress(index, len(parts), source_name if name is None else f"group {name}")
+            node = source if name is None else source[name]
+            electrons_only = not has_ion_fields(node)
+            raw, _ = _read_node(node, electrons_only, source_name if name is None else f"Group {name}")
+            tables = build_tables(raw, momentum, None if electrons_only else mq, electrons_only, rng, value)
+            del raw
+            electrons.append(tables["electrons"])
+            if "ions" in tables:
+                ions.append(tables["ions"])
+            del tables
+    if progress is not None:
+        progress(len(parts), len(parts), "")
+    return (
+        pd.concat(electrons, ignore_index=True),
+        pd.concat(ions, ignore_index=True) if ions else pd.DataFrame(),
+        label,
+    )
 
 
 @dataclasses.dataclass

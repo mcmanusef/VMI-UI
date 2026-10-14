@@ -21,7 +21,9 @@ import datetime
 import qtk as tk
 
 import app_settings
+import platform_paths
 from plot_panel import DEFAULT_HIST_SETTINGS
+from tpx_processing import DEFAULT_MIN_CLUSTER_SIZE, MIN_CLUSTER_SIZE_KEY
 
 _LOG_KEYS = (
     "log_pixel_var",
@@ -49,11 +51,25 @@ def make_plot_shared_vars(master):
             "max": app_settings.persistent_var(master, tk.StringVar, f"plot.{key}.max", f"{cfg['max']:g}"),
         }
     shared["hist_vars"] = hist_vars
+    # Not a plot setting, but every tab with a plot panel clusters, and
+    # sharing it here keeps their "Min cluster size" fields in step.
+    shared["min_cluster_size_var"] = app_settings.persistent_var(
+        master, tk.StringVar, MIN_CLUSTER_SIZE_KEY, str(DEFAULT_MIN_CLUSTER_SIZE)
+    )
     return shared
 
 
+def min_cluster_size_var(master, plot_shared_vars=None):
+    """The shared "Min cluster size" field's variable, or (for a tab built
+    without shared vars) its own one backed by the same saved setting."""
+    shared = (plot_shared_vars or {}).get("min_cluster_size_var")
+    if shared is not None:
+        return shared
+    return app_settings.persistent_var(master, tk.StringVar, MIN_CLUSTER_SIZE_KEY, str(DEFAULT_MIN_CLUSTER_SIZE))
+
+
 def _default_shared_save_folder():
-    return rf"C:\DATA\{datetime.date.today().strftime('%Y%m%d')}\acquisition"
+    return platform_paths.dated_data_folder("acquisition")
 
 
 def make_acquisition_shared_vars(master):

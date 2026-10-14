@@ -11,11 +11,20 @@ import pyqtgraph as pg
 from PyQt5 import QtCore
 
 import app_settings
+import platform_paths
 import serval_client
+import tdc_mapping
 import ui_style
 from qt_plots import hist_to_rgba, mpl_color, ZoomFocusViewBox
 from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection, generate_correction
-from tpx_processing import decode_tpx3, sort_tdcs, group_pixels_by_pulse
+from tpx_processing import decode_tpx3, classify_tdcs, group_pixels_by_pulse
+
+
+DEFAULT_TEMP_DIR = str(platform_paths.SCRATCH_ROOT / "serval_timewalk")
+# Serval names this tab's files <prefix><time>..., and only those are read or
+# cleaned up, so the temp folder can be any folder.
+FILE_PREFIX = "twcal"
+FILE_GLOB = f"{FILE_PREFIX}*.tpx3"
 
 
 class TimewalkInterface(ttk.Frame):
@@ -41,9 +50,10 @@ class TimewalkInterface(ttk.Frame):
         # default" button (next to the tab bar); untouched until then.
         self.frame_rate_var = tk.StringVar(self, value=app_settings.get("timewalk.frame_rate", "10"))
         self.max_packets_var = tk.StringVar(self, value=app_settings.get("timewalk.max_packets", "10000"))
+        self.temp_dir_var = tk.StringVar(self, value=app_settings.get("timewalk.temp_dir", DEFAULT_TEMP_DIR))
         self.use_test_file_var = tk.BooleanVar(self, value=app_settings.get("timewalk.use_test_file", False))
         self.test_file_var = tk.StringVar(
-            self, value=app_settings.get("timewalk.test_file", r"C:\Temp\serval_diag\test.tpx3")
+            self, value=app_settings.get("timewalk.test_file", str(platform_paths.SCRATCH_ROOT / "serval_diag" / "test.tpx3"))
         )
         self.status_var = tk.StringVar(self, value="Idle")
 
@@ -97,11 +107,19 @@ class TimewalkInterface(ttk.Frame):
             params, 0, "Frame rate (fps):", ttk.Entry(params, textvariable=self.frame_rate_var, width=18)
         )
         ui_style.add_form_row(params, 1, "Max packets:", ttk.Entry(params, textvariable=self.max_packets_var, width=18))
+        ui_style.add_form_row(
+            params, 2, "Temp folder:", ui_style.build_path_field(params, self.temp_dir_var, self._browse_temp_dir),
+        )
+        ui_style.add_note(
+            params, 3,
+            f"Serval writes each frame here as {FILE_PREFIX}*.tpx3; older {FILE_PREFIX}*.tpx3 files in it are "
+            "deleted as new ones arrive. Other files are left alone.",
+        )
         ttk.Checkbutton(params, text="Use test file", variable=self.use_test_file_var).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(4, 0)
+            row=4, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
         ui_style.build_path_field(params, self.test_file_var, self._browse_test_file).grid(
-            row=3, column=0, columnspan=2, sticky="ew", pady=(2, 4)
+            row=5, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
 
         # Set-once bins/bounds start collapsed, same as the plot panel's.
@@ -167,6 +185,15 @@ class TimewalkInterface(ttk.Frame):
         self.correction_info_var.set("No correction generated yet.")
         self._redraw()
 
+    def _browse_temp_dir(self):
+        chosen = filedialog.askdirectory(
+            initialdir=self.temp_dir_var.get().strip() or DEFAULT_TEMP_DIR,
+            title="Choose temp folder for timewalk frames",
+            parent=self,
+        )
+        if chosen:
+            self.temp_dir_var.set(chosen)
+
     def _browse_test_file(self):
         initial = self.test_file_var.get().strip()
         chosen = filedialog.askopenfilename(
@@ -191,11 +218,10 @@ class TimewalkInterface(ttk.Frame):
         return url
 
     def _create_temp_dir(self):
-        base = pathlib.Path(r"C:\Temp")
-        base.mkdir(parents=True, exist_ok=True)
-        temp_dir = base / "serval_timewalk"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        return str(temp_dir)
+        """The temp folder setting (blank: the default), created if needed."""
+        folder = pathlib.Path(self.temp_dir_var.get().strip() or DEFAULT_TEMP_DIR).expanduser()
+        folder.mkdir(parents=True, exist_ok=True)
+        return str(folder)
 
     def _poll_queue(self):
         try:
@@ -214,6 +240,7 @@ class TimewalkInterface(ttk.Frame):
         return {
             "timewalk.frame_rate": self.frame_rate_var,
             "timewalk.max_packets": self.max_packets_var,
+            "timewalk.temp_dir": self.temp_dir_var,
             "timewalk.use_test_file": self.use_test_file_var,
             "timewalk.test_file": self.test_file_var,
             "timewalk.tot_bins": self.tot_bins_var,
@@ -244,14 +271,18 @@ class TimewalkInterface(ttk.Frame):
             return
 
         self._stop_event.clear()
-        self._temp_dir = self._create_temp_dir()
+        try:
+            self._temp_dir = self._create_temp_dir()
+        except OSError as exc:
+            self.status_var.set(f"Could not use the temp folder: {exc}")
+            return
 
         test_mode = self.use_test_file_var.get()
         if not test_mode:
             try:
                 server = self._server_url()
                 serval_client.configure_single_trigger_destination(
-                    server, 1.0 / frame_rate if frame_rate > 0 else 0.1, self._temp_dir, "twcal%Hms_"
+                    server, 1.0 / frame_rate if frame_rate > 0 else 0.1, self._temp_dir, f"{FILE_PREFIX}%Hms_"
                 )
             except Exception as exc:
                 self.status_var.set(f"Config failed: {exc}")
@@ -302,7 +333,9 @@ class TimewalkInterface(ttk.Frame):
                         time.sleep(1)
                         continue
 
-                    newest = serval_client.wait_for_new_file(temp_dir, self._stop_event, last_path, last_mtime)
+                    newest = serval_client.wait_for_new_file(
+                        temp_dir, self._stop_event, last_path, last_mtime, pattern=FILE_GLOB,
+                    )
                     if newest is None:
                         continue
 
@@ -311,7 +344,7 @@ class TimewalkInterface(ttk.Frame):
                         time.sleep(0.2)
                         continue
 
-                    files = sorted(temp_dir.glob("*.tpx3"), key=lambda p: p.stat().st_mtime)
+                    files = sorted(temp_dir.glob(FILE_GLOB), key=lambda p: p.stat().st_mtime)
                     test_path = pathlib.Path(self.test_file_var.get().strip()) if self.test_file_var.get() else None
                     for old in files[:-1]:
                         if test_path and old.resolve() == test_path.resolve():
@@ -337,7 +370,7 @@ class TimewalkInterface(ttk.Frame):
         tot_bins, tot_min, tot_max, t_bins, t_min, t_max = hist_settings
 
         pixels, tdcs, _, _ = decode_tpx3(str(path), max_packets=max_packets)
-        _, _, pulses = sort_tdcs(300.0, tdcs)
+        _, _, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
         pulses_sorted = sorted(pulses)
         pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)
 
