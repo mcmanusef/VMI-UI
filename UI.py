@@ -264,7 +264,7 @@ class App(tk.Tk):
     def _build_coincidence(self, parent: ttk.Frame):
         _prepare_tab(parent)
 
-        coincidence_ui = CoincidenceInterface(parent)
+        coincidence_ui = CoincidenceInterface(parent, hub=self._calibration_hub)
         coincidence_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_power_supply(self, parent: ttk.Frame):

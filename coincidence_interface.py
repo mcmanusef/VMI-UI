@@ -1,5 +1,7 @@
 """Analysis tab: electron-ion coincidence plots of a calibrated dataset,
-with click-and-drag gates on each quantity (coincidence.py)."""
+with click-and-drag gates on each quantity (coincidence.py). The dataset is
+a file from the apply calibration tab, or a cv4 file calibrated on load with
+the latest calibrations (CalibrationPicker), or read uncalibrated."""
 import pathlib
 
 import numpy as np
@@ -12,12 +14,17 @@ from qtk import ttk, filedialog, grid_into
 import app_settings
 import coincidence as co
 import ui_style
+from calibration_apply_interface import CalibrationPicker
 from calibration_interface import (
-    BLUE, GREEN, GREY, BackgroundTask, PlotGrid, read_number, relax_titles, show_placeholder,
+    BLUE, GREEN, GREY, KIND_MOMENTUM, KIND_MQ, BackgroundTask, CalibrationHub, PlotGrid, browse_cv4,
+    read_number, relax_titles, set_visible, show_placeholder,
 )
 from qt_plots import ZoomFocusViewBox, rainforest_colormap
 
 EMPTY_TEXT = "No data — press Load"
+SOURCE_H5 = "Calibrated file (.h5)"
+SOURCE_CV4 = "cv4 file"
+SOURCES = (SOURCE_H5, SOURCE_CV4)
 MODE_2D = "2D heat map"
 MODE_1D = "1D plot"
 MODES = (MODE_2D, MODE_1D)
@@ -70,13 +77,19 @@ class CoincidenceInterface(ttk.Frame):
     small plots gates the data (each one ignores its own gate), and the
     large plot shows the gated 1D or 2D distribution."""
 
-    def __init__(self, parent, **kwargs):
+    def __init__(self, parent, hub=None, **kwargs):
         super().__init__(parent, **kwargs)
+        self._hub = hub if hub is not None else CalibrationHub()
 
         def pvar(cls, key, default):
             return app_settings.persistent_var(self, cls, f"coincidence.{key}", default)
 
+        self.source_var = pvar(tk.StringVar, "source", SOURCE_H5)
         self.path_var = pvar(tk.StringVar, "path", "")
+        self.cv4_path_var = pvar(tk.StringVar, "cv4_path", "")
+        self.apply_momentum_var = pvar(tk.BooleanVar, "apply_momentum", True)
+        self.apply_mq_var = pvar(tk.BooleanVar, "apply_mq", True)
+        self._source_note_var = tk.StringVar(self, value="")
         self.mode_var = pvar(tk.StringVar, "mode", MODE_2D)
         self.x_var = pvar(tk.StringVar, "x", "px")
         self.y_var = pvar(tk.StringVar, "y", "pz")
@@ -89,9 +102,15 @@ class CoincidenceInterface(ttk.Frame):
         self.quantity_var = pvar(tk.StringVar, "quantity", co.QUANTITY_DENSITY)
         self.split_var = pvar(tk.StringVar, "split_by", SPLIT_NONE)
         self.split_bins_var = pvar(tk.StringVar, "split_bins", "4")
-        # Which columns get a plot of their own, and which can be a main-plot axis.
-        self.plot_columns_var = pvar(tk.StringVar, "gate_columns", ",".join(co.DEFAULT_KEYS))
-        self.main_columns_var = pvar(tk.StringVar, "main_columns", ",".join(co.DEFAULT_KEYS))
+        # Which columns get a plot of their own, and which can be a main-plot
+        # axis; kept separately for calibrated and uncalibrated data, which
+        # have different columns.
+        self._column_vars = {
+            True: (pvar(tk.StringVar, "gate_columns", ",".join(co.DEFAULT_KEYS)),
+                   pvar(tk.StringVar, "main_columns", ",".join(co.DEFAULT_KEYS))),
+            False: (pvar(tk.StringVar, "raw_gate_columns", ",".join(co.RAW_DEFAULT_KEYS)),
+                    pvar(tk.StringVar, "raw_main_columns", ",".join(co.RAW_DEFAULT_KEYS))),
+        }
 
         self.status_var = tk.StringVar(self, value="Idle")
         self.rows_var = tk.StringVar(self, value="--")
@@ -120,6 +139,8 @@ class CoincidenceInterface(ttk.Frame):
         self._pending = "all"
 
         self._build_ui()
+        self.source_var.trace_add("write", self._on_source_changed)
+        self._on_source_changed()
         # These only affect the main plot, so they don't recompute the gate plots.
         for var in (self.mode_var, self.x_var, self.y_var, self.x_bins_var, self.y_bins_var,
                     self.log_var, self.quantity_var, self.auto_levels_var, self.aspect_var,
@@ -141,15 +162,34 @@ class CoincidenceInterface(ttk.Frame):
         ui_style.StatusBlock(sidebar, 1, self.status_var)
 
         data = ui_style.build_section(sidebar, 2, "Dataset")
-        ui_style.add_form_row(
-            data, 0, "Calibrated file:", ui_style.build_path_field(data, self.path_var, self._browse),
+        ui_style.add_form_row(data, 0, "Input:", ttk.Combobox(
+            data, textvariable=self.source_var, values=SOURCES, state="readonly", width=18,
+        ))
+        self._h5_label = ttk.Label(data, text="Calibrated file:")
+        self._h5_label.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        self._h5_field = ui_style.build_path_field(data, self.path_var, self._browse)
+        self._h5_field.grid(row=1, column=1, sticky="ew", pady=4)
+        self._cv4_label = ttk.Label(data, text="cv4 file:")
+        self._cv4_label.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        self._cv4_field = ui_style.build_path_field(
+            data, self.cv4_path_var, lambda: browse_cv4(self, self.cv4_path_var, "Choose dataset"),
         )
+        self._cv4_field.grid(row=2, column=1, sticky="ew", pady=4)
+        self._apply_frame = ttk.Frame(data)
+        self._apply_frame.grid(row=3, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(self._apply_frame, text="Apply momentum calibration", variable=self.apply_momentum_var).grid(
+            row=0, column=0, sticky="w", pady=(4, 0)
+        )
+        ttk.Checkbutton(self._apply_frame, text="Apply m/q calibration", variable=self.apply_mq_var).grid(
+            row=1, column=0, sticky="w"
+        )
+        self._picker = CalibrationPicker(self, self._hub, data, 4, self.status_var.set, self._task.is_running)
+        ui_style.add_note(data, 5, textvariable=self._source_note_var, pady=(4, 4))
         ui_style.add_note(
-            data, 1,
-            "An HDF5 file from the apply calibration tab. Each electron is joined to the ions of its own "
-            "pulse, so m/q is per coincidence; electrons with no ion have no m/q. p_r is the full "
-            "momentum magnitude |p|.",
-            pady=(4, 4),
+            data, 6,
+            "Each electron is joined to the ions of its own pulse, so m/q is per coincidence; electrons "
+            "with no ion have no m/q. p_r is the full momentum magnitude |p|.",
+            pady=(0, 4),
         )
 
         plot = ui_style.build_section(sidebar, 3, "Main plot")
@@ -191,7 +231,8 @@ class CoincidenceInterface(ttk.Frame):
             plot, 11,
             "Probability density normalizes the counts to integrate to 1 over the plotted range. Other "
             "quantities are drawn as points, one per bin that has data; the asymmetry is "
-            "(forward − backward) / total by the sign of p_x, the propagation axis. An axis whose gate "
+            "(forward − backward) / total by the sign of p_x, the propagation axis (calibrated data "
+            "only). An axis whose gate "
             "is applied is bounded "
             "by that gate. Drag the color bar's handles to set the heat map's levels, which turns auto "
             "levels off. “Split by” draws a 1D line per value of a second column, or per range of it "
@@ -280,6 +321,22 @@ class CoincidenceInterface(ttk.Frame):
         self._main_glw.setVisible(False)
         self._main_area.rowconfigure(0, weight=0)
 
+    def _cv4_input(self):
+        return self.source_var.get() == SOURCE_CV4
+
+    def _on_source_changed(self, *_):
+        cv4 = self._cv4_input()
+        set_visible([self._h5_label, self._h5_field], not cv4)
+        set_visible([self._cv4_label, self._cv4_field, self._apply_frame, self._picker.frame], cv4)
+        self._source_note_var.set(
+            "A cv4 or grouped file, read in memory without saving anything. With the momentum "
+            "calibration applied, rows are cluster/e-ToF pairs calibrated as the apply calibration tab "
+            "would (pz uses the e-ToF time). Without it, each detector cluster is a row with its raw "
+            "x, y and t, the e-ToF time of its pulse if any, and that pulse's ions."
+            if cv4 else
+            "An HDF5 file from the apply calibration tab."
+        )
+
     def _browse(self):
         initial = self.path_var.get().strip()
         chosen = filedialog.askopenfilename(
@@ -307,8 +364,9 @@ class CoincidenceInterface(ttk.Frame):
         self._columns_frame.grid(row=self._columns_row, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         self._show_plot, self._show_main, self._range_text, self._enabled = {}, {}, {}, {}
 
-        plot_keys = set(self._split(self.plot_columns_var.get()))
-        main_keys = set(self._split(self.main_columns_var.get()))
+        plot_var, main_var = self._column_vars[self._dataset.calibrated]
+        plot_keys = set(self._split(plot_var.get()))
+        main_keys = set(self._split(main_var.get()))
         for column, text in ((1, "Plot"), (2, "Gate"), (3, "Axis"), (4, "Low"), (5, "High")):
             ttk.Label(self._columns_frame, text=text, font=ui_style.SMALL_FONT).grid(row=0, column=column, padx=2)
         for row, variable in enumerate(self._dataset.variables, start=1):
@@ -374,14 +432,14 @@ class CoincidenceInterface(ttk.Frame):
     def _on_plot_columns_changed(self):
         if self._dataset is None:
             return
-        self.plot_columns_var.set(",".join(self._selected(self._show_plot)))
+        self._column_vars[self._dataset.calibrated][0].set(",".join(self._selected(self._show_plot)))
         self._build_small_plots()
         self._redraw()
 
     def _on_main_columns_changed(self):
         if self._dataset is None:
             return
-        self.main_columns_var.set(",".join(self._selected(self._show_main)))
+        self._column_vars[self._dataset.calibrated][1].set(",".join(self._selected(self._show_main)))
         self._refresh_axis_choices()
         self._redraw()
 
@@ -456,16 +514,32 @@ class CoincidenceInterface(ttk.Frame):
     def load_data(self):
         if self._task.is_running():
             return
-        path = self.path_var.get().strip()
+        cv4 = self._cv4_input()
+        path = (self.cv4_path_var if cv4 else self.path_var).get().strip()
         if not path:
-            self.status_var.set("Calibrated file is required.")
+            self.status_var.set("cv4 file is required." if cv4 else "Calibrated file is required.")
             return
         if not pathlib.Path(path).is_file():
             self.status_var.set(f"File not found: {path}")
             return
-        self.status_var.set("Loading...")
+        if cv4:
+            momentum = self._picker.calibrations[KIND_MOMENTUM] if self.apply_momentum_var.get() else None
+            mq = self._picker.calibrations[KIND_MQ] if self.apply_mq_var.get() else None
+            for wanted, calibration, name in (
+                (self.apply_momentum_var.get(), momentum, "momentum"), (self.apply_mq_var.get(), mq, "m/q"),
+            ):
+                if wanted and calibration is None:
+                    self.status_var.set(
+                        f"No {name} calibration. Fit, save or load one, or untick \"Apply {name} calibration\"."
+                    )
+                    return
+            self.status_var.set(f"Reading {pathlib.Path(path).name}...")
+            work = lambda: co.load_cv4_dataset(path, momentum, mq)  # noqa: E731
+        else:
+            self.status_var.set("Loading...")
+            work = lambda: co.load_dataset(path)  # noqa: E731
         self._task.start(
-            lambda: co.load_dataset(path), self._on_loaded,
+            work, self._on_loaded,
             lambda exc: self.status_var.set(f"Error: could not load the dataset: {exc}"),
         )
 
@@ -483,9 +557,10 @@ class CoincidenceInterface(ttk.Frame):
         self.electrons_var.set(str(dataset.n_electrons))
         self.rows_var.set(str(dataset.n_rows))
         columns = len(dataset.variables)
+        calibrated = "" if dataset.calibrated else " (uncalibrated: no momenta)"
         self.status_var.set(
             f"Loaded {dataset.n_rows} coincidence rows and {columns} columns from "
-            f"{pathlib.Path(dataset.path).name}."
+            f"{pathlib.Path(dataset.path).name}{calibrated}."
         )
         self._redraw()
 
@@ -619,6 +694,9 @@ class CoincidenceInterface(ttk.Frame):
                 if what == "all":
                     self._small_drawn = self._draw_small()
                 drawn_main = self._draw_main(is_2d)
+                # Fixed: an error from an earlier redraw no longer applies.
+                if self.status_var.get().startswith("Invalid setting:"):
+                    self.status_var.set("Plot updated.")
             except ValueError as exc:
                 self.status_var.set(f"Invalid setting: {exc}")
                 drawn_main = set()
@@ -728,7 +806,7 @@ class CoincidenceInterface(ttk.Frame):
         """Counts per gate plot, gated by every gate except the plot's own."""
         drawn = set()
         arrays = self._dataset.arrays
-        forward = arrays[co.FORWARD_KEY]
+        forward = arrays.get(co.FORWARD_KEY)
         bins = read_number(self.gate_bins_var, "Gate plot bins", integer=True, positive=True)
         for key, plot in self._small.items():
             low, high, index, inside = self._binning_for(key, bins)
@@ -747,7 +825,7 @@ class CoincidenceInterface(ttk.Frame):
         x_bins = read_number(self.x_bins_var, "X bins", integer=True, positive=True)
         y_bins = read_number(self.y_bins_var, "Y bins", integer=True, positive=True)
         quantity = self.quantity_var.get()
-        forward = arrays[co.FORWARD_KEY]
+        forward = arrays.get(co.FORWARD_KEY)
 
         inside = self._combined_mask()
         self.gated_var.set(str(int(inside.sum()) if inside is not None else self._dataset.n_rows))

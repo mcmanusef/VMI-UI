@@ -26,55 +26,28 @@ LOADERS = {KIND_MOMENTUM: ec.MomentumCalibration.load, KIND_MQ: mc.MassCalibrati
 TAB_NAMES = {KIND_MOMENTUM: "momentum calibration", KIND_MQ: "m/q calibration"}
 
 
-class CalibrationApplyInterface(ttk.Frame):
-    """cv4 dataset in; an HDF5 file of calibrated electrons, raw hits and
-    (optionally) ions with m/q out, with previews of the result."""
+class CalibrationPicker:
+    """The momentum and m/q calibrations a tab applies, shown with their
+    source and "Load..." buttons, in a frame gridded into `parent` at `row`.
+    They follow the calibration tabs through the hub (a fit, edit, save or
+    load there replaces them), and start from the last saved or loaded
+    files. `status(text)` reports changes; while `is_busy()` it's skipped."""
 
-    def __init__(self, parent, hub=None, **kwargs):
-        super().__init__(parent, **kwargs)
-        self._hub = hub if hub is not None else CalibrationHub()
+    def __init__(self, owner, hub, parent, row, status, is_busy=lambda: False):
+        self._owner = owner
+        self._hub = hub
+        self._status = status
+        self._is_busy = is_busy
+        self.momentum_info_var = tk.StringVar(owner, value="--")
+        self.momentum_source_var = tk.StringVar(owner, value="")
+        self.mq_info_var = tk.StringVar(owner, value="--")
+        self.mq_source_var = tk.StringVar(owner, value="")
+        self.calibrations = {KIND_MOMENTUM: None, KIND_MQ: None}
 
-        def pvar(cls, key, default):
-            return app_settings.persistent_var(self, cls, f"apply_calibration.{key}", default)
-
-        self.path_var = pvar(tk.StringVar, "path", "")
-        self.output_var = pvar(tk.StringVar, "output_path", "")
-        self.electrons_only_var = pvar(tk.BooleanVar, "electrons_only", False)
-
-        self.status_var = tk.StringVar(self, value="Idle")
-        self.momentum_info_var = tk.StringVar(self, value="--")
-        self.momentum_source_var = tk.StringVar(self, value="")
-        self.mq_info_var = tk.StringVar(self, value="--")
-        self.mq_source_var = tk.StringVar(self, value="")
-        self.electrons_var = tk.StringVar(self, value="--")
-        self.uncalibrated_var = tk.StringVar(self, value="--")
-        self.ions_var = tk.StringVar(self, value="--")
-        self.groups_var = tk.StringVar(self, value="--")
-        self.output_info_var = tk.StringVar(self, value="")
-
-        self._progress_var = tk.DoubleVar(self, value=0.0)
-        self._stop_event = threading.Event()
-        self._progress = None
-        self._task = BackgroundTask(self)
-        self._calibrations = {KIND_MOMENTUM: None, KIND_MQ: None}
-        self._result = None
-
-        self._build_ui()
-        self._load_latest()
-        self._hub.subscribe(self._on_published)
-        self._redraw()
-
-    # ---- UI construction --------------------------------------------------
-
-    def _build_ui(self):
-        sidebar, main = ui_style.build_sidebar_layout(self)
-        main.rowconfigure(0, weight=1)
-        sidebar.rowconfigure(5, weight=1)
-
-        ui_style.build_button_bar(sidebar, 0, [("Apply and Save", self.apply), ("Stop", self.stop)])
-        ui_style.StatusBlock(sidebar, 1, self.status_var, progress_var=self._progress_var)
-
-        cal = ui_style.build_section(sidebar, 2, "Calibrations")
+        self.frame = ttk.Frame(parent)
+        self.frame.grid(row=row, column=0, columnspan=2, sticky="ew")
+        self.frame.columnconfigure(1, weight=1)
+        cal = self.frame
         ttk.Label(cal, text="Momentum:").grid(row=0, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ui_style.add_note(cal, 1, textvariable=self.momentum_info_var, pady=0)
         ui_style.add_note(cal, 2, textvariable=self.momentum_source_var)
@@ -91,6 +64,121 @@ class CalibrationApplyInterface(ttk.Frame):
             "At startup the last saved or loaded calibration files are used.",
             pady=(0, 4),
         )
+
+        self._load_latest()
+        self._hub.subscribe(self._on_published)
+
+    def _load_latest(self):
+        """The calibrations the tabs already published, or else the last
+        saved or loaded files."""
+        for kind in (KIND_MOMENTUM, KIND_MQ):
+            latest = self._hub.latest(kind)
+            if latest is not None:
+                self._on_published(kind, *latest)
+                continue
+            path = app_settings.get(latest_path_key(kind))
+            if not path:
+                self._show_calibration(kind)
+                continue
+            if not pathlib.Path(path).is_file():
+                self._show_calibration(kind, note=f"Last calibration file not found: {path}")
+                continue
+            try:
+                self._set_calibration(kind, LOADERS[kind](path), f"File: {path}")
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                self._show_calibration(kind, note=f"Could not load {path}: {exc}")
+
+    def _on_published(self, kind, calibration, path):
+        source = f"File: {path}" if path else f"Unsaved, from the {TAB_NAMES[kind]} tab"
+        self._set_calibration(kind, calibration, source)
+        if not self._is_busy():
+            self._status(f"Using the latest {TAB_NAMES[kind]} ({source}).")
+
+    def _browse_calibration(self, kind):
+        chosen = filedialog.askopenfilename(
+            title=f"Load {TAB_NAMES[kind]}", filetypes=[("JSON", "*.json")], parent=self._owner,
+        )
+        if not chosen:
+            return
+        try:
+            calibration = LOADERS[kind](chosen)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self._status(f"Load failed: {exc}")
+            return
+        self._set_calibration(kind, calibration, f"File: {chosen}")
+        self._status(f"Loaded {TAB_NAMES[kind]} from {chosen}.")
+
+    def _set_calibration(self, kind, calibration, source):
+        # A copy, so later edits in the calibration tab don't change it.
+        self.calibrations[kind] = type(calibration).from_dict(calibration.to_dict())
+        self._show_calibration(kind, note=source)
+
+    def _show_calibration(self, kind, note=""):
+        calibration = self.calibrations[kind]
+        if kind == KIND_MOMENTUM:
+            if calibration is None:
+                self.momentum_info_var.set("None. Fit, save or load one in the momentum calibration tab.")
+            else:
+                early, late = calibration.valid_dt_range()
+                self.momentum_info_var.set(
+                    f"{calibration.name}: k = {calibration.k:.4g} eV/px², valid for Δt from "
+                    f"{early:.2f} to {late:+.2f} ns."
+                )
+                if calibration.time_source != ec.TIME_SOURCE_ETOF:
+                    note += f" Derived from {calibration.time_source} times; applied to e-ToF times here."
+            self.momentum_source_var.set(note.strip())
+        else:
+            if calibration is None:
+                self.mq_info_var.set("None. Ions are saved without m/q.")
+            else:
+                self.mq_info_var.set(f"t = {calibration.t0:.3f} ns + {calibration.a:.4f} ns · √(m/q)")
+            self.mq_source_var.set(note.strip())
+
+
+
+class CalibrationApplyInterface(ttk.Frame):
+    """cv4 dataset in; an HDF5 file of calibrated electrons, raw hits and
+    (optionally) ions with m/q out, with previews of the result."""
+
+    def __init__(self, parent, hub=None, **kwargs):
+        super().__init__(parent, **kwargs)
+        self._hub = hub if hub is not None else CalibrationHub()
+
+        def pvar(cls, key, default):
+            return app_settings.persistent_var(self, cls, f"apply_calibration.{key}", default)
+
+        self.path_var = pvar(tk.StringVar, "path", "")
+        self.output_var = pvar(tk.StringVar, "output_path", "")
+        self.electrons_only_var = pvar(tk.BooleanVar, "electrons_only", False)
+
+        self.status_var = tk.StringVar(self, value="Idle")
+        self.electrons_var = tk.StringVar(self, value="--")
+        self.uncalibrated_var = tk.StringVar(self, value="--")
+        self.ions_var = tk.StringVar(self, value="--")
+        self.groups_var = tk.StringVar(self, value="--")
+        self.output_info_var = tk.StringVar(self, value="")
+
+        self._progress_var = tk.DoubleVar(self, value=0.0)
+        self._stop_event = threading.Event()
+        self._progress = None
+        self._task = BackgroundTask(self)
+        self._result = None
+
+        self._build_ui()
+        self._redraw()
+
+    # ---- UI construction --------------------------------------------------
+
+    def _build_ui(self):
+        sidebar, main = ui_style.build_sidebar_layout(self)
+        main.rowconfigure(0, weight=1)
+        sidebar.rowconfigure(5, weight=1)
+
+        ui_style.build_button_bar(sidebar, 0, [("Apply and Save", self.apply), ("Stop", self.stop)])
+        ui_style.StatusBlock(sidebar, 1, self.status_var, progress_var=self._progress_var)
+
+        cal = ui_style.build_section(sidebar, 2, "Calibrations")
+        self._picker = CalibrationPicker(self, self._hub, cal, 0, self.status_var.set, self._task.is_running)
 
         data = ui_style.build_section(sidebar, 3, "Dataset")
         ui_style.add_form_row(data, 0, "cv4 file:", ui_style.build_path_field(data, self.path_var, self._browse_cv4))
@@ -166,80 +254,12 @@ class CalibrationApplyInterface(ttk.Frame):
         if chosen:
             self.output_var.set(chosen)
 
-    # ---- calibrations -----------------------------------------------------------
-
-    def _load_latest(self):
-        """The calibrations the tabs already published, or else the last
-        saved or loaded files."""
-        for kind in (KIND_MOMENTUM, KIND_MQ):
-            latest = self._hub.latest(kind)
-            if latest is not None:
-                self._on_published(kind, *latest)
-                continue
-            path = app_settings.get(latest_path_key(kind))
-            if not path:
-                self._show_calibration(kind)
-                continue
-            if not pathlib.Path(path).is_file():
-                self._show_calibration(kind, note=f"Last calibration file not found: {path}")
-                continue
-            try:
-                self._set_calibration(kind, LOADERS[kind](path), f"File: {path}")
-            except (OSError, ValueError, KeyError, TypeError) as exc:
-                self._show_calibration(kind, note=f"Could not load {path}: {exc}")
-
-    def _on_published(self, kind, calibration, path):
-        source = f"File: {path}" if path else f"Unsaved, from the {TAB_NAMES[kind]} tab"
-        self._set_calibration(kind, calibration, source)
-        if not self._task.is_running():
-            self.status_var.set(f"Using the latest {TAB_NAMES[kind]} ({source}).")
-
-    def _browse_calibration(self, kind):
-        chosen = filedialog.askopenfilename(
-            title=f"Load {TAB_NAMES[kind]}", filetypes=[("JSON", "*.json")], parent=self,
-        )
-        if not chosen:
-            return
-        try:
-            calibration = LOADERS[kind](chosen)
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            self.status_var.set(f"Load failed: {exc}")
-            return
-        self._set_calibration(kind, calibration, f"File: {chosen}")
-        self.status_var.set(f"Loaded {TAB_NAMES[kind]} from {chosen}.")
-
-    def _set_calibration(self, kind, calibration, source):
-        # A copy, so later edits in the calibration tab don't change it.
-        self._calibrations[kind] = type(calibration).from_dict(calibration.to_dict())
-        self._show_calibration(kind, note=source)
-
-    def _show_calibration(self, kind, note=""):
-        calibration = self._calibrations[kind]
-        if kind == KIND_MOMENTUM:
-            if calibration is None:
-                self.momentum_info_var.set("None. Fit, save or load one in the momentum calibration tab.")
-            else:
-                early, late = calibration.valid_dt_range()
-                self.momentum_info_var.set(
-                    f"{calibration.name}: k = {calibration.k:.4g} eV/px², valid for Δt from "
-                    f"{early:.2f} to {late:+.2f} ns."
-                )
-                if calibration.time_source != ec.TIME_SOURCE_ETOF:
-                    note += f" Derived from {calibration.time_source} times; applied to e-ToF times here."
-            self.momentum_source_var.set(note.strip())
-        else:
-            if calibration is None:
-                self.mq_info_var.set("None. Ions are saved without m/q.")
-            else:
-                self.mq_info_var.set(f"t = {calibration.t0:.3f} ns + {calibration.a:.4f} ns · √(m/q)")
-            self.mq_source_var.set(note.strip())
-
     # ---- apply ----------------------------------------------------------------------
 
     def apply(self):
         if self._task.is_running():
             return
-        momentum = self._calibrations[KIND_MOMENTUM]
+        momentum = self._picker.calibrations[KIND_MOMENTUM]
         if momentum is None:
             self.status_var.set("A momentum calibration is required. Fit, save or load one first.")
             return
@@ -261,7 +281,7 @@ class CalibrationApplyInterface(ttk.Frame):
             return
 
         electrons_only = self.electrons_only_var.get()
-        mq = None if electrons_only else self._calibrations[KIND_MQ]
+        mq = None if electrons_only else self._picker.calibrations[KIND_MQ]
         self._stop_event.clear()
         self._progress = None
         self._progress_var.set(0.0)
