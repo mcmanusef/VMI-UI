@@ -62,6 +62,7 @@ from tpx_processing import (
     MIN_CLUSTER_SIZE_ATTR,
     get_min_cluster_size,
     decode_tpx3,
+    missing_trigger_warning,
     classify_tdcs,
     group_pixels_by_pulse,
     group_times_relative,
@@ -695,6 +696,9 @@ class SweepInterface(ttk.Frame):
         pixels, tdcs, processed_packets, total_packets = decode_tpx3(str(path), max_packets=None)
         etof, itof, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
         pulses_sorted = sorted(pulses)
+        warning = missing_trigger_warning(len(pixels), len(pulses_sorted))
+        if warning:
+            self._queue.put({"status": f"Warning: {path.name}: {warning}"})
         pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)
         clusters_by_pulse, cluster_size_sum, cluster_count = cluster_pixels_by_pulse(
             pixels_by_pulse, min_size=self._run_min_cluster_size

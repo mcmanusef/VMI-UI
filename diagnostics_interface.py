@@ -21,6 +21,7 @@ from plot_panel import HistogramPlotPanel
 from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection, apply_timewalk_correction
 from tpx_processing import (
     decode_tpx3,
+    missing_trigger_warning,
     classify_tdcs,
     group_pixels_by_pulse,
     group_times_relative,
@@ -480,6 +481,7 @@ class DiagnosticsInterface(ttk.Frame):
             "stats": stats,
             "pulse_records": pulse_records,
             "settings": settings,
+            "warning": missing_trigger_warning(len(pixels), len(pulses_sorted)),
         }
 
     def _apply_result(self, result):
@@ -525,6 +527,10 @@ class DiagnosticsInterface(ttk.Frame):
 
         self._plot_panel.update_plots(self._accumulated)
         self._update_stats(self._accumulated["stats"])
+        if result.get("warning"):
+            self.status_var.set(f"Warning: {result['warning']}")
+        elif self.status_var.get().startswith("Warning: "):
+            self.status_var.set("Running. Pulse triggers are back.")
 
     def _update_stats(self, stats):
         def fmt(value):

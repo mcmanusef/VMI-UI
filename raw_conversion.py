@@ -20,6 +20,7 @@ from timewalk import apply_timewalk_correction
 from tpx_processing import (
     MIN_CLUSTER_SIZE_ATTR,
     get_min_cluster_size,
+    missing_trigger_warning,
     decode_tpx3,
     classify_tdcs,
     group_pixels_by_pulse,
@@ -106,6 +107,7 @@ def process_raw_file(path, settings, timewalk=None, min_cluster_size=None):
         "cluster_t_hist": cluster_t_hist,
         "stats": stats,
         "settings": settings,
+        "warning": missing_trigger_warning(len(pixels), len(pulses_sorted)),
     }
 
     return {

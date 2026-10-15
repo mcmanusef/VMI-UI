@@ -646,6 +646,10 @@ class AcquisitionInterface(ttk.Frame):
             return
 
         self.frames_var.set(str(result.get("frame_index", "--")))
+        if result.get("warning"):
+            self.status_var.set(f"Warning: frame {result.get('frame_index', '--')}: {result['warning']}")
+        elif self.status_var.get().startswith("Warning: frame "):
+            self.status_var.set("Collecting. Pulse triggers are back.")
         if "pending" in result:
             self.pending_var.set(str(result["pending"]))
 

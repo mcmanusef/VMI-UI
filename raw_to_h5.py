@@ -7,7 +7,7 @@ raw_conversion._SWEEP_VISIT_RE), each raw file inside those subfolders
 gets its own h5 too.
 
 Packets are read by their literal header nibble rather than guessed by
-frequency (as tpx_processing.decode_tpx3's detect_headers does): this
+frequency (as tpx_processing.decode_tpx3's detect_headers once did): this
 hardware can mix Timepix3 pixel hits, PicoTDC hits and FPGA TDC hits (and,
 on some files, other packet types this module doesn't understand) in one
 raw file, across up to 4 chip streams, and detect_headers' "pick the two

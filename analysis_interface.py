@@ -73,6 +73,7 @@ class ConversionInterface(ttk.Frame):
         self._job_index = 0
         self._job_name = ""
         self._failed_files = 0
+        self._no_trigger_files = 0
 
         self._build_ui()
         self._poll_queue()
@@ -296,6 +297,7 @@ class ConversionInterface(ttk.Frame):
         self._total_files = sum(len(job.raw_files) for job in jobs)
         self._job_count = len(jobs)
         self._failed_files = 0
+        self._no_trigger_files = 0
         self.files_var.set(f"0/{self._total_files}")
         self.failed_var.set("0")
         for var in (self.analysis_speed_var, self.pulses_var, self.clusters_var, self.etof_var, self.itof_var):
@@ -330,6 +332,9 @@ class ConversionInterface(ttk.Frame):
                 message["error"] = f"Processing {path.name} failed: {error}"
             else:
                 message["plot_result"] = frame["plot_result"]
+                warning = frame["plot_result"].get("warning")
+                if warning:
+                    message["warning"] = f"{path.name}: {warning}"
             self._queue.put(message)
 
         try:
@@ -395,7 +400,10 @@ class ConversionInterface(ttk.Frame):
             self.status_var.set(f"Error: {result['error']}")
             return
 
-        if not self._stop_event.is_set():
+        if "warning" in result:
+            self._no_trigger_files += 1
+            self.status_var.set(f"Warning: {result['warning']}")
+        elif not self._stop_event.is_set():
             self.status_var.set(
                 f"Processing {self._job_name} ({self._job_index}/{self._job_count}), "
                 f"file {files_done}/{self._total_files}..."
@@ -421,21 +429,28 @@ class ConversionInterface(ttk.Frame):
         results = result["results"]
         partial = sum(1 for _, processed, total in results if processed < total)
         converted = f"{result['files_done']}/{self._total_files} raw file(s) processed"
+        no_trigger = (
+            f" Warning: {self._no_trigger_files} file(s) had pixel hits but no pulse triggers, so no clusters."
+            if self._no_trigger_files
+            else ""
+        )
         if result["stopped"]:
             self.status_var.set(
-                f"Stopped. {converted}; {partial} unfinished cv4 file(s) keep the .partial.cv4 name."
+                f"Stopped. {converted}; {partial} unfinished cv4 file(s) keep the .partial.cv4 name.{no_trigger}"
             )
         elif self._failed_files:
             self.status_var.set(
                 f"Finished with {self._failed_files} failed file(s). {converted}; "
-                f"{partial} cv4 file(s) keep the .partial.cv4 name."
+                f"{partial} cv4 file(s) keep the .partial.cv4 name.{no_trigger}"
             )
         elif len(results) < self._job_count:
             # A fatal error already set the status; leave it showing.
             return
         else:
             self._progress_var.set(100.0)
-            self.status_var.set(f"Finished. Wrote {len(results)} cv4 file(s) from {self._total_files} raw file(s).")
+            self.status_var.set(
+                f"Finished. Wrote {len(results)} cv4 file(s) from {self._total_files} raw file(s).{no_trigger}"
+            )
 
 
 class PlaceholderInterface(ttk.Frame):

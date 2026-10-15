@@ -77,27 +77,13 @@ def iter_packet_arrays(path: str) -> Iterable[Tuple[int, np.ndarray]]:
             yield header[4], packets
 
 
-def detect_headers(path: str, sample_packets: int = 4096) -> Tuple[int, int]:
-    counts = np.zeros(16, dtype=np.int64)
-    total = 0
-    for _chip, packets in iter_packet_arrays(path):
-        headers = (packets >> 60).astype(np.int64)
-        counts += np.bincount(headers, minlength=16)
-        total += len(headers)
-        if total >= sample_packets:
-            break
-
-    headers_present = {idx: int(cnt) for idx, cnt in enumerate(counts) if cnt}
-    if 0x7 in headers_present and 0x2 in headers_present:
-        return 0x7, 0x2
-    if 0x2 in headers_present and 0x1 in headers_present:
-        return 0x2, 0x1
-    if headers_present:
-        ordered = sorted(headers_present.items(), key=lambda kv: kv[1], reverse=True)
-        if len(ordered) >= 2:
-            return ordered[0][0], ordered[1][0]
-        return ordered[0][0], 0x2
-    return 0x7, 0x2
+# Packet header nibbles (bits [63:60]) after iter_packet_arrays' shift:
+# raw 0xb pixel hits and raw 0x6 TDC packets. Every other type (e.g. raw 0x5
+# control words) is ignored. These are fixed, never guessed from the file:
+# a guess picks some other packet type as "TDC" when a file has no TDC
+# data and decodes it as fake hits.
+PIXEL_HEADER = 0x7
+TDC_HEADER = 0x2
 
 
 def decode_tpx3(path: str, max_packets: int = None, layout=None):
@@ -111,7 +97,6 @@ def decode_tpx3(path: str, max_packets: int = None, layout=None):
     tdc_words: List[np.ndarray] = []
     processed = 0
     total = 0
-    pixel_header, tdc_header = detect_headers(path)
 
     for chip, packets in iter_packet_arrays(path):
         total += len(packets)
@@ -128,7 +113,7 @@ def decode_tpx3(path: str, max_packets: int = None, layout=None):
         headers = packets >> 60
         reduced = packets & 0x0FFF_FFFF_FFFF_FFFF
 
-        pixel_mask = headers == pixel_header
+        pixel_mask = headers == PIXEL_HEADER
         if np.any(pixel_mask):
             reduced_pixels = reduced[pixel_mask]
             c_time = reduced_pixels & 0xFFFF
@@ -152,7 +137,7 @@ def decode_tpx3(path: str, max_packets: int = None, layout=None):
                 for t, x, y, tt in zip(toa_ns, xs, ys, tot)
             )
 
-        tdc_mask = headers == tdc_header
+        tdc_mask = headers == TDC_HEADER
         if np.any(tdc_mask):
             tdc_words.append(reduced[tdc_mask])
 
@@ -290,6 +275,19 @@ def classify_tdcs(tdcs: List[Tuple[int, int, int, float]], mapping, jitter_ns: f
     etof = apply_jitter(resolve(mapping.etof), jitter_ns)
     itof = apply_jitter(resolve(mapping.itof), jitter_ns)
     return etof, itof, pulses
+
+
+def missing_trigger_warning(n_pixels: int, n_pulses: int):
+    """A warning for a file with pixel hits but no pulse triggers -- every
+    hit is then dropped before clustering (group_pixels_by_pulse needs a
+    pulse before each hit), so the file yields no clusters. None if the
+    file is fine."""
+    if n_pixels == 0 or n_pulses > 0:
+        return None
+    return (
+        f"{n_pixels:,} pixel hits but no pulse triggers, so no clusters. "
+        "Check that the TDC is being recorded and the trigger is on the line set in TDC mapping."
+    )
 
 
 def group_times_relative(times, pulses_sorted):
