@@ -128,7 +128,10 @@ def _configure_destination(server, frame_time, dest_dir, file_pattern, n_trigger
 
 
 def start_measurement(server, timeout=5):
-    SESSION.get(f"{server}/measurement/start", timeout=timeout)
+    # Raise on a rejected start (e.g. Serval still busy finishing the
+    # previous measurement) rather than letting the caller wait out its
+    # whole new-file timeout for a frame that was never started.
+    SESSION.get(f"{server}/measurement/start", timeout=timeout).raise_for_status()
 
 
 def stop_measurement(server, timeout=5):
