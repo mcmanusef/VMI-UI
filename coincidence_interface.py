@@ -97,6 +97,7 @@ class CoincidenceInterface(ttk.Frame):
         self.y_bins_var = pvar(tk.StringVar, "y_bins", "200")
         self.gate_bins_var = pvar(tk.StringVar, "gate_bins", "200")
         self.log_var = pvar(tk.BooleanVar, "log_color", False)
+        self.log_y_var = pvar(tk.BooleanVar, "log_y", False)
         self.auto_levels_var = pvar(tk.BooleanVar, "auto_levels", True)
         self.aspect_var = pvar(tk.BooleanVar, "equal_aspect", False)
         self.quantity_var = pvar(tk.StringVar, "quantity", co.QUANTITY_DENSITY)
@@ -143,7 +144,7 @@ class CoincidenceInterface(ttk.Frame):
         self._on_source_changed()
         # These only affect the main plot, so they don't recompute the gate plots.
         for var in (self.mode_var, self.x_var, self.y_var, self.x_bins_var, self.y_bins_var,
-                    self.log_var, self.quantity_var, self.auto_levels_var, self.aspect_var,
+                    self.log_var, self.log_y_var, self.quantity_var, self.auto_levels_var, self.aspect_var,
                     self.split_var, self.split_bins_var):
             var.trace_add("write", self._schedule_main_redraw)
         self.gate_bins_var.trace_add("write", self._on_gate_bins_changed)
@@ -221,14 +222,17 @@ class CoincidenceInterface(ttk.Frame):
         ttk.Checkbutton(plot, text="Log color scale (2D)", variable=self.log_var).grid(
             row=8, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
-        ttk.Checkbutton(plot, text="Auto color levels", variable=self.auto_levels_var).grid(
+        ttk.Checkbutton(plot, text="Log y axis (1D)", variable=self.log_y_var).grid(
             row=9, column=0, columnspan=2, sticky="w", pady=(0, 0)
         )
-        ttk.Checkbutton(plot, text="Equal aspect ratio (2D)", variable=self.aspect_var).grid(
+        ttk.Checkbutton(plot, text="Auto color levels", variable=self.auto_levels_var).grid(
             row=10, column=0, columnspan=2, sticky="w", pady=(0, 0)
         )
+        ttk.Checkbutton(plot, text="Equal aspect ratio (2D)", variable=self.aspect_var).grid(
+            row=11, column=0, columnspan=2, sticky="w", pady=(0, 0)
+        )
         ui_style.add_note(
-            plot, 11,
+            plot, 12,
             "Probability density normalizes the counts to integrate to 1 over the plotted range. Other "
             "quantities are drawn as points, one per bin that has data; the asymmetry is "
             "(forward − backward) / total by the sign of p_x, the propagation axis (calibrated data "
@@ -236,7 +240,8 @@ class CoincidenceInterface(ttk.Frame):
             "is applied is bounded "
             "by that gate. Drag the color bar's handles to set the heat map's levels, which turns auto "
             "levels off. “Split by” draws a 1D line per value of a second column, or per range of it "
-            "when it has many values, each normalized on its own.",
+            "when it has many values, each normalized on its own. The log scales apply to counts and "
+            "density only; empty bins are left out of a log plot.",
             pady=(4, 4),
         )
 
@@ -826,6 +831,10 @@ class CoincidenceInterface(ttk.Frame):
         y_bins = read_number(self.y_bins_var, "Y bins", integer=True, positive=True)
         quantity = self.quantity_var.get()
         forward = arrays.get(co.FORWARD_KEY)
+        # Like the 2D log color scale: counts and density only, since the
+        # signed asymmetry has no log.
+        log_y = not is_2d and self.log_y_var.get() and quantity in CURVE_QUANTITIES
+        self._main_plot.setLogMode(False, log_y)
 
         inside = self._combined_mask()
         self.gated_var.set(str(int(inside.sum()) if inside is not None else self._dataset.n_rows))
@@ -872,8 +881,11 @@ class CoincidenceInterface(ttk.Frame):
                 )
                 color = BLUE if label is None else pg.intColor(position, hues=max(len(groups), 3))
                 if quantity in CURVE_QUANTITIES:
+                    if log_y:
+                        # Empty bins have no log; break the line there.
+                        values = np.where(values > 0, values, np.nan)
                     self._main_plot.addItem(pg.PlotDataItem(
-                        centers, values, pen=pg.mkPen(color, width=1.5), name=label,
+                        centers, values, pen=pg.mkPen(color, width=1.5), name=label, connect="finite",
                     ))
                 else:
                     # One point per bin that has data; empty bins are left out.
@@ -884,7 +896,8 @@ class CoincidenceInterface(ttk.Frame):
                     ))
             self._main_plot.setLabel("left", quantity)
             split = "" if len(groups) == 1 else f", split by {self._dataset.label(self.split_var.get())}"
-            self._main_plot.setTitle(f"{quantity} against {self._dataset.label(x_key)}{split}")
+            scale = " (log scale)" if log_y else ""
+            self._main_plot.setTitle(f"{quantity} against {self._dataset.label(x_key)}{split}{scale}")
         self._main_plot.setLabel("bottom", self._dataset.label(x_key))
         drawn.add(self._main_plot)
         return drawn
