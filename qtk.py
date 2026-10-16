@@ -717,6 +717,11 @@ class Combobox(TkCompatMixin, GridMixin, QtWidgets.QComboBox):
 
     config = configure
 
+    def wheelEvent(self, event):
+        # Pass the wheel to the enclosing scroll area instead of changing the
+        # selection when the pointer happens to cross the box.
+        event.ignore()
+
     def _install_binding(self, sequence):
         if sequence == "<<ComboboxSelected>>":
             self.activated.connect(lambda *_a: self._fire_binding("<<ComboboxSelected>>"))
@@ -753,6 +758,10 @@ class Scale(TkCompatMixin, GridMixin, QtWidgets.QSlider):
 
     def _from_step(self, step):
         return self._from + (step / self._STEPS) * (self._to - self._from)
+
+    def wheelEvent(self, event):
+        # Same as Combobox: scroll the page, don't move the slider.
+        event.ignore()
 
     def _on_var_write(self, *_):
         self._updating = True
