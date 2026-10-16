@@ -437,12 +437,11 @@ class AcquisitionInterface(ttk.Frame):
         frame_index = 0
         self._completed_naturally = target_frames <= 0
 
-        # wait_for_new_file's default timeout (5s) is shorter than many
-        # exposures; scale it to frame_time so we don't give up on (and
-        # re-trigger over) an exposure that simply hasn't finished yet --
-        # that was the source of "frame time isn't applied" for anything
-        # much longer than ~5s.
-        wait_timeout = max(5.0, frame_time * 5.0 + 2.0)
+        # Long enough for one exposure plus Serval's start-up and file
+        # write, and no longer: a frame that never arrives costs this much
+        # dead time. Re-triggering early can't overlap a running exposure,
+        # since every start first waits for Serval to be idle (below).
+        wait_timeout = frame_time + 5.0
 
         try:
             while not self._stop_event.is_set() and not self._finish_event.is_set():
@@ -451,6 +450,17 @@ class AcquisitionInterface(ttk.Frame):
                     break
 
                 try:
+                    # The previous file can look finished (no writes for
+                    # `settle` seconds) while Serval is still wrapping up
+                    # that measurement, and a start sent then is rejected.
+                    serval_client.wait_for_measurement_idle(server, timeout=10.0)
+                    if last_path is not None:
+                        # Its final writes, if any, aren't a new frame.
+                        # (Already gone if the processor deleted it.)
+                        try:
+                            last_mtime = last_path.stat().st_mtime
+                        except OSError:
+                            pass
                     serval_client.start_measurement(server)
                 except Exception as exc:
                     self._queue.put({"error": f"Start failed: {exc}"})
@@ -646,6 +656,10 @@ class AcquisitionInterface(ttk.Frame):
             return
 
         self.frames_var.set(str(result.get("frame_index", "--")))
+        if result.get("warning"):
+            self.status_var.set(f"Warning: frame {result.get('frame_index', '--')}: {result['warning']}")
+        elif self.status_var.get().startswith("Warning: frame "):
+            self.status_var.set("Collecting. Pulse triggers are back.")
         if "pending" in result:
             self.pending_var.set(str(result["pending"]))
 

@@ -62,6 +62,7 @@ from tpx_processing import (
     MIN_CLUSTER_SIZE_ATTR,
     get_min_cluster_size,
     decode_tpx3,
+    missing_trigger_warning,
     classify_tdcs,
     group_pixels_by_pulse,
     group_times_relative,
@@ -695,6 +696,9 @@ class SweepInterface(ttk.Frame):
         pixels, tdcs, processed_packets, total_packets = decode_tpx3(str(path), max_packets=None)
         etof, itof, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
         pulses_sorted = sorted(pulses)
+        warning = missing_trigger_warning(len(pixels), len(pulses_sorted))
+        if warning:
+            self._queue.put({"status": f"Warning: {path.name}: {warning}"})
         pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)
         clusters_by_pulse, cluster_size_sum, cluster_count = cluster_pixels_by_pulse(
             pixels_by_pulse, min_size=self._run_min_cluster_size
@@ -750,7 +754,11 @@ class SweepInterface(ttk.Frame):
         once it finishes that visit's last frame. Returns (frames_collected,
         completed_naturally).
         """
-        wait_timeout = max(120.0, frame_time * 5.0 + 2.0)
+        # Long enough for one exposure plus Serval's start-up and file
+        # write, and no longer: a frame that never arrives costs this much
+        # dead time. Re-triggering early can't overlap a running exposure,
+        # since every start first waits for Serval to be idle (below).
+        wait_timeout = frame_time + 5.0
         last_path = None
         last_mtime = None
         frames_collected = 0
@@ -773,6 +781,17 @@ class SweepInterface(ttk.Frame):
                     break
 
                 try:
+                    # The previous file can look finished (no writes for
+                    # `settle` seconds) while Serval is still wrapping up
+                    # that measurement, and a start sent then is rejected.
+                    serval_client.wait_for_measurement_idle(server, timeout=10.0)
+                    if last_path is not None:
+                        # Its final writes, if any, aren't a new frame.
+                        # (Already gone if the processor deleted it.)
+                        try:
+                            last_mtime = last_path.stat().st_mtime
+                        except OSError:
+                            pass
                     serval_client.start_measurement(server)
                 except Exception as exc:
                     self._queue.put({"error": f"Start failed: {exc}"})
@@ -1026,6 +1045,17 @@ class SweepInterface(ttk.Frame):
             try:
                 while not stopping() and frames_collected < _CALIBRATION_FRAME_COUNT:
                     try:
+                        # The previous file can look finished (no writes for
+                        # `settle` seconds) while Serval is still wrapping up
+                        # that measurement, and a start sent then is rejected.
+                        serval_client.wait_for_measurement_idle(server, timeout=10.0)
+                        if last_path is not None:
+                            # Its final writes, if any, aren't a new frame.
+                            # (Already gone if the processor deleted it.)
+                            try:
+                                last_mtime = last_path.stat().st_mtime
+                            except OSError:
+                                pass
                         serval_client.start_measurement(server)
                     except Exception as exc:
                         self._queue.put({"error": f"Calibration start failed at position {requested}: {exc}"})
