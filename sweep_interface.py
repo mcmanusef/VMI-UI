@@ -21,7 +21,7 @@ to fix how many frames each position needs; that count is never adjusted
 again during the real sweep (see _calibrate_frame_counts).
 
 clusters_per_shot / electrons_per_shot / ions_per_shot -- already computed
-by tpx_processing.summarize_records / merge_stats, same as every other tab
+by tpx_processing.summarize_frame / merge_stats, same as every other tab
 -- are exactly the "average cluster/e-ToF/i-ToF rate" plotted against
 measured position, reported per visit once that visit's own frames finish
 processing (see _finish_visit).
@@ -62,11 +62,8 @@ from tpx_processing import (
     MIN_CLUSTER_SIZE_ATTR,
     get_min_cluster_size,
     decode_tpx3,
-    classify_tdcs,
-    group_pixels_by_pulse,
-    group_times_relative,
-    cluster_pixels_by_pulse,
-    summarize_records,
+    build_frame_events,
+    summarize_frame,
     merge_stats,
 )
 
@@ -688,28 +685,18 @@ class SweepInterface(ttk.Frame):
     # ---- sweep worker thread -----------------------------------------
 
     def _process_frame(self, path):
-        """Decode + cluster one raw file. Returns (pulses_sorted,
-        clusters_by_pulse, etof_by_pulse, itof_by_pulse, stats) -- the same
-        per-frame pipeline every other tab uses."""
+        """Decode + cluster one raw file. Returns (events, stats) -- a
+        tpx_processing.FrameEvents for Cv4Writer.append_events, from the
+        same per-frame pipeline every other tab uses."""
         frame_start = time.perf_counter()
         pixels, tdcs, processed_packets, total_packets = decode_tpx3(str(path), max_packets=None)
-        etof, itof, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
-        pulses_sorted = sorted(pulses)
-        pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)
-        clusters_by_pulse, cluster_size_sum, cluster_count = cluster_pixels_by_pulse(
-            pixels_by_pulse, min_size=self._run_min_cluster_size
+        events, cluster_size_sum, cluster_count = build_frame_events(
+            pixels, tdcs, tdc_mapping.get_active_mapping(), min_size=self._run_min_cluster_size
         )
-        etof_by_pulse = group_times_relative(etof, pulses_sorted)
-        itof_by_pulse = group_times_relative(itof, pulses_sorted)
-        pulse_records = [
-            (pt, pixels_by_pulse.get(pt, []), clusters_by_pulse.get(pt, []),
-             etof_by_pulse.get(pt, []), itof_by_pulse.get(pt, []))
-            for pt in pulses_sorted
-        ]
-        stats = summarize_records(
-            pulse_records, cluster_size_sum, cluster_count, processed_packets, total_packets, frame_start
+        stats = summarize_frame(
+            events, cluster_size_sum, cluster_count, processed_packets, total_packets, frame_start
         )
-        return pulses_sorted, clusters_by_pulse, etof_by_pulse, itof_by_pulse, stats
+        return events, stats
 
     def _wait_for_next_frame(self, raw_dir, wait_timeout, last_path, last_mtime):
         """Block for the next raw file to land and settle. Doesn't trigger
@@ -857,10 +844,8 @@ class SweepInterface(ttk.Frame):
                         cv4_writer.partial_path_for(meta["cv4_path"]), metadata=meta["base_metadata"]
                     )
                     try:
-                        pulses_sorted, clusters_by_pulse, etof_by_pulse, itof_by_pulse, frame_stats = (
-                            self._process_frame(newest)
-                        )
-                        writer.append_frame(pulses_sorted, clusters_by_pulse, etof_by_pulse, itof_by_pulse)
+                        events, frame_stats = self._process_frame(newest)
+                        writer.append_events(events)
                         writer.flush()
 
                         total_processed += 1
@@ -1041,7 +1026,7 @@ class SweepInterface(ttk.Frame):
                     last_path, last_mtime = newest, newest_stat.st_mtime
 
                     try:
-                        _, _, _, _, stats = self._process_frame(newest)
+                        _, stats = self._process_frame(newest)
                     except Exception as exc:
                         self._queue.put({"error": f"Calibration processing failed at position {requested}: {exc}"})
                         break

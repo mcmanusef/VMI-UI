@@ -3,31 +3,20 @@
 No Tkinter or matplotlib dependencies here so this module can be shared by
 any UI (diagnostics, monitored acquisition, offline reprocessing, ...).
 """
-import bisect
 import time
-from collections import defaultdict
 from dataclasses import dataclass
-from typing import Iterable, List, Tuple
+from typing import Tuple
 
 import numpy as np
 
 import app_settings
 import chip_layout
 from tdc_mapping import (
-    FAMILY_FPGA_TDC,
     FAMILY_PICOTDC,
     FPGA_TDC_NS_PER_COUNT,
     FPGA_TDC_SUBTYPES,
     PICOTDC_NS_PER_COUNT,
 )
-
-
-@dataclass
-class PixelData:
-    time_ns: float
-    x: int
-    y: int
-    tot: int
 
 
 PIXEL_RES_NS = 25 / 16
@@ -58,34 +47,99 @@ def get_min_cluster_size() -> int:
     return value if value >= 1 else DEFAULT_MIN_CLUSTER_SIZE
 
 
-def iter_packet_arrays(path: str) -> Iterable[Tuple[int, np.ndarray]]:
-    """(chip_index, packets) per chunk -- the chunk header's byte 4 names
-    the chip stream (0-3 on a quad) its pixel hits came from."""
+# ---- decoding ---------------------------------------------------------------
+#
+# Everything below works on whole-file numpy arrays: a 10 s frame can hold
+# ~10M pixel hits at ~60k pulses/s, far too many to touch one at a time in
+# Python and still keep up with acquisition.
+
+
+@dataclass
+class PixelHits:
+    """One raw file's pixel hits, in file order: absolute ToA (ns, folded on
+    TIME_ROLLOVER_NS), detector-canvas x/y and ToT."""
+    time_ns: np.ndarray
+    x: np.ndarray
+    y: np.ndarray
+    tot: np.ndarray
+
+    def __len__(self):
+        return len(self.time_ns)
+
+    def with_times(self, time_ns):
+        return PixelHits(time_ns=time_ns, x=self.x, y=self.y, tot=self.tot)
+
+
+@dataclass
+class TdcHits:
+    """One raw file's TDC hits, in file order. `is_pico` marks PicoTDC hits
+    (sub-nibble 0xC); the rest are FPGA TDC hits. edge: 1 = rising,
+    0 = falling."""
+    is_pico: np.ndarray
+    channel: np.ndarray
+    edge: np.ndarray
+    time_ns: np.ndarray
+
+    def __len__(self):
+        return len(self.time_ns)
+
+
+def read_packets(path: str, max_packets: int = None):
+    """(chips, packets, chunk_ends, total) for one raw file: every packet as
+    one uint64 array, the chip stream each came from (the chunk header's
+    byte 4, 0-3 on a quad), the cumulative packet count at the end of each
+    chunk, and the file's total packet count. With max_packets, only the
+    first max_packets packets are returned (total still counts them all)."""
     with open(path, "rb") as f:
-        while True:
-            header = f.read(8)
-            if not header or len(header) < 8:
-                break
-            payload_len = int.from_bytes(header[6:8], "little")
-            if payload_len <= 0:
-                continue
-            payload = f.read(payload_len)
-            if len(payload) < payload_len:
-                break
-            words = np.frombuffer(payload, dtype="<u8")
-            packets = (words - (1 << 62)) & ((1 << 64) - 1)
-            yield header[4], packets
-
-
-def detect_headers(path: str, sample_packets: int = 4096) -> Tuple[int, int]:
-    counts = np.zeros(16, dtype=np.int64)
-    total = 0
-    for _chip, packets in iter_packet_arrays(path):
-        headers = (packets >> 60).astype(np.int64)
-        counts += np.bincount(headers, minlength=16)
-        total += len(headers)
-        if total >= sample_packets:
+        raw = f.read()
+    size = len(raw)
+    offsets = []
+    counts = []
+    chips = []
+    off = 0
+    while off + 8 <= size:
+        payload_len = int.from_bytes(raw[off + 6:off + 8], "little")
+        chip = raw[off + 4]
+        off += 8
+        if payload_len <= 0:
+            continue
+        if off + payload_len > size:
             break
+        offsets.append(off)
+        counts.append(payload_len // 8)
+        chips.append(chip)
+        off += payload_len
+
+    if not counts:
+        empty = np.zeros(0, dtype=np.uint64)
+        return np.zeros(0, dtype=np.uint8), empty, np.zeros(0, dtype=np.int64), 0
+    chunk_ends = np.cumsum(counts)
+    total = int(chunk_ends[-1])
+    # Only unpack the chunks the first max_packets packets come from.
+    n_chunks = len(counts)
+    if max_packets is not None and max_packets < total:
+        n_chunks = int(np.searchsorted(chunk_ends, max_packets)) + 1
+    words = np.concatenate([
+        np.frombuffer(raw, dtype="<u8", count=n, offset=o)
+        for o, n in zip(offsets[:n_chunks], counts[:n_chunks])
+    ])
+    packets = words - np.uint64(1 << 62)  # wraps mod 2^64, as the hardware intends
+    chunk_chips = np.repeat(np.asarray(chips[:n_chunks], dtype=np.uint8), counts[:n_chunks])
+    if max_packets is not None and max_packets < total:
+        packets = packets[:max_packets]
+        chunk_chips = chunk_chips[:max_packets]
+    return chunk_chips, packets, chunk_ends, total
+
+
+def detect_headers(packets: np.ndarray, chunk_ends: np.ndarray, sample_packets: int = 4096) -> Tuple[int, int]:
+    """(pixel_header, tdc_header) nibbles, guessed from the first whole
+    chunks holding at least `sample_packets` packets."""
+    if len(chunk_ends):
+        k = int(np.searchsorted(chunk_ends, sample_packets))
+        sample = packets[: int(chunk_ends[min(k, len(chunk_ends) - 1)])]
+    else:
+        sample = packets
+    counts = np.bincount((sample >> np.uint64(60)).astype(np.int64), minlength=16)
 
     headers_present = {idx: int(cnt) for idx, cnt in enumerate(counts) if cnt}
     if 0x7 in headers_present and 0x2 in headers_present:
@@ -101,68 +155,48 @@ def detect_headers(path: str, sample_packets: int = 4096) -> Tuple[int, int]:
 
 
 def decode_tpx3(path: str, max_packets: int = None, layout=None):
-    """Pixel hits (in detector-canvas coordinates: each chip's local x/y
-    placed and oriented per `layout`, default chip_layout.get_active_layout())
-    and TDC hits of one raw file."""
+    """(PixelHits, TdcHits, processed_packets, total_packets) for one raw
+    file. Pixel x/y are detector-canvas coordinates: each chip's local x/y
+    placed and oriented per `layout` (default chip_layout.get_active_layout())."""
     if layout is None:
         layout = chip_layout.get_active_layout()
-    pixels: List[PixelData] = []
-    tdcs: List[Tuple[int, int, int, float]] = []
-    tdc_words: List[np.ndarray] = []
-    processed = 0
-    total = 0
-    pixel_header, tdc_header = detect_headers(path)
+    chips, packets, chunk_ends, total = read_packets(path, max_packets)
+    pixel_header, tdc_header = detect_headers(packets, chunk_ends)
 
-    for chip, packets in iter_packet_arrays(path):
-        total += len(packets)
-        if max_packets is not None and processed >= max_packets:
-            continue
+    headers = (packets >> np.uint64(60)).astype(np.uint8)
+    pixel_mask = headers == pixel_header
 
-        if max_packets is not None:
-            remaining = max_packets - processed
-            if remaining <= 0:
-                continue
-            packets = packets[:remaining]
+    # Pixel word fields, read from its two 32-bit halves (half the memory
+    # traffic of 64-bit ops): c_time [0:16], f_time [16:20], tot [20:30],
+    # m_time [30:44], pix_addr [44:60] (bit 60 belongs to the header).
+    words = packets[pixel_mask]
+    lo = words.astype(np.uint32)
+    hi = (words >> np.uint64(32)).astype(np.uint32)
+    del words
+    c_time = (lo & 0xFFFF).astype(np.int64)
+    f_time = ((lo >> 16) & 0xF).astype(np.int64)
+    tot = ((lo >> 20) & 0x3FF).astype(np.int32)
+    m_time = ((lo >> 30) | ((hi & 0xFFF) << 2)).astype(np.int64)
+    pix_addr = ((hi >> 12) & 0xFFFF).astype(np.int32)
+    del lo, hi
 
-        processed += len(packets)
-        headers = packets >> 60
-        reduced = packets & 0x0FFF_FFFF_FFFF_FFFF
+    toa_ns = (c_time * (1 << 18) + m_time * (1 << 4) - f_time) * PIXEL_RES_NS
+    del c_time, f_time, m_time
+    pix = pix_addr & 0x0007
+    xs = ((pix_addr & 0xFE00) >> 8) + (pix >> 2)
+    ys = ((pix_addr & 0x01F8) >> 1) + (pix & 0x3)
+    del pix_addr, pix
+    pixel_chips = chips[pixel_mask]
+    present = np.nonzero(np.bincount(pixel_chips, minlength=256))[0]
+    if len(present) == 1:
+        xs, ys = layout.to_global(int(present[0]), xs, ys)
+    elif len(present) > 1:
+        xs, ys = chip_layout.apply_layout(layout, pixel_chips, xs, ys)
+    pixels = PixelHits(time_ns=toa_ns, x=np.asarray(xs, dtype=np.int32), y=np.asarray(ys, dtype=np.int32), tot=tot)
 
-        pixel_mask = headers == pixel_header
-        if np.any(pixel_mask):
-            reduced_pixels = reduced[pixel_mask]
-            c_time = reduced_pixels & 0xFFFF
-            f_time = (reduced_pixels >> 16) & 0xF
-            tot = (reduced_pixels >> 20) & 0x3FF
-            m_time = (reduced_pixels >> 30) & 0x3FFF
-            pix_addr = (reduced_pixels >> 44) & 0x1FFFF
-
-            toa_raw = c_time * (1 << 18) + m_time * (1 << 4) - f_time
-            toa_ns = toa_raw * PIXEL_RES_NS
-
-            dcol = (pix_addr & 0xFE00) >> 8
-            spix = (pix_addr & 0x01F8) >> 1
-            pix = pix_addr & 0x0007
-            xs = dcol + (pix // 4)
-            ys = spix + (pix & 0x3)
-            xs, ys = layout.to_global(chip, xs, ys)
-
-            pixels.extend(
-                PixelData(time_ns=float(t), x=int(x), y=int(y), tot=int(tt))
-                for t, x, y, tt in zip(toa_ns, xs, ys, tot)
-            )
-
-        tdc_mask = headers == tdc_header
-        if np.any(tdc_mask):
-            tdc_words.append(reduced[tdc_mask])
-
-        if max_packets is not None and processed >= max_packets:
-            continue
-
-    if tdc_words:
-        tdcs = _decode_tdc_words(_drop_repeated_tdc_words(np.concatenate(tdc_words)))
-
-    return pixels, tdcs, processed, total
+    tdc_words = packets[headers == tdc_header] & np.uint64(0x0FFF_FFFF_FFFF_FFFF)
+    tdcs = _decode_tdc_words(_drop_repeated_tdc_words(tdc_words))
+    return pixels, tdcs, len(packets), total
 
 
 def _drop_repeated_tdc_words(words: np.ndarray) -> np.ndarray:
@@ -172,46 +206,42 @@ def _drop_repeated_tdc_words(words: np.ndarray) -> np.ndarray:
     repeat a word exactly: its timestamp (plus, for the FPGA TDC, its
     trigger counter) differs from every other hit's, so this only drops
     the per-chip copies -- and works however many chips carry them."""
+    if len(words) == 0:
+        return words
     _, first = np.unique(words, return_index=True)
     return words[np.sort(first)]
 
 
-def _decode_tdc_words(words: np.ndarray) -> List[Tuple[int, int, int, float]]:
-    """(sub_nibble, channel, edge, time_ns) for each TDC word, in the
-    order given. Each family/subtype is decoded separately, then the hits
-    are put back in file order: classify_tdcs pairs each rising edge with
-    the next falling edge on its line, which needs them interleaved as
-    they arrived."""
-    sub = (words >> 56) & 0xF
+def _decode_tdc_words(words: np.ndarray) -> TdcHits:
+    """TdcHits for each valid TDC word, in the order given. Each
+    family/subtype is decoded separately, then the hits are put back in
+    file order: classify_tdcs pairs each rising edge with the next falling
+    edge on its line, which needs them interleaved as they arrived."""
+    sub = ((words >> np.uint64(56)) & np.uint64(0xF)).astype(np.int64)
     order = np.arange(len(words))
-    parts = []
+    parts = []  # (order, is_pico, channel, edge, time_ns)
 
     pico_sel = sub == 0xC
     pico = words[pico_sel]
     pico_order = order[pico_sel]
+    valid = ((pico >> np.uint64(52)) & np.uint64(1)) == 0
+    pico = pico[valid]
+    pico_order = pico_order[valid]
     if len(pico):
-        valid = ((pico >> 52) & 1) == 0
-        pico = pico[valid]
-        pico_order = pico_order[valid]
-    if len(pico):
-        channel = (((pico >> 53) & 0x3) << 4) | ((pico >> 48) & 0xF)
-        edge = (pico >> 47) & 1
-        ts_lower = (pico >> 21) & 0x3FFFFFF
-        spidr = pico & 0x1FFFFF
-        ts = (spidr << 26) | ts_lower
+        channel = ((((pico >> np.uint64(53)) & np.uint64(0x3)) << np.uint64(4))
+                   | ((pico >> np.uint64(48)) & np.uint64(0xF))).astype(np.int64)
+        edge = ((pico >> np.uint64(47)) & np.uint64(1)).astype(np.int64)
+        ts_lower = (pico >> np.uint64(21)) & np.uint64(0x3FFFFFF)
+        spidr = pico & np.uint64(0x1FFFFF)
+        ts = (spidr << np.uint64(26)) | ts_lower
         time_ns = np.mod(ts.astype(np.float64) * PICOTDC_NS_PER_COUNT, TIME_ROLLOVER_NS)
-        parts.extend(
-            (int(i), (0xC, int(c), int(e), float(t)))
-            for i, c, e, t in zip(pico_order, channel, edge, time_ns)
-        )
+        parts.append((pico_order, np.ones(len(pico), dtype=bool), channel, edge, time_ns))
 
     for sub_value, (channel_id, edge_value) in FPGA_TDC_SUBTYPES.items():
         sel = sub == sub_value
         fw = words[sel]
         fw_order = order[sel]
-        if len(fw) == 0:
-            continue
-        fine = (fw >> 5) & 0xF
+        fine = ((fw >> np.uint64(5)) & np.uint64(0xF)).astype(np.int64)
         ok = (fine > 0) & (fine <= 12)
         fw = fw[ok]
         fine = fine[ok]
@@ -220,32 +250,34 @@ def _decode_tdc_words(words: np.ndarray) -> List[Tuple[int, int, int, float]]:
             continue
         # Keep only the low 33 bits of the 35-bit coarse counter
         # (3.125 ns steps) so it wraps with the pixel ToA.
-        coarse = (fw >> 9) & 0x1FFFFFFFF
-        combined = coarse.astype(np.int64) * 12 + (fine.astype(np.int64) - 1)
+        coarse = ((fw >> np.uint64(9)) & np.uint64(0x1FFFFFFFF)).astype(np.int64)
+        combined = coarse * 12 + (fine - 1)
         time_ns = combined.astype(np.float64) * FPGA_TDC_NS_PER_COUNT
-        parts.extend(
-            (int(i), (sub_value, channel_id, edge_value, float(t)))
-            for i, t in zip(fw_order, time_ns)
-        )
+        n = len(fw)
+        parts.append((
+            fw_order, np.zeros(n, dtype=bool), np.full(n, channel_id, dtype=np.int64),
+            np.full(n, edge_value, dtype=np.int64), time_ns,
+        ))
 
-    parts.sort(key=lambda item: item[0])
-    return [hit for _, hit in parts]
+    if not parts:
+        return TdcHits(np.zeros(0, dtype=bool), np.zeros(0, dtype=np.int64),
+                       np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float64))
+    cols = [np.concatenate(c) for c in zip(*parts)]
+    file_order = np.argsort(cols[0], kind="stable")
+    return TdcHits(*(c[file_order] for c in cols[1:]))
 
 
 def apply_jitter(values, width):
     """Add a uniform random offset in [0, width) to every value."""
-    if width <= 0 or len(values) == 0:
-        return values
     arr = np.asarray(values, dtype=np.float64)
-    arr = arr + np.random.random(arr.shape) * width
-    return arr.tolist()
+    if width <= 0 or len(arr) == 0:
+        return arr
+    return arr + np.random.random(arr.shape) * width
 
 
-def classify_tdcs(tdcs: List[Tuple[int, int, int, float]], mapping, jitter_ns: float = TDC_JITTER_NS):
-    """Splits raw TDC hits -- (sub_nibble, channel, edge, time_ns) tuples
-    from decode_tpx3's TDC branch, where sub_nibble 0xC is a PicoTDC hit and
-    0xf/0xa/0xe/0xb is an FPGA TDC hit (edge: 1 = rising, 0 = falling) -- into
-    pulse/etof/itof time lists per `mapping` (a tdc_mapping.TdcMapping).
+def classify_tdcs(tdcs: TdcHits, mapping, jitter_ns: float = TDC_JITTER_NS):
+    """Splits TdcHits into (etof, itof, pulses) time arrays per `mapping`
+    (a tdc_mapping.TdcMapping); pulses come back sorted.
 
     Each signal's physical TDC line (family + channel) is matched; a signal
     with no pulse-width gate takes every hit on its line (matching its
@@ -255,162 +287,282 @@ def classify_tdcs(tdcs: List[Tuple[int, int, int, float]], mapping, jitter_ns: f
     [gate_min_ns, gate_max_ns] -- so multiple signals can share one
     physical line and be told apart purely by pulse length (e.g. a long
     trigger pulse vs a short i-ToF pulse on the same FPGA TDC channel)."""
-    hits_by_line = defaultdict(list)
-    for sub, channel, edge, t in tdcs:
-        family = FAMILY_PICOTDC if sub == 0xC else FAMILY_FPGA_TDC
-        hits_by_line[(family, channel)].append((edge, t))
-
-    def paired_pulses(key):
-        start = None
-        pulses_ = []
-        for edge, t in hits_by_line.get(key, ()):
-            if edge == 1:
-                start = t
-            elif start is not None:
-                pulses_.append((start, t - start))
-                start = None
-        return pulses_
 
     def resolve(signal):
         if not signal.enabled:
-            return []
-        key = (signal.source.family, signal.source.channel)
+            return np.zeros(0, dtype=np.float64)
+        on_line = (tdcs.is_pico == (signal.source.family == FAMILY_PICOTDC)) & (
+            tdcs.channel == signal.source.channel
+        )
+        edge = tdcs.edge[on_line]
+        t = tdcs.time_ns[on_line]
         if signal.gate_min_ns is None and signal.gate_max_ns is None:
             want_edge = 1 if signal.time_edge == "rising" else 0
-            return [t for edge, t in hits_by_line.get(key, ()) if edge == want_edge]
+            return t[edge == want_edge]
+        # A falling edge closes a pulse exactly when the hit before it on
+        # the line is a rising edge (a later rising edge restarts the pulse;
+        # a falling edge with no open pulse is ignored).
+        starts = np.nonzero((edge[:-1] == 1) & (edge[1:] == 0))[0]
+        start_t = t[starts]
+        end_t = t[starts + 1]
+        width = end_t - start_t
         lo = signal.gate_min_ns if signal.gate_min_ns is not None else float("-inf")
         hi = signal.gate_max_ns if signal.gate_max_ns is not None else float("inf")
-        out = []
-        for start, width in paired_pulses(key):
-            if lo <= width <= hi:
-                out.append(start if signal.time_edge == "rising" else start + width)
-        return out
+        keep = (width >= lo) & (width <= hi)
+        return start_t[keep] if signal.time_edge == "rising" else end_t[keep]
 
-    pulses = resolve(mapping.pulse_trigger)
+    pulses = np.sort(resolve(mapping.pulse_trigger))
     etof = apply_jitter(resolve(mapping.etof), jitter_ns)
     itof = apply_jitter(resolve(mapping.itof), jitter_ns)
     return etof, itof, pulses
 
 
-def group_times_relative(times, pulses_sorted):
-    grouped = {p: [] for p in pulses_sorted}
-    for t in times:
-        idx = bisect.bisect_right(pulses_sorted, t) - 1
-        if idx < 0:
-            continue
-        pulse_time = pulses_sorted[idx]
-        grouped[pulse_time].append(t - pulse_time)
-    return grouped
+def assign_to_pulses(times, pulses_sorted):
+    """Index of the latest pulse at or before each time (-1 if none)."""
+    return np.searchsorted(pulses_sorted, times, side="right") - 1
 
 
-def group_pixels_by_pulse(pixels: List[PixelData], pulses_sorted):
-    grouped = {p: [] for p in pulses_sorted}
-    for pix in pixels:
-        idx = bisect.bisect_right(pulses_sorted, pix.time_ns) - 1
-        if idx < 0:
-            continue
-        pulse_time = pulses_sorted[idx]
-        grouped[pulse_time].append((pix.time_ns - pulse_time, pix.x, pix.y, pix.tot))
-    return grouped
+# ---- per-frame events ---------------------------------------------------------
 
 
-def cluster_pixels_by_pulse(pixels_by_pulse, t_jitter_ns: float = CLUSTER_T_JITTER_NS, min_size: int = None):
-    """Groups each pulse's pixel hits into clusters of touching pixels and
-    keeps those with at least `min_size` hits (default
-    get_min_cluster_size())."""
+@dataclass
+class FrameEvents:
+    """One raw file's events, everything indexed by `pulses` (sorted
+    absolute trigger times). Cluster/e-ToF/i-ToF rows are ordered by pulse
+    index; *_t are times relative to their pulse. pixel_* are the hits that
+    fell after some pulse (what the clusters were built from)."""
+    pulses: np.ndarray
+    cluster_pulse: np.ndarray
+    cluster_x: np.ndarray
+    cluster_y: np.ndarray
+    cluster_t: np.ndarray
+    cluster_tot: np.ndarray
+    cluster_n: np.ndarray
+    etof_pulse: np.ndarray
+    etof_t: np.ndarray
+    itof_pulse: np.ndarray
+    itof_t: np.ndarray
+    pixel_pulse: np.ndarray
+    pixel_x: np.ndarray
+    pixel_y: np.ndarray
+    pixel_t: np.ndarray
+    pixel_tot: np.ndarray
+
+
+def _relative_to_pulses(times, pulses_sorted):
+    """(pulse index, time - pulse time) for every time after some pulse,
+    stably sorted by pulse index."""
+    idx = assign_to_pulses(times, pulses_sorted)
+    ok = idx >= 0
+    idx = idx[ok]
+    order = np.argsort(idx, kind="stable")
+    idx = idx[order]
+    return idx, np.asarray(times)[ok][order] - pulses_sorted[idx]
+
+
+def build_frame_events(pixels: PixelHits, tdcs: TdcHits, mapping, min_size: int = None,
+                       t_jitter_ns: float = None, timing=None):
+    """Sorts one file's decoded hits into pulses and clusters its pixels
+    (cluster times per `timing` / `t_jitter_ns`, see cluster_hits).
+    Returns (FrameEvents, cluster_size_sum, cluster_count)."""
+    etof, itof, pulses = classify_tdcs(tdcs, mapping)
+    pidx = assign_to_pulses(pixels.time_ns, pulses)
+    ok = pidx >= 0
+    pidx = pidx[ok]
+    px = pixels.x[ok]
+    py = pixels.y[ok]
+    pt = pixels.time_ns[ok] - pulses[pidx]
+    ptot = pixels.tot[ok]
+
+    clusters = cluster_hits(pidx, px, py, pt, ptot, min_size=min_size, t_jitter_ns=t_jitter_ns, timing=timing)
+    etof_pulse, etof_t = _relative_to_pulses(etof, pulses)
+    itof_pulse, itof_t = _relative_to_pulses(itof, pulses)
+    events = FrameEvents(
+        pulses=pulses,
+        cluster_pulse=clusters["pulse"],
+        cluster_x=clusters["x"],
+        cluster_y=clusters["y"],
+        cluster_t=clusters["t"],
+        cluster_tot=clusters["tot"],
+        cluster_n=clusters["n"],
+        etof_pulse=etof_pulse,
+        etof_t=etof_t,
+        itof_pulse=itof_pulse,
+        itof_t=itof_t,
+        pixel_pulse=pidx,
+        pixel_x=px,
+        pixel_y=py,
+        pixel_t=pt,
+        pixel_tot=ptot,
+    )
+    return events, int(clusters["n"].sum()), len(clusters["n"])
+
+
+def cluster_hits(pulse_idx, x, y, t_rel, tot, min_size: int = None, t_jitter_ns: float = None, timing=None):
+    """Groups each pulse's pixel hits into clusters of touching pixels
+    (4-neighbour connected within the same pulse; repeat hits on one pixel
+    all count) and keeps those with at least `min_size` hits (default
+    get_min_cluster_size()). Positions and ToT are ToT-weighted means
+    (plain means if a cluster's ToT sums to zero).
+
+    Cluster time: by default the ToT-weighted mean hit time plus a uniform
+    [0, t_jitter_ns) dither (default CLUSTER_T_JITTER_NS). With `timing` (a
+    cluster_timing.ClusterTimingCalibration) it is that calibration's
+    corrected cluster time instead, dithered by t_jitter_ns if given,
+    otherwise by timing.jitter_ns (0 by default); a cluster the
+    calibration gives no finite time keeps its undithered weighted mean.
+
+    Returns a dict of per-cluster arrays (pulse, x, y, t, tot, n), ordered
+    by pulse."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
     if min_size is None:
         min_size = get_min_cluster_size()
-    clusters_by_pulse = {}
-    cluster_size_sum = 0
-    cluster_count = 0
+    if t_jitter_ns is None:
+        t_jitter_ns = timing.jitter_ns if timing is not None else CLUSTER_T_JITTER_NS
+    empty_f = np.zeros(0, dtype=np.float64)
+    empty_i = np.zeros(0, dtype=np.int64)
+    if len(pulse_idx) == 0:
+        return {"pulse": empty_i, "x": empty_f, "y": empty_f, "t": empty_f, "tot": empty_f, "n": empty_i}
 
-    for pulse_time, pix_list in pixels_by_pulse.items():
-        if not pix_list:
-            continue
-        coord_map = {}
-        for t_rel, x, y, tot in pix_list:
-            coord_map.setdefault((x, y), []).append((t_rel, tot))
+    x = np.asarray(x)
+    y = np.asarray(y)
+    pulse_idx = np.asarray(pulse_idx, dtype=np.int64)
+    # One integer key per (pulse, x, y); `span` leaves room for x+1 / y+1
+    # without spilling into the next row or pulse.
+    lo_x, lo_y = int(x.min()), int(y.min())
+    span = int(max(int(x.max()) - lo_x, int(y.max()) - lo_y)) + 2
+    key = (pulse_idx * span + (x - lo_x)) * span + (y - lo_y)
 
-        coords = set(coord_map.keys())
-        clusters = []
-        while coords:
-            start = coords.pop()
-            stack = [start]
-            cluster_coords = [start]
-            while stack:
-                x, y = stack.pop()
-                neighbors = [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
-                for n in neighbors:
-                    if n in coords:
-                        coords.remove(n)
-                        stack.append(n)
-                        cluster_coords.append(n)
-            clusters.append(cluster_coords)
+    # Unique (pulse, pixel) nodes, and each hit's node. A stable (timsort)
+    # argsort, since the keys are already partly ordered by pulse.
+    order = np.argsort(key, kind="stable")
+    sorted_key = key[order]
+    del key
+    is_first = np.empty(len(sorted_key), dtype=bool)
+    is_first[0] = True
+    np.not_equal(sorted_key[1:], sorted_key[:-1], out=is_first[1:])
+    nodes = sorted_key[is_first]
+    del sorted_key
+    hit_node = np.empty(len(order), dtype=np.int64)
+    hit_node[order] = np.cumsum(is_first) - 1
+    del order, is_first
+    n_nodes = len(nodes)
 
-        cluster_records = []
-        for cluster_id, cluster_coords in enumerate(clusters):
-            cluster_pixels = []
-            for coord in cluster_coords:
-                cluster_pixels.extend([(coord[0], coord[1], t_rel, tot) for t_rel, tot in coord_map[coord]])
-            if not cluster_pixels:
-                continue
-            weights = [tot for _, _, _, tot in cluster_pixels]
-            weight_sum = sum(weights)
-            if weight_sum == 0:
-                weights = [1] * len(cluster_pixels)
-                weight_sum = len(cluster_pixels)
-            avg_x = sum(x * w for x, _, _, w in cluster_pixels) / weight_sum
-            avg_y = sum(y * w for _, y, _, w in cluster_pixels) / weight_sum
-            avg_t = sum(t * w for _, _, t, w in cluster_pixels) / weight_sum
-            avg_tot = sum(tot * w for _, _, _, w in cluster_pixels) / weight_sum
-            n_pixels = len(cluster_pixels)
-            if n_pixels < min_size:
-                continue
+    # y+1 neighbours are simply the next node in key order.
+    y_src = np.nonzero(nodes[1:] == nodes[:-1] + 1)[0]
+    # x+1 neighbours: merge the sorted keys with the sorted keys + span (a
+    # stable sort of two sorted runs is a linear merge); an equal pair is
+    # node j (first) next to node i's x+1 key.
+    merged = np.concatenate([nodes, nodes + span])
+    merge_order = np.argsort(merged, kind="stable")
+    merged = merged[merge_order]
+    pair = np.nonzero(merged[1:] == merged[:-1])[0]
+    del merged
+    src = np.concatenate([y_src, merge_order[pair + 1] - n_nodes])
+    dst = np.concatenate([y_src + 1, merge_order[pair]])
+    del merge_order, pair, y_src
+    graph = coo_matrix((np.ones(len(src), dtype=np.int8), (src, dst)), shape=(n_nodes, n_nodes)).tocsr()
+    n_comp, node_label = connected_components(graph, directed=False)
+    del graph, src, dst
 
-            if t_jitter_ns > 0:
-                avg_t += float(np.random.random()) * t_jitter_ns
+    label = node_label[hit_node]
+    n = np.bincount(label, minlength=n_comp)
+    tot_f = np.asarray(tot, dtype=np.float64)
+    wsum = np.bincount(label, weights=tot_f, minlength=n_comp)
+    sum_x = np.bincount(label, weights=tot_f * x, minlength=n_comp)
+    sum_y = np.bincount(label, weights=tot_f * y, minlength=n_comp)
+    sum_t = np.bincount(label, weights=tot_f * t_rel, minlength=n_comp)
+    sum_tot = np.bincount(label, weights=tot_f * tot_f, minlength=n_comp)
+    # Clusters whose ToT sums to zero fall back to equal weights (their
+    # weighted sums, ToT's included, are all zero so far).
+    zero = wsum == 0
+    if zero.any():
+        z = zero[label]
+        lz = label[z]
+        wsum += np.bincount(lz, minlength=n_comp)
+        sum_x += np.bincount(lz, weights=x[z], minlength=n_comp)
+        sum_y += np.bincount(lz, weights=y[z], minlength=n_comp)
+        sum_t += np.bincount(lz, weights=np.asarray(t_rel)[z], minlength=n_comp)
 
-            cluster_records.append(
-                {
-                    "pulse_time_ns": pulse_time,
-                    "cluster_id": cluster_id,
-                    "n_pixels": n_pixels,
-                    "weight_sum": weight_sum,
-                    "avg_x": avg_x,
-                    "avg_y": avg_y,
-                    "avg_t_rel_ns": avg_t,
-                    "avg_tot": avg_tot,
-                }
-            )
+    comp_pulse = np.empty(n_comp, dtype=np.int64)
+    comp_pulse[node_label] = nodes // (span * span)
 
-            cluster_size_sum += n_pixels
-            cluster_count += 1
+    keep = np.nonzero(n >= min_size)[0]
+    keep = keep[np.argsort(comp_pulse[keep], kind="stable")]
+    ws = wsum[keep]
+    t_avg = sum_t[keep] / ws
+    if timing is not None:
+        t_avg = _apply_cluster_timing(t_avg, keep, n_comp, label, x, y, t_rel, tot, timing, t_jitter_ns)
+    elif t_jitter_ns > 0:
+        t_avg = t_avg + np.random.random(len(keep)) * t_jitter_ns
+    return {
+        "pulse": comp_pulse[keep],
+        "x": sum_x[keep] / ws,
+        "y": sum_y[keep] / ws,
+        "t": t_avg,
+        "tot": sum_tot[keep] / ws,
+        "n": n[keep],
+    }
 
-        clusters_by_pulse[pulse_time] = cluster_records
 
-    return clusters_by_pulse, cluster_size_sum, cluster_count
+def _apply_cluster_timing(t_avg, keep, n_comp, label, x, y, t_rel, tot, timing, t_jitter_ns):
+    """`timing`'s corrected time for each kept cluster (in `keep` order),
+    computed for all of them at once from their hits; clusters it gives no
+    finite time keep t_avg."""
+    if len(keep) == 0:
+        return t_avg
+    rank = np.full(n_comp, -1, dtype=np.int64)
+    rank[keep] = np.arange(len(keep))
+    hit_cluster = rank[label]
+    sel = hit_cluster >= 0
+    times = timing.cluster_times(
+        hit_cluster[sel], len(keep), np.asarray(x)[sel], np.asarray(y)[sel],
+        np.asarray(t_rel, dtype=np.float64)[sel], np.asarray(tot)[sel],
+    )
+    good = np.isfinite(times)
+    if t_jitter_ns > 0:
+        times = times + np.random.random(len(times)) * t_jitter_ns
+    return np.where(good, times, t_avg)
 
 
-def make_pixel_hist_from_pulses(pixels_by_pulse, bins: int = 256, range_min: float = 0.0, range_max: float = 256.0):
+# ---- histograms -------------------------------------------------------------
+
+
+def _uniform_bin_index(values, bins, lo, hi):
+    """(bin index, in-range mask) for equal-width bins on [lo, hi] -- the
+    same binning np.histogram uses (the last bin includes hi), but a single
+    pass instead of a per-value search."""
+    v = np.asarray(values, dtype=np.float64)
+    ok = (v >= lo) & (v <= hi)
+    idx = ((v - lo) * (bins / (hi - lo))).astype(np.int64, copy=False)
+    np.clip(idx, 0, bins - 1, out=idx)
+    return idx, ok
+
+
+def hist2d_uniform(xs, ys, bins, lo, hi):
+    """Equivalent of np.histogram2d(xs, ys, bins, range=[[lo, hi], [lo, hi]])[0]."""
+    if len(xs) == 0:
+        return np.zeros((bins, bins), dtype=np.float64)
+    ix, okx = _uniform_bin_index(xs, bins, lo, hi)
+    iy, oky = _uniform_bin_index(ys, bins, lo, hi)
+    ok = okx & oky
+    flat = ix[ok] * bins + iy[ok]
+    return np.bincount(flat, minlength=bins * bins).reshape(bins, bins).astype(np.float64)
+
+
+def make_pixel_hist(xs, ys, bins: int = 256, range_min: float = 0.0, range_max: float = 256.0):
     bins = max(1, int(bins))
     if range_max <= range_min:
         range_min, range_max = 0.0, float(chip_layout.get_active_layout().size)
-    points = []
-    for pix_list in pixels_by_pulse.values():
-        for _, x, y, _ in pix_list:
-            points.append((x, y))
-    if not points:
-        return np.zeros((bins, bins), dtype=np.float64)
-    xs = np.array([p[0] for p in points])
-    ys = np.array([p[1] for p in points])
-    hist, _, _ = np.histogram2d(
-        xs, ys, bins=bins, range=[[range_min, range_max], [range_min, range_max]]
-    )
-    return hist
+    return hist2d_uniform(xs, ys, bins, range_min, range_max)
 
 
 def make_cluster_hists(
-    clusters_by_pulse,
+    xs,
+    ys,
+    ts,
     t_bins: int = 1000,
     t_min: float = 0.0,
     t_max: float = 1000.0,
@@ -421,29 +573,10 @@ def make_cluster_hists(
     xy_bins = max(1, int(xy_bins))
     if xy_max <= xy_min:
         xy_min, xy_max = 0.0, float(chip_layout.get_active_layout().size)
-
-    cluster_points = []
-    cluster_times = []
-    for clusters in clusters_by_pulse.values():
-        for cluster in clusters:
-            t_rel = cluster["avg_t_rel_ns"]
-            if t_rel < t_min or t_rel > t_max:
-                continue
-            cluster_points.append((cluster["avg_x"], cluster["avg_y"]))
-            cluster_times.append(t_rel)
-
-    if cluster_points:
-        xs = np.array([c[0] for c in cluster_points])
-        ys = np.array([c[1] for c in cluster_points])
-        hist, _, _ = np.histogram2d(
-            xs, ys, bins=xy_bins, range=[[xy_min, xy_max], [xy_min, xy_max]]
-        )
-    else:
-        hist = np.zeros((xy_bins, xy_bins), dtype=np.float64)
-
-    cluster_t_hist = make_hist_1d(cluster_times, t_bins, t_min, t_max)
-    return hist, cluster_t_hist
-
+    ts = np.asarray(ts, dtype=np.float64)
+    in_t = (ts >= t_min) & (ts <= t_max)
+    hist = hist2d_uniform(np.asarray(xs)[in_t], np.asarray(ys)[in_t], xy_bins, xy_min, xy_max)
+    return hist, make_hist_1d(ts[in_t], t_bins, t_min, t_max)
 
 def make_counts_per_pixel_hist(pixel_hist, bins: int = 0, range_min: float = 0.0, range_max: float = 0.0):
     bins = int(bins)
@@ -483,13 +616,6 @@ def make_hist_1d(values, bins, range_min, range_max):
     return {"counts": counts, "bins": centers, "range": (range_min, range_max)}
 
 
-def flatten_dict(mapping):
-    out = []
-    for items in mapping.values():
-        out.extend(items)
-    return out
-
-
 def copy_hist(hist):
     return {
         "counts": hist["counts"].copy(),
@@ -518,43 +644,31 @@ def auto_hist_ylim(counts):
     return 0, 1.1 * max_val
 
 
-def summarize_records(pulse_records, cluster_size_sum, cluster_count, processed_packets, total_packets, start_time):
-    total_pulses = len(pulse_records)
-    any_etof = 0
-    any_itof = 0
-    any_cluster = 0
-    multi_etof = 0
-    multi_itof = 0
-    multi_cluster = 0
-    all_three = 0
-    total_etof = 0
-    total_itof = 0
-    total_clusters = 0
+def summarize_frame(events: FrameEvents, cluster_size_sum, cluster_count, processed_packets, total_packets, start_time):
+    """Per-shot rates and counts for one frame's FrameEvents (`start_time`
+    is the frame's time.perf_counter() start, for analysis_time)."""
+    total_pulses = len(events.pulses)
+    clusters = np.bincount(events.cluster_pulse, minlength=total_pulses)
+    etofs = np.bincount(events.etof_pulse, minlength=total_pulses)
+    itofs = np.bincount(events.itof_pulse, minlength=total_pulses)
+    has_etof = etofs > 0
+    has_itof = itofs > 0
+    has_cluster = clusters > 0
 
-    pulse_times = []
-    for pulse_time, _, clusters, etofs, itofs in pulse_records:
-        pulse_times.append(pulse_time)
-        has_etof = len(etofs) > 0
-        has_itof = len(itofs) > 0
-        has_cluster = len(clusters) > 0
-
-        any_etof += 1 if has_etof else 0
-        any_itof += 1 if has_itof else 0
-        any_cluster += 1 if has_cluster else 0
-
-        multi_etof += 1 if len(etofs) > 1 else 0
-        multi_itof += 1 if len(itofs) > 1 else 0
-        multi_cluster += 1 if len(clusters) > 1 else 0
-
-        all_three += 1 if (has_etof and has_itof and has_cluster) else 0
-
-        total_etof += len(etofs)
-        total_itof += len(itofs)
-        total_clusters += len(clusters)
+    any_etof = int(has_etof.sum())
+    any_itof = int(has_itof.sum())
+    any_cluster = int(has_cluster.sum())
+    multi_etof = int((etofs > 1).sum())
+    multi_itof = int((itofs > 1).sum())
+    multi_cluster = int((clusters > 1).sum())
+    all_three = int((has_etof & has_itof & has_cluster).sum())
+    total_etof = len(events.etof_t)
+    total_itof = len(events.itof_t)
+    total_clusters = len(events.cluster_t)
 
     real_time = 0.0
-    if len(pulse_times) > 1:
-        real_time = (max(pulse_times) - min(pulse_times)) * 1e-9
+    if total_pulses > 1:
+        real_time = float(events.pulses[-1] - events.pulses[0]) * 1e-9
     analysis_time = time.perf_counter() - start_time
 
     clusters_per_shot = (total_clusters / total_pulses) if total_pulses else 0
@@ -599,7 +713,6 @@ def summarize_records(pulse_records, cluster_size_sum, cluster_count, processed_
         "analysis_time": analysis_time,
         "real_time": real_time,
     }
-
 
 def merge_stats(base, new):
     merged = base.copy()

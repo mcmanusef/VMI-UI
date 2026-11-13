@@ -11,13 +11,14 @@ import pyqtgraph as pg
 from PyQt5 import QtCore
 
 import app_settings
+import fit_cluster_timing
 import platform_paths
 import serval_client
 import tdc_mapping
 import ui_style
 from qt_plots import hist_to_rgba, mpl_color, ZoomFocusViewBox
 from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection, generate_correction
-from tpx_processing import decode_tpx3, classify_tdcs, group_pixels_by_pulse
+from tpx_processing import decode_tpx3, classify_tdcs, assign_to_pulses
 
 
 DEFAULT_TEMP_DIR = str(platform_paths.SCRATCH_ROOT / "serval_timewalk")
@@ -35,6 +36,11 @@ class TimewalkInterface(ttk.Frame):
     affected and should stay essentially unchanged), then saved to a JSON
     file that the Diagnostics / Monitored Acquisition tabs can load and
     apply to pixel times before clustering.
+
+    The "Cluster timing fit" section instead fits a cluster timing
+    calibration (.npz, see cluster_timing.py) from a run's raw files with an
+    e-ToF (or i-ToF) reference, in the background -- the same fit as
+    fit_cluster_timing.py on the command line.
     """
 
     def __init__(self, parent, server_var=None, coordinator=None, **kwargs):
@@ -72,6 +78,16 @@ class TimewalkInterface(ttk.Frame):
         )
         self.correction_info_var = tk.StringVar(self, value="No correction generated yet.")
 
+        self.ct_raw_folder_var = tk.StringVar(self, value=app_settings.get("timewalk.ct_raw_folder", ""))
+        self.ct_out_var = tk.StringVar(self, value=app_settings.get("timewalk.ct_out", ""))
+        self.ct_max_files_var = tk.StringVar(self, value=app_settings.get("timewalk.ct_max_files", "24"))
+        self.ct_reference_var = tk.StringVar(self, value=app_settings.get("timewalk.ct_reference", "etof"))
+        self.ct_mapping_var = tk.StringVar(self, value=app_settings.get("timewalk.ct_mapping", "active"))
+        self.ct_info_var = tk.StringVar(self, value="No cluster timing fit run yet.")
+        self._fit_thread = None
+        self._fit_stop = threading.Event()
+        self._fit_queue: Queue = Queue()
+
         self._stop_event = threading.Event()
         self._queue: Queue = Queue()
         self._worker = None
@@ -93,7 +109,7 @@ class TimewalkInterface(ttk.Frame):
         main.rowconfigure(0, weight=1)
         # Trailing empty row keeps content packed at the top as sections
         # collapse (see Monitored Acquisition).
-        sidebar.rowconfigure(5, weight=1)
+        sidebar.rowconfigure(6, weight=1)
 
         ui_style.build_button_bar(sidebar, 0, [
             ("Start", self.start),
@@ -157,6 +173,37 @@ class TimewalkInterface(ttk.Frame):
             pady=(4, 6), columnspan=2,
         )
         ui_style.add_note(fit, 5, textvariable=self.correction_info_var)
+
+        ct = ui_style.build_section(sidebar, 5, "Cluster timing fit", pady=0)
+        ui_style.add_note(
+            ct, 0,
+            "Fits a cluster timing calibration (.npz) from a run's raw files, using the e-ToF (or i-ToF) "
+            "TDC as each electron's reference time. Half the chosen files are fitted, the other half "
+            "check the result. Load the .npz in a tab's time-walk field to use it.",
+        )
+        ui_style.add_form_row(
+            ct, 1, "Raw data folder:", ui_style.build_path_field(ct, self.ct_raw_folder_var, self._browse_ct_raw),
+        )
+        ui_style.add_form_row(
+            ct, 2, "Output (.npz):", ui_style.build_path_field(ct, self.ct_out_var, self._browse_ct_out),
+        )
+        ui_style.add_form_row(ct, 3, "Files to use:", ttk.Entry(ct, textvariable=self.ct_max_files_var, width=18))
+        ui_style.add_form_row(ct, 4, "Reference:", ttk.Combobox(
+            ct, textvariable=self.ct_reference_var, values=("etof", "itof"), state="readonly", width=16,
+        ))
+        ui_style.add_form_row(ct, 5, "TDC mapping:", ttk.Combobox(
+            ct, textvariable=self.ct_mapping_var, values=fit_cluster_timing.TDC_MAPPING_CHOICES,
+            state="readonly", width=16,
+        ))
+        ui_style.add_note(
+            ct, 6, "TDC mapping: active = the tdc mapping Hardware tab; default = the built-in FPGA-TDC "
+                   "scheme (needed for older data).",
+        )
+        self._ct_buttons = ui_style.build_button_bar(
+            ct, 7, [("Fit Cluster Timing", self.fit_cluster_timing), ("Cancel Fit", self.cancel_cluster_timing_fit)],
+            pady=(4, 6), columnspan=2,
+        )
+        ui_style.add_note(ct, 8, textvariable=self.ct_info_var)
 
         self._glw = pg.GraphicsLayoutWidget()
         self._plot_hist = self._glw.addPlot(row=0, col=0, viewBox=ZoomFocusViewBox())
@@ -230,6 +277,11 @@ class TimewalkInterface(ttk.Frame):
                 self._apply_result(result)
         except Empty:
             pass
+        try:
+            while True:
+                self._apply_fit_message(self._fit_queue.get_nowait())
+        except Empty:
+            pass
         self.after(200, self._poll_queue)
 
     def is_running(self):
@@ -253,6 +305,11 @@ class TimewalkInterface(ttk.Frame):
             "timewalk.anchor_frac": self.anchor_frac_var,
             "timewalk.log_color": self.log_color_var,
             "timewalk.correction_path": self.correction_path_var,
+            "timewalk.ct_raw_folder": self.ct_raw_folder_var,
+            "timewalk.ct_out": self.ct_out_var,
+            "timewalk.ct_max_files": self.ct_max_files_var,
+            "timewalk.ct_reference": self.ct_reference_var,
+            "timewalk.ct_mapping": self.ct_mapping_var,
         }
 
     def start(self):
@@ -371,18 +428,12 @@ class TimewalkInterface(ttk.Frame):
 
         pixels, tdcs, _, _ = decode_tpx3(str(path), max_packets=max_packets)
         _, _, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
-        pulses_sorted = sorted(pulses)
-        pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)
-
-        tots = []
-        ts = []
-        for pix_list in pixels_by_pulse.values():
-            for t_rel, _, _, tot in pix_list:
-                tots.append(tot)
-                ts.append(t_rel)
-
-        if not tots:
+        pulse_idx = assign_to_pulses(pixels.time_ns, pulses)
+        after_pulse = pulse_idx >= 0
+        if not after_pulse.any():
             return None
+        tots = pixels.tot[after_pulse]
+        ts = pixels.time_ns[after_pulse] - pulses[pulse_idx[after_pulse]]
 
         tot_edges = np.linspace(tot_min, tot_max, tot_bins + 1)
         t_edges = np.linspace(t_min, t_max, t_bins + 1)
@@ -490,6 +541,104 @@ class TimewalkInterface(ttk.Frame):
         )
         self.status_var.set(f"Loaded {chosen}")
         self._redraw()
+
+    # ---- cluster timing fit (background thread) ------------------------
+
+    def _browse_ct_raw(self):
+        chosen = filedialog.askdirectory(
+            initialdir=self.ct_raw_folder_var.get().strip() or None,
+            title="Choose the raw data folder to fit cluster timing from",
+            parent=self,
+        )
+        if not chosen:
+            return
+        self.ct_raw_folder_var.set(chosen)
+        if not self.ct_out_var.get().strip():
+            folder = pathlib.Path(chosen)
+            run = folder.parent if folder.name.lower() == "raw" else folder
+            self.ct_out_var.set(str(run / f"cluster_timing_{run.name}.npz"))
+
+    def _browse_ct_out(self):
+        initial = self.ct_out_var.get().strip()
+        chosen = filedialog.asksaveasfilename(
+            title="Save cluster timing calibration",
+            defaultextension=".npz",
+            initialfile=pathlib.Path(initial).name if initial else "cluster_timing.npz",
+            initialdir=str(pathlib.Path(initial).parent) if initial else None,
+            filetypes=[("Cluster timing", "*.npz")],
+            parent=self,
+        )
+        if chosen:
+            self.ct_out_var.set(chosen)
+
+    def fit_cluster_timing(self):
+        if self._fit_thread is not None and self._fit_thread.is_alive():
+            self.status_var.set("A cluster timing fit is already running.")
+            return
+        folder = self.ct_raw_folder_var.get().strip()
+        out = self.ct_out_var.get().strip()
+        if not folder or not pathlib.Path(folder).is_dir():
+            self.status_var.set("Choose an existing raw data folder for the cluster timing fit.")
+            return
+        if not out:
+            self.status_var.set("Choose where to save the cluster timing calibration (.npz).")
+            return
+        if not out.lower().endswith(".npz"):
+            out += ".npz"
+            self.ct_out_var.set(out)
+        try:
+            max_files = int(self.ct_max_files_var.get())
+            if max_files < 2:
+                raise ValueError
+        except ValueError:
+            self.status_var.set("Files to use must be a whole number of at least 2 (half fit, half validate).")
+            return
+        if pathlib.Path(out).exists() and not messagebox.askyesno(
+            "File exists", f"{out} already exists.\nOverwrite it?", parent=self,
+        ):
+            return
+
+        self._fit_stop.clear()
+        self.ct_info_var.set("Starting cluster timing fit...")
+        self.status_var.set("Cluster timing fit running in the background.")
+        args = (folder, out, max_files, self.ct_reference_var.get(), self.ct_mapping_var.get())
+        self._fit_thread = threading.Thread(target=self._fit_worker, args=args, daemon=True)
+        self._fit_thread.start()
+
+    def cancel_cluster_timing_fit(self):
+        if self._fit_thread is None or not self._fit_thread.is_alive():
+            return
+        self._fit_stop.set()
+        self.ct_info_var.set("Cancelling after the current step...")
+
+    def _fit_worker(self, folder, out, max_files, reference, mapping):
+        try:
+            _, report = fit_cluster_timing.run_fit(
+                [folder], out, max_files=max_files, reference=reference, mapping=mapping,
+                log=lambda line: self._fit_queue.put({"log": line}), stop_event=self._fit_stop,
+            )
+            self._fit_queue.put({"done": out, "report": report})
+        except fit_cluster_timing.FitCancelled:
+            self._fit_queue.put({"cancelled": True})
+        except Exception as exc:
+            self._fit_queue.put({"error": f"{type(exc).__name__}: {exc}"})
+
+    def _apply_fit_message(self, msg):
+        if "log" in msg:
+            self.ct_info_var.set(msg["log"].strip())
+        elif "done" in msg:
+            lines = [f"Saved {msg['done']}"]
+            if msg.get("report"):
+                lines.append("Validation (electron cluster time - reference):")
+                lines += fit_cluster_timing.format_report(msg["report"])
+            self.ct_info_var.set("\n".join(lines))
+            self.status_var.set("Cluster timing fit finished.")
+        elif "cancelled" in msg:
+            self.ct_info_var.set("Cluster timing fit cancelled; nothing new was saved unless it said so above.")
+            self.status_var.set("Cluster timing fit cancelled.")
+        elif "error" in msg:
+            self.ct_info_var.set(f"Cluster timing fit failed: {msg['error']}")
+            self.status_var.set("Cluster timing fit failed.")
 
     # ---- drawing --------------------------------------------------------
 

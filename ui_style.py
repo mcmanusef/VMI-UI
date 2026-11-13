@@ -12,6 +12,7 @@ import qtk as tk
 from qtk import ttk
 
 import shared_state
+from cluster_timing import MODES as CLUSTER_TIMING_MODES
 from collapsible_frame import CollapsibleFrame, FLUSH_BACKGROUND, set_background
 from scrollable_frame import ScrollableFrame
 
@@ -308,6 +309,19 @@ class PathEntryFilter(QtCore.QObject):
 
 def wire_path_entry(entry, var):
     entry._path_filter = PathEntryFilter(entry, var)
+
+
+def build_cluster_timing_mode_row(parent, row, var):
+    """The "Cluster timing mode" dropdown under a tab's time-walk file field
+    (only used when that file is a cluster timing calibration, .npz)."""
+    add_form_row(parent, row, "Cluster timing mode:", ttk.Combobox(
+        parent, textvariable=var, values=CLUSTER_TIMING_MODES, state="readonly", width=16,
+    ))
+    add_note(
+        parent, row + 1,
+        "For a .npz cluster timing file: core = best timing, bright = hits with ToT >= 1 us only, "
+        "all = every hit. Ignored for a .json time-walk curve.",
+    )
 
 
 def build_path_field(parent, var, browse_command=None):

@@ -310,10 +310,16 @@ class HistogramPlotPanel(ttk.Frame):
         else:
             layout = [(key, label, idx // 3, idx % 3) for idx, (key, label) in enumerate(PLOT_SPECS)]
 
+        axis_width, axis_height = self._axis_space()
         for key, label, row, col in layout:
             vb = ZoomFocusViewBox(on_focus=lambda k=key: self._on_plot_double_click(k))
             plot_item = self._glw.addPlot(row=row, col=col, viewBox=vb)
             plot_item.setTitle(label)
+            # Fixed axis space: left to size itself, an axis grows and
+            # shrinks with its tick labels (e.g. 900 -> 1000 counts), which
+            # moves the plot's borders from frame to frame.
+            plot_item.getAxis("left").setWidth(axis_width)
+            plot_item.getAxis("bottom").setHeight(axis_height)
             self._plots[key] = plot_item
             if key in ("pixel", "cluster"):
                 img = pg.ImageItem()
@@ -327,6 +333,23 @@ class HistogramPlotPanel(ttk.Frame):
             empty_label.setVisible(False)
             plot_item.addItem(empty_label, ignoreBounds=True)
             self._empty_labels[key] = empty_label
+
+        # Every column / row gets the same share of the space whatever its
+        # plot contains.
+        grid = self._glw.ci.layout
+        for row in range(grid.rowCount()):
+            grid.setRowStretchFactor(row, 1)
+        for col in range(grid.columnCount()):
+            grid.setColumnStretchFactor(col, 1)
+
+    def _axis_space(self):
+        """(left-axis width, bottom-axis height) in px: room for 8-character
+        tick labels (e.g. -1234567, 1.5e+06) plus the axis title."""
+        metrics = QtGui.QFontMetrics(self._glw.font())
+        tick_text = metrics.horizontalAdvance("-8888888")
+        line = metrics.height()
+        # tick text + gap + axis title line + tick marks / padding
+        return tick_text + line + 18, 2 * line + 14
 
     def _on_plot_double_click(self, key):
         self._set_focus(None if self._focus_key is not None else key)
@@ -417,6 +440,15 @@ class HistogramPlotPanel(ttk.Frame):
             (x0, x1), (y0, y1) = plot_item.getViewBox().viewRange()
             text_item.setPos((x0 + x1) / 2, (y0 + y1) / 2)
 
+    @staticmethod
+    def _set_labels(plot_item, bottom, left):
+        """Axis labels, set only when they change -- setLabel re-lays out
+        the axis, which is a noticeable share of a redraw at live rates."""
+        if getattr(plot_item, "_axis_labels", None) != (bottom, left):
+            plot_item.setLabel("bottom", bottom)
+            plot_item.setLabel("left", left)
+            plot_item._axis_labels = (bottom, left)
+
     def _draw_map(self, key, hist, cfg, log_enabled):
         img = self._images.get(key)
         plot_item = self._plots.get(key)
@@ -429,8 +461,7 @@ class HistogramPlotPanel(ttk.Frame):
         rgba = hist_to_rgba(hist, log=log_enabled, gamma=self.gamma_var.get())
         img.setImage(rgba, autoLevels=False)
         img.setRect(QtCore.QRectF(low, low, high - low, high - low))
-        plot_item.setLabel("bottom", "X")
-        plot_item.setLabel("left", "Y")
+        self._set_labels(plot_item, "X", "Y")
         plot_item.getViewBox().setRange(xRange=(low, high), yRange=(low, high), padding=0)
         self._set_empty_placeholder(key, not np.any(hist))
 
@@ -448,8 +479,7 @@ class HistogramPlotPanel(ttk.Frame):
         )
         plot_item.setLogMode(y=self.log_counts_var.get())
         curve.setData(counts_hist["bins"], counts_hist["counts"])
-        plot_item.setLabel("bottom", "Counts per pixel")
-        plot_item.setLabel("left", "Pixels")
+        self._set_labels(plot_item, "Counts per pixel", "Pixels")
         plot_item.enableAutoRange(axis="y")
         plot_item.setXRange(*counts_hist["range"], padding=0)
         self._set_empty_placeholder("counts", not np.any(counts_hist["counts"]))
@@ -461,8 +491,7 @@ class HistogramPlotPanel(ttk.Frame):
             return
         plot_item.setLogMode(y=log_enabled)
         curve.setData(hist["bins"], hist["counts"])
-        plot_item.setLabel("bottom", xlabel)
-        plot_item.setLabel("left", ylabel)
+        self._set_labels(plot_item, xlabel, ylabel)
         plot_item.enableAutoRange(axis="y")
         plot_item.setXRange(*hist["range"], padding=0)
         self._set_empty_placeholder(key, not np.any(hist["counts"]))

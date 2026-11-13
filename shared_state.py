@@ -22,6 +22,8 @@ import qtk as tk
 
 import app_settings
 import platform_paths
+from cluster_timing import DEFAULT_MODE as CLUSTER_TIMING_DEFAULT_MODE
+from cluster_timing import MODE_SETTINGS_KEY as CLUSTER_TIMING_MODE_KEY
 from plot_panel import DEFAULT_HIST_SETTINGS
 from tpx_processing import DEFAULT_MIN_CLUSTER_SIZE, MIN_CLUSTER_SIZE_KEY
 
@@ -56,6 +58,10 @@ def make_plot_shared_vars(master):
     shared["min_cluster_size_var"] = app_settings.persistent_var(
         master, tk.StringVar, MIN_CLUSTER_SIZE_KEY, str(DEFAULT_MIN_CLUSTER_SIZE)
     )
+    # Likewise the estimator a cluster timing calibration (.npz) is applied with.
+    shared["cluster_timing_mode_var"] = app_settings.persistent_var(
+        master, tk.StringVar, CLUSTER_TIMING_MODE_KEY, CLUSTER_TIMING_DEFAULT_MODE
+    )
     return shared
 
 
@@ -66,6 +72,17 @@ def min_cluster_size_var(master, plot_shared_vars=None):
     if shared is not None:
         return shared
     return app_settings.persistent_var(master, tk.StringVar, MIN_CLUSTER_SIZE_KEY, str(DEFAULT_MIN_CLUSTER_SIZE))
+
+
+def cluster_timing_mode_var(master, plot_shared_vars=None):
+    """The shared "Cluster timing mode" field's variable, or (for a tab built
+    without shared vars) its own one backed by the same saved setting."""
+    shared = (plot_shared_vars or {}).get("cluster_timing_mode_var")
+    if shared is not None:
+        return shared
+    return app_settings.persistent_var(
+        master, tk.StringVar, CLUSTER_TIMING_MODE_KEY, CLUSTER_TIMING_DEFAULT_MODE
+    )
 
 
 def _default_shared_save_folder():
