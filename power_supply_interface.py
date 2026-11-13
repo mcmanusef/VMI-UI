@@ -323,6 +323,49 @@ class PowerSupplyUnavailable(RuntimeError):
     group, or its V0 ratios were never captured."""
 
 
+# How far VMON may sit from its target and still count as "the ramp has
+# finished" -- the SY127 reports whole volts and hovers a little either
+# side of V0 rather than landing on it exactly.
+SETTLE_TOLERANCE_V = 5.0
+SETTLE_TOLERANCE_FRAC = 0.02
+
+
+def _vmon_reached(channels, targets):
+    """True if every channel in `targets` ({channel: volts}) has stopped
+    ramping with its VMON at the target, in the status fields `channels`."""
+    for ch, target in targets.items():
+        data = channels.get(ch)
+        if not data:
+            return False
+        if data.get("ramp") in ("RUP", "RDW"):
+            return False
+        try:
+            vmon = float(data.get("vmon", ""))
+        except ValueError:
+            return False
+        if abs(vmon - target) > max(SETTLE_TOLERANCE_V, abs(target) * SETTLE_TOLERANCE_FRAC):
+            return False
+    return True
+
+
+def wait_for_vmon(status_snapshot, targets, requested_at, timeout, stop_event=None, poll=0.25):
+    """Block until every channel's VMON has reached its target, judged only
+    on status snapshots (from the `status_snapshot` callable) read after
+    requested_at -- an older one still shows the voltage the channel is
+    ramping away from. Returns True once it's there, False if the timeout
+    ran out or stop_event was set first."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        stamp, channels = status_snapshot()
+        if stamp > requested_at and _vmon_reached(channels, targets):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll)
+
+
 class GroupVoltageControl:
     """Drives one channel group's V0 from another thread (the parameter
     sweep lowering the voltages while the stage moves), using the same lead
@@ -334,12 +377,6 @@ class GroupVoltageControl:
     PowerSupplyInterface._apply_status). Build it on the GUI thread, with
     PowerSupplyInterface.group_control(), and use it from anywhere.
     """
-
-    # How far VMON may sit from its target and still count as "the ramp has
-    # finished" -- the SY127 reports whole volts and hovers a little either
-    # side of V0 rather than landing on it exactly.
-    SETTLE_TOLERANCE_V = 5.0
-    SETTLE_TOLERANCE_FRAC = 0.02
 
     def __init__(self, ui, group, members, ratios):
         self._ui = ui
@@ -374,36 +411,10 @@ class GroupVoltageControl:
         return targets, requested_at
 
     def wait_until_settled(self, targets, requested_at, timeout=120.0, stop_event=None, poll=0.25):
-        """Block until every member's VMON has reached its target, judged
-        only on status snapshots read after requested_at -- an older one
-        still shows the voltage the group is ramping away from. Returns
-        True once it's there, False if the timeout ran out or stop_event
-        was set first."""
-        deadline = time.monotonic() + timeout
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                return False
-            stamp, channels = self._ui.status_snapshot()
-            if stamp > requested_at and self._all_reached(channels, targets):
-                return True
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(poll)
-
-    def _all_reached(self, channels, targets):
-        for ch, target in targets.items():
-            data = channels.get(ch)
-            if not data:
-                return False
-            if data.get("ramp") in ("RUP", "RDW"):
-                return False
-            try:
-                vmon = float(data.get("vmon", ""))
-            except ValueError:
-                return False
-            if abs(vmon - target) > max(self.SETTLE_TOLERANCE_V, abs(target) * self.SETTLE_TOLERANCE_FRAC):
-                return False
-        return True
+        """Block until every member's VMON has reached its target (see
+        wait_for_vmon). Returns True once it's there, False if the timeout
+        ran out or stop_event was set first."""
+        return wait_for_vmon(self._ui.status_snapshot, targets, requested_at, timeout, stop_event, poll)
 
 
 # --- GUI: a single channel row ---------------------------------------------
@@ -429,6 +440,11 @@ class ChannelRow:
         # When True, the next status update overwrites the setpoint entries
         # (used at connect time and after each Apply).
         self._refresh_setpoints_pending = True
+        # The setpoints the device last reported, so an entry is overwritten
+        # whenever the device's value changes (a group Apply, the power-up
+        # sequence, someone at the crate) but a half-typed edit survives the
+        # ticks in between.
+        self._device_setpoints = {}
 
         self.vmon_var = tk.StringVar(value="--")
         self.imon_var = tk.StringVar(value="--")
@@ -535,14 +551,16 @@ class ChannelRow:
         self.status_var.set(display_status)
         self.status_label.config(foreground=self.STATUS_COLORS.get(st, "#000"))
 
-        # Only overwrite setpoint entries when explicitly requested, else the
-        # user's in-progress edits get wiped every tick.
-        if self._refresh_setpoints_pending:
-            self.v0_var.set(data.get("v0", ""))
-            self.i0_var.set(data.get("i0", ""))
-            self.rup_var.set(data.get("rup", ""))
-            self.rdw_var.set(data.get("rdw", ""))
-            self._refresh_setpoints_pending = False
+        # Only overwrite a setpoint entry when explicitly requested or when the
+        # device's value has changed, else the user's in-progress edits get
+        # wiped every tick.
+        for key, var in (("v0", self.v0_var), ("i0", self.i0_var),
+                         ("rup", self.rup_var), ("rdw", self.rdw_var)):
+            value = data.get(key, "")
+            if self._refresh_setpoints_pending or value != self._device_setpoints.get(key):
+                var.set(value)
+            self._device_setpoints[key] = value
+        self._refresh_setpoints_pending = False
 
     def request_setpoint_refresh(self):
         self._refresh_setpoints_pending = True
@@ -598,6 +616,29 @@ class PowerSupplyInterface(ttk.Frame):
             self, value=app_settings.get("power_supply.channels", DEFAULT_CHANNELS)
         )
 
+        # Preset power-up / power-down sequence (see _build_preset_card).
+        self.preset_repeller_var = app_settings.persistent_var(
+            self, tk.StringVar, "power_supply.preset_repeller_v0", ""
+        )
+        self.preset_full_var = app_settings.persistent_var(
+            self, tk.StringVar, "power_supply.preset_ch09_full_v0", ""
+        )
+        self.preset_state_var = tk.StringVar(self, value="Idle.")
+        self.preset_ratio_var = tk.StringVar(self)
+        self._sequence_thread = None
+        self._sequence_stop = threading.Event()
+        self._sequence_step = "Idle."  # written by the sequence thread, shown by _poll_queues
+
+        # Trip interlock: when any channel trips, turn every other channel
+        # off too (see _check_trips).
+        self.trip_all_off_var = app_settings.persistent_var(
+            self, tk.BooleanVar, "power_supply.trip_all_off", False
+        )
+        # Channels the interlock has already queued an OFF toggle for, with
+        # when -- the SY127 only toggles, so queuing a second one before the
+        # first lands would turn the channel back on.
+        self._trip_off_pending = {}
+
         self.hv_enable_var = tk.StringVar(self, value="--")
         self.active_var = tk.StringVar(self, value="--")
         self.group_var = tk.StringVar(self, value="--")
@@ -632,7 +673,7 @@ class PowerSupplyInterface(ttk.Frame):
 
     def _build_ui(self):
         sidebar, main = ui_style.build_sidebar_layout(self)
-        main.rowconfigure(2, weight=1)
+        main.rowconfigure(3, weight=1)
         # Trailing empty row keeps content packed at the top.
         sidebar.rowconfigure(4, weight=1)
 
@@ -662,6 +703,9 @@ class PowerSupplyInterface(ttk.Frame):
             ("Active setpoint:", self.active_var),
             ("Group:", self.group_var),
         ], start_row=1)
+        ttk.Checkbutton(
+            crate, text="Turn all channels off if any trips", variable=self.trip_all_off_var
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 1))
 
         self._grid_card = ui_style.build_card(main, 0, "Channels", sticky="new")
         self._group_card = ui_style.build_card(main, 1, "Groups", sticky="new")
@@ -674,7 +718,9 @@ class PowerSupplyInterface(ttk.Frame):
             self._grid_card, 1, [("Toggle All", self._toggle_all_channels)], pady=(0, 8)
         )
 
-        log_card = ui_style.build_card(main, 2, "Activity", pady=8)
+        self._build_preset_card(main, 2)
+
+        log_card = ui_style.build_card(main, 3, "Activity", pady=8)
         log_card.rowconfigure(0, weight=1)
         log_card.columnconfigure(0, weight=1)
         self.log = tk.Text(log_card, height=6, wrap="word", font=("TkFixedFont", 9))
@@ -778,6 +824,8 @@ class PowerSupplyInterface(ttk.Frame):
         # Drop the last reading so a reconnect can't settle a group against
         # whatever the crate showed before the port was closed.
         self._status_snapshot = (float("-inf"), {})
+        self._trip_off_pending = {}
+        self._sequence_stop.set()
         if self.worker is not None:
             self.worker.stop_now()
             self.worker = None
@@ -1013,6 +1061,220 @@ class PowerSupplyInterface(ttk.Frame):
         for ch, value in targets.items():
             self.rows[ch].v0_var.set(_format_setpoint(value))
 
+    # -- preset power-up / power-down sequence --
+    #
+    # Power On: set CH00-CH03 to the repeller (CH02) voltage times their
+    # captured ratios and turn them on; then raise CH09 only as far as
+    # CH08's V0, turn CH08 on, and only then take CH09 to its full voltage,
+    # so the CH08/CH09 pair never sees more than (full - CH08) across it.
+    # Power Off runs the same steps backwards. Each step waits for VMON to
+    # settle before the next one starts.
+
+    PRESET_STACK = ("CH00", "CH01", "CH02", "CH03")
+    PRESET_LEAD = "CH02"    # the repeller: the one voltage typed in
+    PRESET_LOWER = "CH08"
+    PRESET_UPPER = "CH09"
+    PRESET_RATIOS_KEY = "power_supply.preset_ratios"
+    PRESET_STEP_TIMEOUT = 900.0  # s per step; slow ramps on kV channels take minutes
+
+    def _build_preset_card(self, parent, row):
+        card = ui_style.build_card(parent, row, "Power On / Off Sequence", sticky="new")
+        form = ttk.Frame(card)
+        form.grid(row=0, column=0, sticky="ew")
+
+        ttk.Label(form, text=f"Repeller ({self.PRESET_LEAD}) V0:").grid(row=0, column=0, sticky="w", padx=(6, 4), pady=2)
+        repeller_entry = ttk.Entry(form, textvariable=self.preset_repeller_var, width=8, justify="right")
+        repeller_entry.grid(row=0, column=1, padx=2, pady=2)
+        ttk.Label(form, text=f"{self.PRESET_UPPER} full V0:").grid(row=0, column=2, sticky="w", padx=(12, 4), pady=2)
+        ttk.Entry(form, textvariable=self.preset_full_var, width=8, justify="right").grid(
+            row=0, column=3, padx=2, pady=2
+        )
+
+        ttk.Label(form, text="Ratios:").grid(row=1, column=0, sticky="w", padx=(6, 4), pady=2)
+        self._preset_ratio_label = ttk.Label(form, textvariable=self.preset_ratio_var)
+        self._preset_ratio_label.grid(row=1, column=1, columnspan=3, sticky="w", padx=2, pady=2)
+        ttk.Label(form, text="Sequence:").grid(row=2, column=0, sticky="w", padx=(6, 4), pady=2)
+        ttk.Label(form, textvariable=self.preset_state_var).grid(
+            row=2, column=1, columnspan=3, sticky="w", padx=2, pady=2
+        )
+        self._refresh_preset_ratio_label()
+
+        ui_style.build_button_bar(card, 1, [
+            ("Power On", lambda: self._start_sequence("on")),
+            ("Power Off", lambda: self._start_sequence("off")),
+            ("Stop Sequence", self._stop_sequence),
+            ("Capture Ratios", self._capture_preset_ratios),
+        ], pady=(4, 4))
+
+        ui_style.add_note(
+            card, 2,
+            f"Power On sets {', '.join(self.PRESET_STACK)} to the repeller V0 scaled by the captured ratios and "
+            f"turns them on, then raises {self.PRESET_UPPER} to {self.PRESET_LOWER}'s V0, turns {self.PRESET_LOWER} "
+            f"on, and finally takes {self.PRESET_UPPER} to its full V0. Power Off runs the same steps in reverse. "
+            "Each step waits for the voltages to settle. Capture Ratios records the current V0 set values of "
+            f"{', '.join(self.PRESET_STACK)} as ratios to {self.PRESET_LEAD}. Stop Sequence halts between "
+            "steps and leaves the channels where they are.",
+            pady=(2, 4),
+        )
+
+    def _stored_preset_ratios(self):
+        stored = app_settings.get(self.PRESET_RATIOS_KEY) or {}
+        if set(stored) != set(self.PRESET_STACK):
+            return None
+        return stored
+
+    def _refresh_preset_ratio_label(self):
+        ratios = self._stored_preset_ratios()
+        if ratios is None:
+            self.preset_ratio_var.set("Not captured")
+            self._preset_ratio_label.config(foreground=ui_style.WARNING)
+        else:
+            self.preset_ratio_var.set(
+                " : ".join(f"{ch} {ratios[ch]:.4g}" for ch in self.PRESET_STACK)
+            )
+            self._preset_ratio_label.config(foreground="#000")
+
+    def _capture_preset_ratios(self):
+        missing = [ch for ch in self.PRESET_STACK if ch not in self.rows]
+        if missing:
+            self._log(f"Sequence: add {', '.join(missing)} to the Channels list to capture ratios.")
+            return
+        try:
+            values = {ch: float(self.rows[ch].v0_var.get()) for ch in self.PRESET_STACK}
+        except ValueError:
+            self._log(f"Sequence: {', '.join(self.PRESET_STACK)} all need a numeric V0 set value to capture ratios.")
+            return
+        lead = values[self.PRESET_LEAD]
+        if lead <= 0:
+            self._log(f"Sequence: {self._channel_label(self.PRESET_LEAD)} needs a V0 above 0 to capture ratios.")
+            return
+        ratios = {ch: values[ch] / lead for ch in self.PRESET_STACK}
+        app_settings.set(self.PRESET_RATIOS_KEY, ratios)
+        self.preset_repeller_var.set(_format_setpoint(lead))
+        self._refresh_preset_ratio_label()
+        self._log("Sequence: captured ratios " + ", ".join(f"{ch} {ratios[ch]:.4g}" for ch in self.PRESET_STACK))
+
+    def _start_sequence(self, direction):
+        if self._sequence_thread is not None and self._sequence_thread.is_alive():
+            self._log("Sequence: already running -- stop it first.")
+            return
+        if self.worker is None:
+            self._log("Not connected -- connect first.")
+            return
+        stamp, channels = self.status_snapshot()
+        needed = self.PRESET_STACK + (self.PRESET_LOWER, self.PRESET_UPPER)
+        missing = [ch for ch in needed if ch not in channels]
+        if stamp == float("-inf") or missing:
+            self._log(f"Sequence: no status read yet for {', '.join(missing) or 'the crate'}.")
+            return
+        try:
+            lower_v0 = float(channels[self.PRESET_LOWER].get("v0", ""))
+        except ValueError:
+            self._log(f"Sequence: couldn't read {self.PRESET_LOWER}'s V0.")
+            return
+
+        if direction == "on":
+            try:
+                full_v0 = float(self.preset_full_var.get())
+            except ValueError:
+                self._log(f"Sequence: enter a numeric {self.PRESET_UPPER} full V0.")
+                return
+            if full_v0 < lower_v0:
+                self._log(f"Sequence: {self.PRESET_UPPER} full V0 ({_format_setpoint(full_v0)}) is below "
+                          f"{self.PRESET_LOWER}'s V0 ({_format_setpoint(lower_v0)}).")
+                return
+            ratios = self._stored_preset_ratios()
+            if ratios is None:
+                self._log("Sequence: capture ratios first.")
+                return
+            try:
+                repeller = float(self.preset_repeller_var.get())
+            except ValueError:
+                self._log("Sequence: enter a numeric repeller V0.")
+                return
+            if repeller < 0:
+                self._log("Sequence: repeller V0 can't be negative.")
+                return
+            stack = {ch: float(_format_setpoint(repeller * ratios[ch])) for ch in self.PRESET_STACK}
+            steps = self._power_on_steps(stack, lower_v0, full_v0)
+        else:
+            steps = self._power_off_steps(lower_v0)
+
+        self._sequence_stop.clear()
+        self._sequence_thread = threading.Thread(
+            target=self._run_sequence, args=(direction, steps), daemon=True
+        )
+        self._sequence_thread.start()
+
+    def _power_on_steps(self, stack, lower_v0, full_v0):
+        """[(description, {channel: V0 to write}, {channel: "ON"/"OFF"},
+        {channel: VMON to wait for})] for Power On."""
+        upper, lower = self.PRESET_UPPER, self.PRESET_LOWER
+        return [
+            (f"{', '.join(stack)} on", stack, {ch: "ON" for ch in stack}, stack),
+            (f"{upper} up to {lower}'s V0", {upper: lower_v0}, {upper: "ON"}, {upper: lower_v0}),
+            (f"{lower} on", {}, {lower: "ON"}, {lower: lower_v0}),
+            (f"{upper} up to full V0", {upper: full_v0}, {}, {upper: full_v0}),
+        ]
+
+    def _power_off_steps(self, lower_v0):
+        """The Power On steps backwards (see _power_on_steps)."""
+        upper, lower = self.PRESET_UPPER, self.PRESET_LOWER
+        stack = self.PRESET_STACK
+        return [
+            (f"{upper} down to {lower}'s V0", {upper: lower_v0}, {}, {upper: lower_v0}),
+            (f"{lower} off", {}, {lower: "OFF"}, {lower: 0.0}),
+            (f"{upper} off", {}, {upper: "OFF"}, {upper: 0.0}),
+            (f"{', '.join(stack)} off", {}, {ch: "OFF" for ch in stack}, {ch: 0.0 for ch in stack}),
+        ]
+
+    def _run_sequence(self, direction, steps):
+        try:
+            self._run_sequence_steps(direction, steps)
+        except Exception as e:
+            self._finish_sequence(f"Power {direction.capitalize()}: failed: {e}")
+
+    def _run_sequence_steps(self, direction, steps):
+        """Sequence thread body. Touches no widget: writes go through the
+        worker's queue, messages through log_q, progress through
+        _sequence_step (shown by _poll_queues)."""
+        title = f"Power {direction.capitalize()}"
+        self.log_q.put(f"{title}: starting")
+        for n, (what, writes, states, targets) in enumerate(steps, start=1):
+            self._sequence_step = f"{title} {n}/{len(steps)}: {what}..."
+            worker = self.worker
+            if worker is None:
+                self._finish_sequence(f"{title}: stopped at step {n} -- disconnected.")
+                return
+            requested_at = time.monotonic()
+            for ch, v0 in writes.items():
+                worker.queue_write(ch, {"v0": _format_setpoint(v0)})
+            _stamp, channels = self.status_snapshot()
+            for ch, desired in states.items():
+                current = channels.get(ch, {}).get("status", "")
+                if desired == "ON" and current in ChannelRow._OFF_LIKE:
+                    worker.queue_status_toggle(ch)
+                elif desired == "OFF" and current in ChannelRow._ON_LIKE:
+                    worker.queue_status_toggle(ch)
+                elif current not in ChannelRow._ON_LIKE | ChannelRow._OFF_LIKE:
+                    self._finish_sequence(f"{title}: stopped at step {n} -- {ch} status unknown ({current!r}).")
+                    return
+            self.log_q.put(f"{title} {n}/{len(steps)}: {what}")
+            if not wait_for_vmon(self.status_snapshot, targets, requested_at,
+                                 self.PRESET_STEP_TIMEOUT, self._sequence_stop):
+                reason = "stopped" if self._sequence_stop.is_set() else "timed out waiting for the voltages to settle"
+                self._finish_sequence(f"{title}: {reason} at step {n} ({what}).")
+                return
+        self._finish_sequence(f"{title}: done.")
+
+    def _finish_sequence(self, message):
+        self.log_q.put(message)
+        self._sequence_step = message
+
+    def _stop_sequence(self):
+        if self._sequence_thread is not None and self._sequence_thread.is_alive():
+            self._sequence_stop.set()
+
     # -- driving a group from another thread --
 
     def group_names(self):
@@ -1072,10 +1334,27 @@ class PowerSupplyInterface(ttk.Frame):
         except queue.Empty:
             pass
 
+        self.preset_state_var.set(self._sequence_step)
         self.after(self.POLL_MS, self._poll_queues)
 
     def _apply_status(self, header, data):
+        previous = self._status_snapshot[1]
         self._status_snapshot = (time.monotonic(), data)
+
+        # Keep the boxes that mirror a channel's V0 (each group's Lead V0,
+        # the sequence's repeller V0) in step with the device whenever that
+        # V0 changes, just like the channel table's own set boxes.
+        changed = {
+            ch for ch, fields in data.items()
+            if fields.get("v0") and fields.get("v0") != previous.get(ch, {}).get("v0")
+        }
+        if changed:
+            for group, members in self._groups().items():
+                if members[0] in changed and group in self._group_lead_vars:
+                    self._group_lead_vars[group].set(data[members[0]]["v0"])
+            if self.PRESET_LEAD in changed:
+                self.preset_repeller_var.set(data[self.PRESET_LEAD]["v0"])
+
         if "hv_enable" in header:
             state = header["hv_enable"]
             self.hv_enable_var.set(state)
@@ -1089,7 +1368,56 @@ class PowerSupplyInterface(ttk.Frame):
             if ch in data:
                 row.update(data[ch])
 
+        self._check_trips(previous, data)
+
         self.status_var.set(f"Last update: {time.strftime('%H:%M:%S')}")
+
+    # -- trip interlock --
+
+    # How long an interlock OFF toggle may go without the channel reading
+    # OFF before it's forgotten and may be queued again.
+    TRIP_OFF_PENDING_TIMEOUT = 30.0
+
+    def _check_trips(self, previous, data):
+        """If the interlock is enabled and a channel has just gone to TRIP
+        (it read something else on the previous status read), turn every
+        channel that's still on off and stop any running power sequence.
+        A channel already tripped when we connect doesn't fire it -- only a
+        trip seen happening does."""
+        now = time.monotonic()
+        for ch, fields in data.items():
+            st = fields.get("status", "")
+            sent = self._trip_off_pending.get(ch)
+            if sent is not None and (st in ChannelRow._OFF_LIKE or now - sent > self.TRIP_OFF_PENDING_TIMEOUT):
+                del self._trip_off_pending[ch]
+
+        tripped = [
+            ch for ch, fields in data.items()
+            if fields.get("status") == "TRIP"
+            and previous.get(ch, {}).get("status") not in (None, "", "TRIP")
+        ]
+        if not tripped:
+            return
+        names = ", ".join(self._channel_label(ch) for ch in tripped)
+        if not self.trip_all_off_var.get():
+            self._log(f"TRIP: {names}.")
+            return
+        if self.worker is None:
+            return
+
+        self._stop_sequence()
+        to_turn_off = [
+            ch for ch in self.rows
+            if data.get(ch, {}).get("status") in ChannelRow._ON_LIKE and ch not in self._trip_off_pending
+        ]
+        for ch in to_turn_off:
+            self.worker.queue_status_toggle(ch)
+            self._trip_off_pending[ch] = now
+        if to_turn_off:
+            turned = ", ".join(self._channel_label(ch) for ch in to_turn_off)
+            self._log(f"TRIP: {names} -- turning all channels off ({turned}).")
+        else:
+            self._log(f"TRIP: {names} -- no other channels left to turn off.")
 
     # -- log helpers --
 
