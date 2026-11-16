@@ -39,6 +39,7 @@ from tpx_processing import (  # noqa: E402
     classify_tdcs,
     decode_tpx3,
     get_min_cluster_size,
+    seam_pairs,
 )
 from timewalk import apply_timewalk_correction  # noqa: E402
 
@@ -81,16 +82,19 @@ def local_lookup(layout):
     return chip, col
 
 
-def cluster_like_production(t, x, y, pulses, size, min_size):
+def cluster_like_production(t, x, y, pulses, layout, min_size):
     """Same rule as tpx_processing.cluster_hits: within one trigger period,
     hits on edge-touching pixels (and repeat hits on one pixel) form a
-    cluster; clusters with fewer than min_size hits are dropped. Returns
+    cluster, with facing chip edges touching across the gap between chips
+    (tpx_processing.seam_pairs); clusters with fewer than min_size hits are
+    dropped. Returns
     (hit index kept, cluster id per kept hit, pulse index per cluster, t
     relative to the pulse per kept hit)."""
     pidx = np.searchsorted(pulses, t, side="right") - 1
     ok = pidx >= 0
     hit = np.nonzero(ok)[0]
     pidx = pidx[ok]
+    size = layout.size
     keys = (pidx.astype(np.int64) * size + x[ok]) * size + y[ok]
     ukeys, node = np.unique(keys, return_inverse=True)
     yy = ukeys % size
@@ -101,7 +105,8 @@ def cluster_like_production(t, x, y, pulses, size, min_size):
         pos = np.clip(np.searchsorted(ukeys, nb), 0, len(ukeys) - 1)
         hitmask = valid & (ukeys[pos] == nb)
         edges.append(np.c_[np.nonzero(hitmask)[0], pos[hitmask]])
-    e = np.vstack(edges) if edges else np.zeros((0, 2), int)
+    edges.append(np.c_[seam_pairs(ukeys, size, 0, 0, layout)])
+    e = np.vstack(edges)
     g = coo_matrix((np.ones(len(e)), (e[:, 0], e[:, 1])), shape=(len(ukeys), len(ukeys)))
     _, label = connected_components(g, directed=False)
     hl = label[node]
@@ -148,7 +153,7 @@ def load_fit_file(path, layout, chip_map, col_map, mapping, reference, min_size,
     y = pixels.y.astype(np.int64)
     tot = pixels.tot.astype(np.int64)
     del pixels
-    hit, cid, cl_pulse, t_rel = cluster_like_production(t, x, y, pulses, layout.size, min_size)
+    hit, cid, cl_pulse, t_rel = cluster_like_production(t, x, y, pulses, layout, min_size)
     first = np.full(cl_pulse.shape[0], np.inf)
     np.minimum.at(first, cid, t_rel)
     ok, j, delay = match_reference(pulses[cl_pulse] + first, ref, delay)

@@ -18,6 +18,7 @@ this way joins the four chips' hits into one continuous round detector
 image, while any other reading leaves it split at the chip edges.
 """
 import dataclasses
+import json
 from typing import List
 
 import numpy as np
@@ -175,6 +176,26 @@ def fetch_from_serval(server, timeout=5):
     response = serval_client.SESSION.get(f"{server}/detector/layout", timeout=timeout)
     response.raise_for_status()
     return ChipLayout.from_serval(response.json())
+
+
+def chip_index_map(layout):
+    """Canvas-sized int16 array: the chip each canvas pixel belongs to, -1
+    where no chip's tile covers it (e.g. a gap left between tiles)."""
+    key = json.dumps(layout.to_dict(), sort_keys=True)
+    cached = _CHIP_MAP_CACHE.get(key)
+    if cached is None:
+        w = max([layout.width] + [p.x + CHIP_SIZE for p in layout.chips])
+        h = max([layout.height] + [p.y + CHIP_SIZE for p in layout.chips])
+        cached = np.full((w, h), -1, dtype=np.int16)
+        for p in layout.chips:
+            cached[max(p.x, 0):p.x + CHIP_SIZE, max(p.y, 0):p.y + CHIP_SIZE] = p.chip
+        cached.setflags(write=False)
+        _CHIP_MAP_CACHE.clear()
+        _CHIP_MAP_CACHE[key] = cached
+    return cached
+
+
+_CHIP_MAP_CACHE = {}
 
 
 def apply_layout(layout, chips, x, y):

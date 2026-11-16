@@ -37,6 +37,14 @@ MIN_CLUSTER_SIZE_KEY = "clustering.min_size"
 MIN_CLUSTER_SIZE_ATTR = "Min Cluster Size (hits)"
 
 
+# Insensitive pixels between neighbouring chips of a multi-chip detector.
+# Clustering treats two hits in the same row (or column) on facing chip
+# edges as touching when at most this many pixels separate them, so a
+# cluster that falls across a chip boundary stays one cluster -- whether
+# the layout leaves that gap empty on the canvas or abuts the tiles.
+CHIP_GAP_PX = 2
+
+
 def get_min_cluster_size() -> int:
     """The saved minimum cluster size (hits), or the default if it's unset
     or not a whole number >= 1."""
@@ -424,10 +432,63 @@ def build_frame_events(pixels: PixelHits, tdcs: TdcHits, mapping, min_size: int 
     return events, int(clusters["n"].sum()), len(clusters["n"])
 
 
-def cluster_hits(pulse_idx, x, y, t_rel, tot, min_size: int = None, t_jitter_ns: float = None, timing=None):
+def seam_pairs(nodes, span, lo_x, lo_y, layout=None, gap=CHIP_GAP_PX):
+    """Extra cluster-graph edges across the gaps between chips.
+
+    `nodes` are sorted unique keys (pulse * span + x - lo_x) * span + y - lo_y
+    of canvas pixels. Returns (src, dst) node indices linking every pixel to
+    the pixel 2..gap+1 steps along +x or +y from it when the two sit on
+    different chips -- i.e. facing chip edges, bridged across the gap. (A
+    1-step neighbour is an ordinary edge the caller already links.)"""
+    empty = np.zeros(0, dtype=np.int64)
+    if layout is None:
+        layout = chip_layout.get_active_layout()
+    if gap < 1 or len(layout.chips) < 2 or len(nodes) == 0:
+        return empty, empty
+    chip_map = chip_layout.chip_index_map(layout)
+    w, h = chip_map.shape
+    reach = gap + 1
+    # Only pixels within `reach` of a chip edge can link across a gap.
+    near = np.zeros((w, h), dtype=bool)
+    for d in range(2, reach + 1):
+        near[:-d, :] |= (chip_map[:-d, :] >= 0) & (chip_map[d:, :] >= 0) & (chip_map[:-d, :] != chip_map[d:, :])
+        near[:, :-d] |= (chip_map[:, :-d] >= 0) & (chip_map[:, d:] >= 0) & (chip_map[:, :-d] != chip_map[:, d:])
+    ny = nodes % span + lo_y
+    nx = (nodes // span) % span + lo_x
+    inside = (nx >= 0) & (nx < w) & (ny >= 0) & (ny < h)
+    cand = np.nonzero(inside)[0]
+    cand = cand[near[nx[cand], ny[cand]]]
+    if len(cand) == 0:
+        return empty, empty
+    cx, cy, ckey = nx[cand], ny[cand], nodes[cand]
+    c_chip = chip_map[cx, cy]
+    srcs, dsts = [], []
+    for d in range(2, reach + 1):
+        for step, tx, ty in ((d * span, cx + d, cy), (d, cx, cy + d)):
+            # Stay inside the canvas and the key's x/y field, so a target
+            # key can't alias a pixel of another row or pulse.
+            ok = (tx < w) & (ty < h) & (tx - lo_x < span) & (ty - lo_y < span)
+            ok[ok] &= (chip_map[tx[ok], ty[ok]] >= 0) & (chip_map[tx[ok], ty[ok]] != c_chip[ok])
+            sel = np.nonzero(ok)[0]
+            if len(sel) == 0:
+                continue
+            target = ckey[sel] + step
+            pos = np.minimum(np.searchsorted(nodes, target), len(nodes) - 1)
+            match = nodes[pos] == target
+            srcs.append(cand[sel[match]])
+            dsts.append(pos[match])
+    if not srcs:
+        return empty, empty
+    return np.concatenate(srcs), np.concatenate(dsts)
+
+
+def cluster_hits(pulse_idx, x, y, t_rel, tot, min_size: int = None, t_jitter_ns: float = None, timing=None,
+                 layout=None):
     """Groups each pulse's pixel hits into clusters of touching pixels
     (4-neighbour connected within the same pulse; repeat hits on one pixel
-    all count) and keeps those with at least `min_size` hits (default
+    all count; pixels on facing edges of neighbouring chips touch across
+    the CHIP_GAP_PX gap between them, see seam_pairs, for `layout`, default
+    the active one) and keeps those with at least `min_size` hits (default
     get_min_cluster_size()). Positions and ToT are ToT-weighted means
     (plain means if a cluster's ToT sums to zero).
 
@@ -456,9 +517,10 @@ def cluster_hits(pulse_idx, x, y, t_rel, tot, min_size: int = None, t_jitter_ns:
     y = np.asarray(y)
     pulse_idx = np.asarray(pulse_idx, dtype=np.int64)
     # One integer key per (pulse, x, y); `span` leaves room for x+1 / y+1
-    # without spilling into the next row or pulse.
+    # (and the seam_pairs reach across a chip gap) without spilling into
+    # the next row or pulse.
     lo_x, lo_y = int(x.min()), int(y.min())
-    span = int(max(int(x.max()) - lo_x, int(y.max()) - lo_y)) + 2
+    span = int(max(int(x.max()) - lo_x, int(y.max()) - lo_y)) + CHIP_GAP_PX + 2
     key = (pulse_idx * span + (x - lo_x)) * span + (y - lo_y)
 
     # Unique (pulse, pixel) nodes, and each hit's node. A stable (timsort)
@@ -486,9 +548,10 @@ def cluster_hits(pulse_idx, x, y, t_rel, tot, min_size: int = None, t_jitter_ns:
     merged = merged[merge_order]
     pair = np.nonzero(merged[1:] == merged[:-1])[0]
     del merged
-    src = np.concatenate([y_src, merge_order[pair + 1] - n_nodes])
-    dst = np.concatenate([y_src + 1, merge_order[pair]])
-    del merge_order, pair, y_src
+    seam_src, seam_dst = seam_pairs(nodes, span, lo_x, lo_y, layout)
+    src = np.concatenate([y_src, merge_order[pair + 1] - n_nodes, seam_src])
+    dst = np.concatenate([y_src + 1, merge_order[pair], seam_dst])
+    del merge_order, pair, y_src, seam_src, seam_dst
     graph = coo_matrix((np.ones(len(src), dtype=np.int8), (src, dst)), shape=(n_nodes, n_nodes)).tocsr()
     n_comp, node_label = connected_components(graph, directed=False)
     del graph, src, dst
