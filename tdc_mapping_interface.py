@@ -65,7 +65,10 @@ class TdcMappingInterface(ttk.Frame):
             "pulse can share one FPGA TDC channel this way. Set a ringing holdoff to drop pulses "
             "that start within that many ns after the previous pulse on the same line ended -- a "
             "signal ringing back across threshold -- before the gate is applied; leave it blank "
-            "to keep every pulse. These settings apply everywhere "
+            "to keep every pulse. Dither adds a random offset, uniform between 0 and the width "
+            "given, to every time on that signal to smooth out the TDC's time steps (FPGA TDC: "
+            "~0.260 ns, PicoTDC: ~0.003 ns); it's on for e-ToF and i-ToF by default and off for "
+            "the pulse trigger. These settings apply everywhere "
             "(Monitored Acquisition, Analysis > conversion, Diagnostics, Timewalk Calibration, "
             "Parameter Sweep) and are saved as you edit them -- the \"tpx to h5\" raw dump is "
             "unaffected, since it already keeps every hit's own channel and edge.",
@@ -108,10 +111,17 @@ class TdcMappingInterface(ttk.Frame):
             self, tk.StringVar, f"tdc_mapping.{name}.ring_holdoff_ns",
             "" if default.ring_holdoff_ns is None else str(default.ring_holdoff_ns),
         )
+        dither_var = app_settings.persistent_var(
+            self, tk.BooleanVar, f"tdc_mapping.{name}.dither", default.dither
+        )
+        dither_ns_var = app_settings.persistent_var(
+            self, tk.StringVar, f"tdc_mapping.{name}.dither_ns", f"{default.dither_ns:g}"
+        )
         self._vars[name] = {
             "family": family_var, "channel": channel_var, "time_edge": edge_var,
             "gate_min_ns": gate_min_var, "gate_max_ns": gate_max_var,
             "ring_holdoff_ns": ring_holdoff_var,
+            "dither": dither_var, "dither_ns": dither_ns_var,
         }
 
         row = 0
@@ -170,6 +180,12 @@ class TdcMappingInterface(ttk.Frame):
             section, row + 4, "Ringing holdoff (ns):", ttk.Entry(section, textvariable=ring_holdoff_var),
         )
 
+        dither_row = ttk.Frame(section)
+        dither_row.columnconfigure(1, weight=1)
+        ttk.Checkbutton(dither_row, text="On, width:", variable=dither_var).grid(row=0, column=0, sticky="w")
+        ttk.Entry(dither_row, textvariable=dither_ns_var).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ui_style.add_form_row(section, row + 5, "Dither (ns):", dither_row)
+
     # ---- presets ------------------------------------------------------------
 
     def _current_mapping(self):
@@ -183,6 +199,8 @@ class TdcMappingInterface(ttk.Frame):
                 gate_max_ns=tdc_mapping.parse_optional_float(v["gate_max_ns"].get()),
                 enabled=v["enabled"].get() if "enabled" in v else True,
                 ring_holdoff_ns=tdc_mapping.parse_optional_float(v["ring_holdoff_ns"].get()),
+                dither=bool(v["dither"].get()),
+                dither_ns=tdc_mapping.parse_dither_ns(v["dither_ns"].get()),
             )
         return tdc_mapping.TdcMapping(**signals)
 
@@ -197,6 +215,8 @@ class TdcMappingInterface(ttk.Frame):
             v["gate_min_ns"].set("" if signal.gate_min_ns is None else str(signal.gate_min_ns))
             v["gate_max_ns"].set("" if signal.gate_max_ns is None else str(signal.gate_max_ns))
             v["ring_holdoff_ns"].set("" if signal.ring_holdoff_ns is None else str(signal.ring_holdoff_ns))
+            v["dither"].set(signal.dither)
+            v["dither_ns"].set(f"{signal.dither_ns:g}")
             if "enabled" in v:
                 v["enabled"].set(signal.enabled)
 

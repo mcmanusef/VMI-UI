@@ -25,9 +25,10 @@ PIXEL_RES_NS = 25 / 16
 # same period so pulses and pixels line up.
 TIME_ROLLOVER_NS = (1 << 34) * PIXEL_RES_NS
 
-# Dither widths used to smear out the quantization of the raw timestamps.
-TDC_JITTER_NS = 0.26          # applied to every e-ToF and i-ToF time
-CLUSTER_T_JITTER_NS = 1.56    # applied to every cluster time
+# Dither width used to smear out the quantization of cluster times. (TDC
+# times are dithered per signal, as set in the TDC mapping -- see
+# tdc_mapping.SignalMapping.dither / dither_ns.)
+CLUSTER_T_JITTER_NS = 1.56
 
 # Clusters with fewer hits than this are dropped. User-editable (the
 # "Min cluster size" field, shared across tabs) and saved under this key.
@@ -304,7 +305,7 @@ def _ringing_mask(edge, t, holdoff_ns):
     return flagged
 
 
-def classify_tdcs(tdcs: TdcHits, mapping, jitter_ns: float = TDC_JITTER_NS):
+def classify_tdcs(tdcs: TdcHits, mapping, jitter_ns: float = None):
     """Splits TdcHits into (etof, itof, pulses) time arrays per `mapping`
     (a tdc_mapping.TdcMapping); pulses come back sorted.
 
@@ -319,7 +320,12 @@ def classify_tdcs(tdcs: TdcHits, mapping, jitter_ns: float = TDC_JITTER_NS):
 
     A signal with a ring_holdoff_ns drops every pulse (or, ungated, every
     edge) that starts within that long after the previous pulse on its
-    line ended -- see _ringing_mask. This runs before the width gate."""
+    line ended -- see _ringing_mask. This runs before the width gate.
+
+    Each signal's times get its own dither (signal.effective_dither_ns: a
+    uniform offset in [0, width), none if switched off); a `jitter_ns`
+    given here instead dithers e-ToF and i-ToF by that width and leaves
+    the pulses undithered."""
 
     def resolve(signal):
         if not signal.enabled:
@@ -345,9 +351,13 @@ def classify_tdcs(tdcs: TdcHits, mapping, jitter_ns: float = TDC_JITTER_NS):
         keep = (width >= lo) & (width <= hi) & ~ringing[starts]
         return start_t[keep] if signal.time_edge == "rising" else end_t[keep]
 
-    pulses = np.sort(resolve(mapping.pulse_trigger))
-    etof = apply_jitter(resolve(mapping.etof), jitter_ns)
-    itof = apply_jitter(resolve(mapping.itof), jitter_ns)
+    def width(signal):
+        return signal.effective_dither_ns if jitter_ns is None else jitter_ns
+
+    pulse_width = mapping.pulse_trigger.effective_dither_ns if jitter_ns is None else 0.0
+    pulses = np.sort(apply_jitter(resolve(mapping.pulse_trigger), pulse_width))
+    etof = apply_jitter(resolve(mapping.etof), width(mapping.etof))
+    itof = apply_jitter(resolve(mapping.itof), width(mapping.itof))
     return etof, itof, pulses
 
 

@@ -22,6 +22,11 @@ edge) that starts less than ring_holdoff_ns after the previous pulse on the
 same line ended is taken to be that pulse ringing back across threshold and
 is dropped -- before the width gate, so ringing after a long trigger pulse
 can't pass for a short i-ToF pulse sharing its line.
+
+Each signal can also be dithered: a uniform random offset in
+[0, dither_ns) added to every time it yields, to smear out the TDC's
+quantization (the FPGA TDC's step is ~0.260 ns, the PicoTDC's ~3 ps). On
+by default for e-ToF and i-ToF, off for the pulse trigger.
 """
 import dataclasses
 import json
@@ -49,6 +54,9 @@ FPGA_TDC_SUBTYPES = {
     0xE: (2, 1),
     0xB: (2, 0),
 }
+
+# Default dither width: about one FPGA TDC step.
+DEFAULT_DITHER_NS = 0.26
 
 _SIGNAL_NAMES = ("pulse_trigger", "etof", "itof")
 # Signals the user may switch off; the pulse trigger is always required.
@@ -80,6 +88,14 @@ class SignalMapping:
     # Drop pulses starting less than this long after the previous pulse on
     # the line ended (ringing). None = keep everything.
     ring_holdoff_ns: Optional[float] = None
+    # Add a uniform random offset in [0, dither_ns) to every time.
+    dither: bool = True
+    dither_ns: float = DEFAULT_DITHER_NS
+
+    @property
+    def effective_dither_ns(self):
+        """The dither width actually applied (0 when dithering is off)."""
+        return self.dither_ns if self.dither and self.dither_ns > 0 else 0.0
 
     def to_dict(self):
         return {
@@ -89,10 +105,14 @@ class SignalMapping:
             "gate_max_ns": self.gate_max_ns,
             "enabled": self.enabled,
             "ring_holdoff_ns": self.ring_holdoff_ns,
+            "dither": self.dither,
+            "dither_ns": self.dither_ns,
         }
 
     @classmethod
-    def from_dict(cls, d):
+    def from_dict(cls, d, default=None):
+        """`default` (a SignalMapping) fills fields older presets lack."""
+        default = default or cls(source=TdcSource.from_dict(d["source"]))
         return cls(
             source=TdcSource.from_dict(d["source"]),
             time_edge=d.get("time_edge", "rising"),
@@ -100,6 +120,8 @@ class SignalMapping:
             gate_max_ns=d.get("gate_max_ns"),
             enabled=bool(d.get("enabled", True)),
             ring_holdoff_ns=d.get("ring_holdoff_ns"),
+            dither=bool(d.get("dither", default.dither)),
+            dither_ns=parse_dither_ns(d.get("dither_ns"), default.dither_ns),
         )
 
 
@@ -114,7 +136,8 @@ class TdcMapping:
 
     @classmethod
     def from_dict(cls, d):
-        return cls(**{name: SignalMapping.from_dict(d[name]) for name in _SIGNAL_NAMES})
+        defaults = default_mapping()
+        return cls(**{name: SignalMapping.from_dict(d[name], getattr(defaults, name)) for name in _SIGNAL_NAMES})
 
     def save(self, path):
         pathlib.Path(path).write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
@@ -130,7 +153,7 @@ def default_mapping():
     TdcMapping -- the out-of-the-box default so nothing changes until a user
     edits the "tdc mapping" Hardware tab."""
     return TdcMapping(
-        pulse_trigger=SignalMapping(TdcSource(FAMILY_FPGA_TDC, 1), "rising", 300.0, None),
+        pulse_trigger=SignalMapping(TdcSource(FAMILY_FPGA_TDC, 1), "rising", 300.0, None, dither=False),
         etof=SignalMapping(TdcSource(FAMILY_FPGA_TDC, 2), "rising", None, None),
         itof=SignalMapping(TdcSource(FAMILY_FPGA_TDC, 1), "rising", 0.0, 300.0),
     )
@@ -148,6 +171,13 @@ def parse_optional_float(value):
         return float(text)
     except ValueError:
         return None
+
+
+def parse_dither_ns(value, default=DEFAULT_DITHER_NS):
+    """A dither width as stored by the Hardware tab's entry (text) or as a
+    number -> float >= 0, or `default` if blank/invalid/negative."""
+    width = parse_optional_float(value)
+    return default if width is None or width < 0 else width
 
 
 def _settings_key(signal_name, field):
@@ -179,6 +209,10 @@ def get_active_mapping():
             or bool(app_settings.get(_settings_key(name, "enabled"), default_signal.enabled)),
             ring_holdoff_ns=parse_optional_float(
                 app_settings.get(_settings_key(name, "ring_holdoff_ns"), default_signal.ring_holdoff_ns)
+            ),
+            dither=bool(app_settings.get(_settings_key(name, "dither"), default_signal.dither)),
+            dither_ns=parse_dither_ns(
+                app_settings.get(_settings_key(name, "dither_ns"), default_signal.dither_ns), default_signal.dither_ns
             ),
         )
     return TdcMapping(**signals)
