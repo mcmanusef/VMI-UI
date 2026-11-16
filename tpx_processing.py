@@ -275,6 +275,27 @@ def apply_jitter(values, width):
     return arr + np.random.random(arr.shape) * width
 
 
+def _ringing_mask(edge, t, holdoff_ns):
+    """True for each edge on one TDC line (in file order) that comes less
+    than `holdoff_ns` after the line's previous falling edge -- i.e. the
+    signal re-crossing threshold as the pulse before it rings down. A
+    chain of rings is caught link by link, each against the ring before.
+    A line that only records rising edges is checked against the previous
+    rising edge instead. No holdoff -> nothing flagged."""
+    flagged = np.zeros(len(t), dtype=bool)
+    if not holdoff_ns or holdoff_ns <= 0 or len(t) < 2:
+        return flagged
+    ref_edge = 0 if np.any(edge == 0) else 1
+    # Index of the latest reference edge strictly before each edge (-1 = none).
+    ref_idx = np.where(edge == ref_edge, np.arange(len(t)), -1)
+    prev = np.maximum.accumulate(ref_idx)[:-1]
+    has_prev = prev >= 0
+    gap = t[1:] - t[np.maximum(prev, 0)]
+    # gap < 0 only across a timestamp rollover; never call that ringing.
+    flagged[1:] = has_prev & (gap >= 0) & (gap < holdoff_ns)
+    return flagged
+
+
 def classify_tdcs(tdcs: TdcHits, mapping, jitter_ns: float = TDC_JITTER_NS):
     """Splits TdcHits into (etof, itof, pulses) time arrays per `mapping`
     (a tdc_mapping.TdcMapping); pulses come back sorted.
@@ -286,7 +307,11 @@ def classify_tdcs(tdcs: TdcHits, mapping, jitter_ns: float = TDC_JITTER_NS):
     (or end) time only when the resulting width falls in
     [gate_min_ns, gate_max_ns] -- so multiple signals can share one
     physical line and be told apart purely by pulse length (e.g. a long
-    trigger pulse vs a short i-ToF pulse on the same FPGA TDC channel)."""
+    trigger pulse vs a short i-ToF pulse on the same FPGA TDC channel).
+
+    A signal with a ring_holdoff_ns drops every pulse (or, ungated, every
+    edge) that starts within that long after the previous pulse on its
+    line ended -- see _ringing_mask. This runs before the width gate."""
 
     def resolve(signal):
         if not signal.enabled:
@@ -296,9 +321,10 @@ def classify_tdcs(tdcs: TdcHits, mapping, jitter_ns: float = TDC_JITTER_NS):
         )
         edge = tdcs.edge[on_line]
         t = tdcs.time_ns[on_line]
+        ringing = _ringing_mask(edge, t, signal.ring_holdoff_ns)
         if signal.gate_min_ns is None and signal.gate_max_ns is None:
             want_edge = 1 if signal.time_edge == "rising" else 0
-            return t[edge == want_edge]
+            return t[(edge == want_edge) & ~ringing]
         # A falling edge closes a pulse exactly when the hit before it on
         # the line is a rising edge (a later rising edge restarts the pulse;
         # a falling edge with no open pulse is ignored).
@@ -308,7 +334,7 @@ def classify_tdcs(tdcs: TdcHits, mapping, jitter_ns: float = TDC_JITTER_NS):
         width = end_t - start_t
         lo = signal.gate_min_ns if signal.gate_min_ns is not None else float("-inf")
         hi = signal.gate_max_ns if signal.gate_max_ns is not None else float("inf")
-        keep = (width >= lo) & (width <= hi)
+        keep = (width >= lo) & (width <= hi) & ~ringing[starts]
         return start_t[keep] if signal.time_edge == "rising" else end_t[keep]
 
     pulses = np.sort(resolve(mapping.pulse_trigger))

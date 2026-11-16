@@ -16,6 +16,12 @@ the next falling edge on the same line and kept only if the resulting
 width falls in [gate_min_ns, gate_max_ns] -- this is how e.g. a long
 trigger pulse and a short i-ToF pulse can share one physical FPGA TDC
 channel and still be told apart. See tpx_processing.classify_tdcs.
+
+A SignalMapping can also set a ringing holdoff: a pulse (or, ungated, an
+edge) that starts less than ring_holdoff_ns after the previous pulse on the
+same line ended is taken to be that pulse ringing back across threshold and
+is dropped -- before the width gate, so ringing after a long trigger pulse
+can't pass for a short i-ToF pulse sharing its line.
 """
 import dataclasses
 import json
@@ -71,6 +77,9 @@ class SignalMapping:
     # False = this signal isn't recorded at all (classify_tdcs returns no
     # hits for it). Only e-ToF / i-ToF can be disabled -- see OPTIONAL_SIGNALS.
     enabled: bool = True
+    # Drop pulses starting less than this long after the previous pulse on
+    # the line ended (ringing). None = keep everything.
+    ring_holdoff_ns: Optional[float] = None
 
     def to_dict(self):
         return {
@@ -79,6 +88,7 @@ class SignalMapping:
             "gate_min_ns": self.gate_min_ns,
             "gate_max_ns": self.gate_max_ns,
             "enabled": self.enabled,
+            "ring_holdoff_ns": self.ring_holdoff_ns,
         }
 
     @classmethod
@@ -89,6 +99,7 @@ class SignalMapping:
             gate_min_ns=d.get("gate_min_ns"),
             gate_max_ns=d.get("gate_max_ns"),
             enabled=bool(d.get("enabled", True)),
+            ring_holdoff_ns=d.get("ring_holdoff_ns"),
         )
 
 
@@ -166,5 +177,8 @@ def get_active_mapping():
             ),
             enabled=name not in OPTIONAL_SIGNALS
             or bool(app_settings.get(_settings_key(name, "enabled"), default_signal.enabled)),
+            ring_holdoff_ns=parse_optional_float(
+                app_settings.get(_settings_key(name, "ring_holdoff_ns"), default_signal.ring_holdoff_ns)
+            ),
         )
     return TdcMapping(**signals)

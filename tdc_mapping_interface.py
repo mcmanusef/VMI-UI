@@ -62,7 +62,10 @@ class TdcMappingInterface(ttk.Frame):
             "for it. Leave a gate blank to take every hit on that line directly. With a gate set, "
             "each rising edge is paired with the next falling edge on the same line and kept only "
             "if that pulse's width falls in range -- e.g. a long trigger pulse and a short i-ToF "
-            "pulse can share one FPGA TDC channel this way. These settings apply everywhere "
+            "pulse can share one FPGA TDC channel this way. Set a ringing holdoff to drop pulses "
+            "that start within that many ns after the previous pulse on the same line ended -- a "
+            "signal ringing back across threshold -- before the gate is applied; leave it blank "
+            "to keep every pulse. These settings apply everywhere "
             "(Monitored Acquisition, Analysis > conversion, Diagnostics, Timewalk Calibration, "
             "Parameter Sweep) and are saved as you edit them -- the \"tpx to h5\" raw dump is "
             "unaffected, since it already keeps every hit's own channel and edge.",
@@ -101,9 +104,14 @@ class TdcMappingInterface(ttk.Frame):
             self, tk.StringVar, f"tdc_mapping.{name}.gate_max_ns",
             "" if default.gate_max_ns is None else str(default.gate_max_ns),
         )
+        ring_holdoff_var = app_settings.persistent_var(
+            self, tk.StringVar, f"tdc_mapping.{name}.ring_holdoff_ns",
+            "" if default.ring_holdoff_ns is None else str(default.ring_holdoff_ns),
+        )
         self._vars[name] = {
             "family": family_var, "channel": channel_var, "time_edge": edge_var,
             "gate_min_ns": gate_min_var, "gate_max_ns": gate_max_var,
+            "ring_holdoff_ns": ring_holdoff_var,
         }
 
         row = 0
@@ -158,6 +166,10 @@ class TdcMappingInterface(ttk.Frame):
         ttk.Entry(gate_row, textvariable=gate_max_var).grid(row=0, column=2, sticky="ew")
         ui_style.add_form_row(section, row + 3, "Pulse-width gate (ns):", gate_row)
 
+        ui_style.add_form_row(
+            section, row + 4, "Ringing holdoff (ns):", ttk.Entry(section, textvariable=ring_holdoff_var),
+        )
+
     # ---- presets ------------------------------------------------------------
 
     def _current_mapping(self):
@@ -170,6 +182,7 @@ class TdcMappingInterface(ttk.Frame):
                 gate_min_ns=tdc_mapping.parse_optional_float(v["gate_min_ns"].get()),
                 gate_max_ns=tdc_mapping.parse_optional_float(v["gate_max_ns"].get()),
                 enabled=v["enabled"].get() if "enabled" in v else True,
+                ring_holdoff_ns=tdc_mapping.parse_optional_float(v["ring_holdoff_ns"].get()),
             )
         return tdc_mapping.TdcMapping(**signals)
 
@@ -183,6 +196,7 @@ class TdcMappingInterface(ttk.Frame):
             v["time_edge"].set(signal.time_edge)
             v["gate_min_ns"].set("" if signal.gate_min_ns is None else str(signal.gate_min_ns))
             v["gate_max_ns"].set("" if signal.gate_max_ns is None else str(signal.gate_max_ns))
+            v["ring_holdoff_ns"].set("" if signal.ring_holdoff_ns is None else str(signal.ring_holdoff_ns))
             if "enabled" in v:
                 v["enabled"].set(signal.enabled)
 
