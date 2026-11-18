@@ -10,6 +10,11 @@ with two ions gives two rows, and one with no ion keeps a NaN m/q (gating
 on m/q then drops it). Rows whose momenta are NaN, i.e. outside the
 calibration's valid dt range, are dropped on load.
 
+Clusters, e-ToF hits and ions can each be taken from the previous or next
+pulse instead of their own (pulse_offsets): pairing across pulses gives
+only random coincidences, an estimate of the false-coincidence background
+under the real ones.
+
 p_r is the full momentum magnitude, sqrt(px^2 + py^2 + pz^2). The
 forward-backward asymmetry splits rows by the sign of p_x, the propagation
 axis (FORWARD_KEY).
@@ -108,9 +113,32 @@ class Dataset:
         return variable_for(key).axis_label
 
 
-def load_dataset(path):
+PULSE_OFFSET_LABELS = {-1: "Previous pulse", 0: "Same pulse", 1: "Next pulse"}
+
+
+def describe_pulse_offsets(pulse_offsets):
+    """e.g. "i-ToF from the next pulse", or "" when every offset is 0."""
+    names = {"clusters": "clusters", "etof": "e-ToF", "tof": "i-ToF"}
+    parts = [
+        f"{names[species]} from the {PULSE_OFFSET_LABELS[offset].lower()}"
+        for species, offset in (pulse_offsets or {}).items() if offset
+    ]
+    return ", ".join(parts)
+
+
+def load_dataset(path, pulse_offsets=None):
     """Electron rows joined to their pulse's ions (see the module docstring),
-    from a file the apply calibration tab wrote."""
+    from a file the apply calibration tab wrote.
+
+    pulse_offsets as in apply_calibration.build_tables. The file's clusters
+    and e-ToF hits were paired when it was written, so they can only move
+    together: only the i-ToF offset relative to theirs can be applied."""
+    offsets = {**ac.NO_PULSE_OFFSETS, **(pulse_offsets or {})}
+    if offsets["clusters"] != offsets["etof"]:
+        raise ValueError(
+            "A calibrated file's clusters and e-ToF hits are already paired, so they can't come from "
+            "different pulses. Load the cv4 file instead."
+        )
     path = str(path)
     with pd.HDFStore(path, "r") as store:
         keys = {key.strip("/") for key in store.keys()}
@@ -119,25 +147,57 @@ def load_dataset(path):
         parameter_label = str(getattr(store.get_storer("electrons").attrs, "parameter_label", "") or "")
     electrons = pd.read_hdf(path, "electrons")
     ions = pd.read_hdf(path, "ions") if "ions" in keys else pd.DataFrame()
-    return dataset_from_tables(electrons, ions, parameter_label, path)
+    return dataset_from_tables(
+        electrons, ions, parameter_label, path, ion_offset=offsets["tof"] - offsets["clusters"],
+    )
 
 
-def load_cv4_dataset(path, momentum=None, mq=None, progress=None, stop_event=None):
+def load_cv4_dataset(path, momentum=None, mq=None, progress=None, stop_event=None, pulse_offsets=None):
     """As load_dataset, but straight from a cv4 (or grouped) file: the
     calibrations are applied in memory the way the apply calibration tab
     would (apply_calibration.calibrate_in_memory), with nothing saved.
-    Either calibration can be None to leave that part uncalibrated."""
+    Either calibration can be None to leave that part uncalibrated.
+    pulse_offsets as in apply_calibration.build_tables, each species free."""
     electrons, ions, parameter_label = ac.calibrate_in_memory(
-        path, momentum, mq, progress=progress, stop_event=stop_event,
+        path, momentum, mq, progress=progress, stop_event=stop_event, pulse_offsets=pulse_offsets,
     )
     return dataset_from_tables(electrons, ions, parameter_label, str(path))
 
 
-def dataset_from_tables(electrons, ions, parameter_label="", path=""):
+def _shift_ions(electrons, ions, offset, on):
+    """ions with each one's pulse moved `offset` back, as
+    apply_calibration.shift_to_neighbour_pulse does for a cv4 file, using
+    the pulse times both tables carry (in t_pulse). Ions whose neighbour
+    pulse isn't one trigger period away get pulse 0, which no electron has."""
+    group = [column for column in on if column != "pulse"]
+    times = pd.concat(
+        [electrons[on + ["t_pulse"]], ions[on + ["t_pulse"]]], ignore_index=True,
+    ).drop_duplicates(on).sort_values(group + ["pulse"])
+    spacings = []
+    for _, part in (times.groupby(group, sort=False) if group else [(None, times)]):
+        step = np.diff(part["pulse"].to_numpy()) == 1
+        gaps = np.diff(part["t_pulse"].to_numpy(dtype=np.float64))[step]
+        spacings.append(gaps[gaps > 0])
+    spacings = np.concatenate(spacings) if spacings else np.zeros(0)
+    period = float(np.median(spacings)) if spacings.size else float("nan")
+
+    ions = ions.copy()
+    target = ions[group].copy()
+    target["pulse"] = ions["pulse"].to_numpy() - int(offset)
+    t_to = target.merge(times, on=on, how="left")["t_pulse"].to_numpy(dtype=np.float64)
+    ok = (ions["pulse"].to_numpy() != 0) & ac.neighbour_ok(
+        ions["t_pulse"].to_numpy(dtype=np.float64), t_to, offset, period,
+    )
+    ions["pulse"] = np.where(ok, target["pulse"].to_numpy(), 0).astype(ions["pulse"].dtype)
+    return ions
+
+
+def dataset_from_tables(electrons, ions, parameter_label="", path="", ion_offset=0):
     """The Dataset for an electrons and an ions DataFrame (as apply_calibration
     builds them). Every numeric column of both tables is kept, so any of
     them can be plotted or gated on. Without px, py and pz the rows are kept
-    as they are (uncalibrated)."""
+    as they are (uncalibrated). ion_offset (-1, 0, +1) joins each electron
+    to the ions of the previous or next pulse instead of its own."""
     missing = [column for column in MOMENTUM_COLUMNS if column not in electrons.columns]
     if missing and len(missing) < len(MOMENTUM_COLUMNS):
         raise ValueError(f"The electrons table has no {', '.join(missing)} column(s).")
@@ -145,6 +205,10 @@ def dataset_from_tables(electrons, ions, parameter_label="", path=""):
     rows = electrons
     if not ions.empty and "pulse" in electrons.columns and "pulse" in ions.columns:
         on = ["pulse"] + (["parameter"] if "parameter" in electrons and "parameter" in ions else [])
+        if ion_offset:
+            if "t_pulse" not in electrons.columns or "t_pulse" not in ions.columns:
+                raise ValueError("Pairing with the previous or next pulse needs t_pulse in both tables.")
+            ions = _shift_ions(electrons, ions, ion_offset, on)
         # Columns the electrons already carry would only collide on the join.
         extra = [column for column in ions.columns if column in electrons.columns and column not in on]
         rows = electrons.merge(ions.drop(columns=extra), on=on, how="left")

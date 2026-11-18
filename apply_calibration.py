@@ -101,13 +101,79 @@ def _matched_pulses(corr, t, t_pulse):
     return corr
 
 
-def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, parameter=None):
+# Which pulse each species is taken from, relative to the pulse it is
+# paired in: -1 previous, 0 same, +1 next. See shift_to_neighbour_pulse.
+PULSE_SPECIES = ("clusters", "etof", "tof")
+NO_PULSE_OFFSETS = {species: 0 for species in PULSE_SPECIES}
+
+
+def pulse_period(t_pulse, pulse=None):
+    """The trigger period (ns): the median spacing of pulses whose indices
+    are one apart. `pulse` gives each t_pulse entry's index (default: its
+    position, with entry 0 the cv4 sentinel). Pairs across a frame boundary
+    are consecutive by index but not in time; the median ignores them.
+    NaN if there are no such pairs."""
+    t_pulse = np.asarray(t_pulse, dtype=np.float64)
+    if pulse is None:
+        pulse = np.arange(t_pulse.size)
+        keep = pulse >= 1
+        t_pulse, pulse = t_pulse[keep], pulse[keep]
+    order = np.argsort(pulse, kind="stable")
+    pulse, t_pulse = np.asarray(pulse)[order], t_pulse[order]
+    step = np.diff(pulse) == 1
+    spacing = np.diff(t_pulse)[step]
+    spacing = spacing[spacing > 0]
+    return float(np.median(spacing)) if spacing.size else float("nan")
+
+
+def neighbour_ok(t_from, t_to, offset, period):
+    """True where pulse time t_from is `offset` trigger periods after t_to
+    (within half a period): the hits of pulse t_from really belong `offset`
+    pulses away from t_to's. Always True for offset 0."""
+    if offset == 0:
+        return np.ones(np.shape(t_from), dtype=bool)
+    if not np.isfinite(period) or period <= 0:
+        return np.zeros(np.shape(t_from), dtype=bool)
+    with np.errstate(invalid="ignore"):
+        steps = (np.asarray(t_from, dtype=np.float64) - np.asarray(t_to, dtype=np.float64)) / period
+        return np.abs(steps - offset) < 0.5
+
+
+def shift_to_neighbour_pulse(corr, offset, t_pulse, period=None):
+    """corr with each hit moved to the pulse `offset` before the one it was
+    recorded in, so that pairing by pulse joins it with the other species of
+    that pulse: offset +1 pairs a pulse's events with this species' hits from
+    the *next* pulse, -1 from the previous one. That is what random
+    (false) coincidences look like, with no true ones among them.
+
+    A hit whose neighbour pulse is not really one trigger period away (the
+    first or last pulse, or a gap such as a frame boundary) is moved to
+    pulse 0, cv4's "no matching pulse"."""
+    corr = np.array(corr, dtype=np.int64)
+    if offset == 0 or corr.size == 0:
+        return corr
+    t_pulse = np.asarray(t_pulse, dtype=np.float64)
+    if period is None:
+        period = pulse_period(t_pulse)
+    target = corr - int(offset)
+    ok = (corr != 0) & (target >= 1) & (target < t_pulse.size)
+    ok[ok] = neighbour_ok(t_pulse[corr[ok]], t_pulse[target[ok]], offset, period)
+    return np.where(ok, target, 0)
+
+
+def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, parameter=None, pulse_offsets=None):
     """The DataFrames described in the module docstring. With `parameter`,
     each table starts with a "parameter" column holding that value.
 
     With momentum None the electrons are left uncalibrated: one row per
     cluster/e-ToF pair as usual, plus a row with a NaN t_etof for each
-    cluster whose pulse has no e-ToF hit, and no dt, px, py, pz or energy."""
+    cluster whose pulse has no e-ToF hit, and no dt, px, py, pz or energy.
+
+    pulse_offsets ({"clusters", "etof", "tof"} -> -1, 0 or +1) takes that
+    species from the previous or next pulse instead of the same one (see
+    shift_to_neighbour_pulse), for the electrons and ions tables; the raw/
+    tables keep every hit's own pulse."""
+    offsets = {**NO_PULSE_OFFSETS, **(pulse_offsets or {})}
     t_pulse = np.asarray(raw["t_pulse"], dtype=np.float64)
     cluster_corr = np.asarray(raw["cluster_corr"], dtype=np.int64)
     etof_corr = np.asarray(raw["etof_corr"], dtype=np.int64)
@@ -116,6 +182,10 @@ def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, paramet
             raise ValueError(f"{name} points outside t_pulse.")
     cluster_corr = _matched_pulses(cluster_corr, raw["t"], t_pulse)
     etof_corr = _matched_pulses(etof_corr, raw["t_etof"], t_pulse)
+    raw_cluster_corr, raw_etof_corr = cluster_corr, etof_corr
+    period = pulse_period(t_pulse) if any(offsets.values()) else None
+    cluster_corr = shift_to_neighbour_pulse(cluster_corr, offsets["clusters"], t_pulse, period)
+    etof_corr = shift_to_neighbour_pulse(etof_corr, offsets["etof"], t_pulse, period)
 
     # Pulse 0 is cv4's "no matching pulse" sentinel, not a real pulse. It's
     # left out before pairing: every unmatched cluster times every unmatched
@@ -165,11 +235,11 @@ def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, paramet
         })
     tables = {"electrons": pd.DataFrame(electrons)}
 
-    pulse, pulse_time = _pulse_columns(cluster_corr, t_pulse)
+    pulse, pulse_time = _pulse_columns(raw_cluster_corr, t_pulse)
     tables["raw/clusters"] = pd.DataFrame({
         "x": raw["x"], "y": raw["y"], "t": raw["t"], "pulse": pulse, "t_pulse": pulse_time,
     })
-    pulse, pulse_time = _pulse_columns(etof_corr, t_pulse)
+    pulse, pulse_time = _pulse_columns(raw_etof_corr, t_pulse)
     tables["raw/etof"] = pd.DataFrame({"t_etof": raw["t_etof"], "pulse": pulse, "t_pulse": pulse_time})
 
     if not electrons_only:
@@ -177,6 +247,7 @@ def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, paramet
         if tof_corr.size and (tof_corr.min() < 0 or tof_corr.max() >= t_pulse.size):
             raise ValueError("tof_corr points outside t_pulse.")
         tof_corr = _matched_pulses(tof_corr, raw["t_tof"], t_pulse)
+        tof_corr = shift_to_neighbour_pulse(tof_corr, offsets["tof"], t_pulse, period)
         pulse, pulse_time = _pulse_columns(tof_corr, t_pulse)
         ions = {
             "t_tof": np.asarray(raw["t_tof"], dtype=np.float64),
@@ -202,12 +273,14 @@ def has_ion_fields(node):
     return all(field in node for field in ION_FIELDS)
 
 
-def calibrate_in_memory(cv4_path, momentum=None, mq=None, rng=None, progress=None, stop_event=None):
+def calibrate_in_memory(cv4_path, momentum=None, mq=None, rng=None, progress=None, stop_event=None,
+                        pulse_offsets=None):
     """The electrons and ions tables apply_to_file would write, kept in
     memory instead: (electrons, ions, parameter label). Either calibration
     can be None, which leaves that part uncalibrated (see build_tables).
     ions is an empty DataFrame when the file has no i-ToF data. The raw/
-    tables are left out. progress and stop_event work as in apply_to_file."""
+    tables are left out. progress and stop_event work as in apply_to_file;
+    pulse_offsets as in build_tables."""
     source_name = pathlib.Path(cv4_path).name
     if pgr.is_grouped(cv4_path):
         label, _, groups = pgr.read_group_info(cv4_path)
@@ -225,7 +298,9 @@ def calibrate_in_memory(cv4_path, momentum=None, mq=None, rng=None, progress=Non
             node = source if name is None else source[name]
             electrons_only = not has_ion_fields(node)
             raw, _ = _read_node(node, electrons_only, source_name if name is None else f"Group {name}")
-            tables = build_tables(raw, momentum, None if electrons_only else mq, electrons_only, rng, value)
+            tables = build_tables(
+                raw, momentum, None if electrons_only else mq, electrons_only, rng, value, pulse_offsets,
+            )
             del raw
             electrons.append(tables["electrons"])
             if "ions" in tables:

@@ -12,6 +12,7 @@ import qtk as tk
 from qtk import ttk, filedialog, grid_into
 
 import app_settings
+import apply_calibration as ac
 import coincidence as co
 import ui_style
 from calibration_apply_interface import CalibrationPicker
@@ -89,6 +90,11 @@ class CoincidenceInterface(ttk.Frame):
         self.cv4_path_var = pvar(tk.StringVar, "cv4_path", "")
         self.apply_momentum_var = pvar(tk.BooleanVar, "apply_momentum", True)
         self.apply_mq_var = pvar(tk.BooleanVar, "apply_mq", True)
+        # Which pulse each species is taken from (see coincidence.load_dataset).
+        same = co.PULSE_OFFSET_LABELS[0]
+        self.pulse_offset_vars = {
+            species: pvar(tk.StringVar, f"pulse_offset_{species}", same) for species in ac.PULSE_SPECIES
+        }
         self._source_note_var = tk.StringVar(self, value="")
         self.mode_var = pvar(tk.StringVar, "mode", MODE_2D)
         self.x_var = pvar(tk.StringVar, "x", "px")
@@ -121,6 +127,7 @@ class CoincidenceInterface(ttk.Frame):
 
         self._task = BackgroundTask(self)
         self._dataset = None
+        self._loaded_offsets = None  # pulse offsets of the last Load
         self._ranges = {}         # key -> (low, high), set whether or not it is applied
         self._enabled = {}        # key -> BooleanVar: is this range applied?
         self._regions = {}        # key -> LinearRegionItem
@@ -190,6 +197,25 @@ class CoincidenceInterface(ttk.Frame):
             data, 6,
             "Each electron is joined to the ions of its own pulse, so m/q is per coincidence; electrons "
             "with no ion have no m/q. p_r is the full momentum magnitude |p|.",
+            pady=(0, 4),
+        )
+        pairing = ttk.Frame(data)
+        pairing.grid(row=7, column=0, columnspan=2, sticky="ew")
+        pairing.columnconfigure(1, weight=1)
+        for row, (species, label) in enumerate(
+            (("clusters", "Clusters from:"), ("etof", "e-ToF from:"), ("tof", "i-ToF from:"))
+        ):
+            ui_style.add_form_row(pairing, row, label, ttk.Combobox(
+                pairing, textvariable=self.pulse_offset_vars[species],
+                values=list(co.PULSE_OFFSET_LABELS.values()), state="readonly", width=18,
+            ))
+        ui_style.add_note(
+            data, 8,
+            "Taking one kind of hit from the previous or next pulse pairs it with the others across "
+            "pulses, which gives only random coincidences: the false-coincidence background. A neighbour "
+            "more than half a trigger period off (first/last pulse, frame gaps) is left unpaired. A "
+            "calibrated file's clusters and e-ToF are already paired, so with one only i-ToF can differ. "
+            "Applies on the next Load.",
             pady=(0, 4),
         )
 
@@ -527,6 +553,8 @@ class CoincidenceInterface(ttk.Frame):
         if not pathlib.Path(path).is_file():
             self.status_var.set(f"File not found: {path}")
             return
+        values = {label: offset for offset, label in co.PULSE_OFFSET_LABELS.items()}
+        offsets = {species: values.get(var.get(), 0) for species, var in self.pulse_offset_vars.items()}
         if cv4:
             momentum = self._picker.calibrations[KIND_MOMENTUM] if self.apply_momentum_var.get() else None
             mq = self._picker.calibrations[KIND_MQ] if self.apply_mq_var.get() else None
@@ -539,10 +567,11 @@ class CoincidenceInterface(ttk.Frame):
                     )
                     return
             self.status_var.set(f"Reading {pathlib.Path(path).name}...")
-            work = lambda: co.load_cv4_dataset(path, momentum, mq)  # noqa: E731
+            work = lambda: co.load_cv4_dataset(path, momentum, mq, pulse_offsets=offsets)  # noqa: E731
         else:
             self.status_var.set("Loading...")
-            work = lambda: co.load_dataset(path)  # noqa: E731
+            work = lambda: co.load_dataset(path, pulse_offsets=offsets)  # noqa: E731
+        self._loaded_offsets = offsets
         self._task.start(
             work, self._on_loaded,
             lambda exc: self.status_var.set(f"Error: could not load the dataset: {exc}"),
@@ -563,9 +592,11 @@ class CoincidenceInterface(ttk.Frame):
         self.rows_var.set(str(dataset.n_rows))
         columns = len(dataset.variables)
         calibrated = "" if dataset.calibrated else " (uncalibrated: no momenta)"
+        shifted = co.describe_pulse_offsets(self._loaded_offsets)
+        shifted = f" Pairing {shifted}." if shifted else ""
         self.status_var.set(
             f"Loaded {dataset.n_rows} coincidence rows and {columns} columns from "
-            f"{pathlib.Path(dataset.path).name}{calibrated}."
+            f"{pathlib.Path(dataset.path).name}{calibrated}.{shifted}"
         )
         self._redraw()
 
