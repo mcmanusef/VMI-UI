@@ -20,6 +20,7 @@ from calibration_interface import (
     BLUE, GREEN, GREY, KIND_MOMENTUM, KIND_MQ, BackgroundTask, CalibrationHub, PlotGrid, browse_cv4,
     read_number, relax_titles, set_visible, show_placeholder,
 )
+from plot_panel import ROTATION_DEFAULTS, build_rotation_row, read_rotation
 from qt_plots import ZoomFocusViewBox, rainforest_colormap
 
 EMPTY_TEXT = "No data — press Load"
@@ -78,9 +79,16 @@ class CoincidenceInterface(ttk.Frame):
     small plots gates the data (each one ignores its own gate), and the
     large plot shows the gated 1D or 2D distribution."""
 
-    def __init__(self, parent, hub=None, **kwargs):
+    def __init__(self, parent, hub=None, plot_shared_vars=None, **kwargs):
         super().__init__(parent, **kwargs)
         self._hub = hub if hub is not None else CalibrationHub()
+        # The cluster x / y rotation every plot panel uses (shared_state), so
+        # it is the same here as on the live tabs.
+        self._rotation_vars = (plot_shared_vars or {}).get("rotation_vars") or {
+            field: app_settings.persistent_var(self, tk.StringVar, f"plot.rotation.{field}", f"{value:g}")
+            for field, value in ROTATION_DEFAULTS.items()
+        }
+        self._rotation_after = None
 
         def pvar(cls, key, default):
             return app_settings.persistent_var(self, cls, f"coincidence.{key}", default)
@@ -155,6 +163,8 @@ class CoincidenceInterface(ttk.Frame):
                     self.split_var, self.split_bins_var):
             var.trace_add("write", self._schedule_main_redraw)
         self.gate_bins_var.trace_add("write", self._on_gate_bins_changed)
+        for var in self._rotation_vars.values():
+            var.trace_add("write", self._on_rotation_changed)
         self._redraw()
 
     # ---- UI construction --------------------------------------------------
@@ -197,6 +207,15 @@ class CoincidenceInterface(ttk.Frame):
             data, 6,
             "Each electron is joined to the ions of its own pulse, so m/q is per coincidence; electrons "
             "with no ion have no m/q. p_r is the full momentum magnitude |p|.",
+            pady=(0, 4),
+        )
+        build_rotation_row(data, self._rotation_vars, "cluster").grid(
+            row=9, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
+        ui_style.add_note(
+            data, 10,
+            "Turns the x and y columns of uncalibrated data (cv4 without a momentum calibration); "
+            "the same rotation as the live tabs' cluster maps.",
             pady=(0, 4),
         )
         pairing = ttk.Frame(data)
@@ -577,7 +596,29 @@ class CoincidenceInterface(ttk.Frame):
             lambda exc: self.status_var.set(f"Error: could not load the dataset: {exc}"),
         )
 
+    def _on_rotation_changed(self, *_):
+        if self._rotation_after is not None:
+            self.after_cancel(self._rotation_after)
+        self._rotation_after = self.after(REDRAW_DELAY_MS, self._apply_rotation)
+
+    def _apply_rotation(self):
+        """Re-rotate the loaded x / y and redraw everything that used them."""
+        self._rotation_after = None
+        dataset = self._dataset
+        if dataset is None or not dataset.rotatable:
+            return
+        rotation = read_rotation(self._rotation_vars)
+        dataset.set_rotation(rotation["angle"], rotation["cx"], rotation["cy"])
+        for cache in (self._mask_cache, self._data_ranges, self._distinct, self._binning):
+            cache.pop("x", None)
+            cache.pop("y", None)
+        self._main_binning = {}
+        self._schedule_redraw()
+
     def _on_loaded(self, dataset):
+        if dataset.rotatable:
+            rotation = read_rotation(self._rotation_vars)
+            dataset.set_rotation(rotation["angle"], rotation["cx"], rotation["cy"])
         self._dataset = dataset
         self._ranges = {}
         self._mask_cache = {}

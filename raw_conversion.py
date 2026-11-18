@@ -28,6 +28,7 @@ from tpx_processing import (
     make_cluster_hists,
     make_hist_1d,
     make_etof_correlation_hists,
+    rotate_points,
     hist_args,
     copy_hist,
     add_hist,
@@ -42,6 +43,9 @@ from tpx_processing import (
 # The hist settings key that asks process_raw_file for the x / y vs e-ToF
 # maps (see plot_panel), and the plot_result keys those come back under.
 ETOF_CORRELATION_KEY = "etof_corr"
+# The hist settings key holding the cluster x / y rotation (plot_panel's
+# ROTATION_KEY): {"angle" (degrees, counter-clockwise), "cx", "cy"}.
+ROTATION_KEY = "rotation"
 OPTIONAL_2D_HISTS = ("x_etof_hist", "y_etof_hist")
 
 def process_raw_file(path, settings, timewalk=None, min_cluster_size=None, max_packets=None):
@@ -70,9 +74,13 @@ def process_raw_file(path, settings, timewalk=None, min_cluster_size=None, max_p
         range_min=settings["pixel"]["min"],
         range_max=settings["pixel"]["max"],
     )
+    # Previews only: events (what gets saved) keep detector coordinates.
+    rotation = settings.get(ROTATION_KEY) or {}
+    angle, cx, cy = rotation.get("angle", 0.0), rotation.get("cx", 0.0), rotation.get("cy", 0.0)
+    cluster_x, cluster_y = rotate_points(events.cluster_x, events.cluster_y, angle, cx, cy)
     cluster_hist, cluster_t_hist = make_cluster_hists(
-        events.cluster_x,
-        events.cluster_y,
+        cluster_x,
+        cluster_y,
         events.cluster_t,
         t_bins=int(settings["cluster_t"]["bins"]),
         t_min=settings["cluster_t"]["min"],
@@ -102,7 +110,7 @@ def process_raw_file(path, settings, timewalk=None, min_cluster_size=None, max_p
         # Only asked for by a plot panel showing the x / y vs e-ToF maps.
         plot_result["x_etof_hist"], plot_result["y_etof_hist"] = make_etof_correlation_hists(
             events, corr["bins"], corr["min"], corr["max"], settings["cluster"]["min"], settings["cluster"]["max"],
-            angle_deg=corr.get("angle", 0.0), cx=corr.get("cx", 0.0), cy=corr.get("cy", 0.0),
+            angle_deg=angle, cx=cx, cy=cy,
         )
     return {"events": events, "plot_result": plot_result}
 

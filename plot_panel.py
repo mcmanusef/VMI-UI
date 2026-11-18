@@ -54,9 +54,38 @@ DEFAULT_HIST_SETTINGS = {
     "etof": {"bins": 2000, "min": 0.0, "max": 1000.0},
     ETOF_CORR_KEY: {"bins": 256, "min": 0.0, "max": 1000.0},
 }
-# Rotation of the cluster positions before the x / y vs e-ToF maps are
-# binned: angle (degrees, counter-clockwise) about the point (cx, cy) px.
-ETOF_CORR_ROTATION_DEFAULTS = {"angle": 0.0, "cx": _DETECTOR_PX / 2, "cy": _DETECTOR_PX / 2}
+# Rotation of the cluster positions before the cluster map and the x / y vs
+# e-ToF maps are binned: angle (degrees, counter-clockwise) about the point
+# (cx, cy) px. Always in hist_snapshot() under ROTATION_KEY. The pixel map
+# stays in detector coordinates (it is what pixels are masked from).
+ROTATION_KEY = "rotation"
+ROTATION_DEFAULTS = {"angle": 0.0, "cx": _DETECTOR_PX / 2, "cy": _DETECTOR_PX / 2}
+
+
+def read_rotation(rotation_vars, previous=None):
+    """{"angle", "cx", "cy"} from the rotation fields; a field that doesn't
+    parse keeps its previous value (or the default)."""
+    rotation = dict(previous or ROTATION_DEFAULTS)
+    for field in ROTATION_DEFAULTS:
+        try:
+            rotation[field] = float(rotation_vars[field].get())
+        except (ValueError, KeyError):
+            pass
+    return rotation
+
+
+def build_rotation_row(parent, rotation_vars, what):
+    """A frame with the "Rotate <what> x / y by [angle] ° about x [cx] y [cy]"
+    fields, for the shared rotation variables."""
+    row = ttk.Frame(parent)
+    ttk.Label(row, text=f"Rotate {what} x / y by").grid(row=0, column=0, sticky="w")
+    ttk.Entry(row, textvariable=rotation_vars["angle"], width=7).grid(row=0, column=1, padx=(6, 2))
+    ttk.Label(row, text="° about x").grid(row=0, column=2)
+    ttk.Entry(row, textvariable=rotation_vars["cx"], width=7).grid(row=0, column=3, padx=(6, 2))
+    ttk.Label(row, text="y").grid(row=0, column=4, padx=(4, 0))
+    ttk.Entry(row, textvariable=rotation_vars["cy"], width=7).grid(row=0, column=5, padx=(6, 2))
+    ttk.Label(row, text="px (counter-clockwise; same on every tab)").grid(row=0, column=6, padx=(4, 0))
+    return row
 
 
 class HistogramPlotPanel(ttk.Frame):
@@ -101,7 +130,7 @@ class HistogramPlotPanel(ttk.Frame):
             self._hist_vars = shared_vars["hist_vars"]
             self.log_etof_corr_var = shared_vars.get("log_etof_corr_var") or tk.BooleanVar(self, value=False)
             self.show_etof_corr_var = shared_vars.get("show_etof_corr_var") or tk.BooleanVar(self, value=False)
-            self._rotation_vars = shared_vars.get("etof_corr_rotation_vars") or self._own_rotation_vars()
+            self._rotation_vars = shared_vars.get("rotation_vars") or self._own_rotation_vars()
         else:
             self.log_pixel_var = tk.BooleanVar(self, value=False)
             self.log_cluster_var = tk.BooleanVar(self, value=False)
@@ -152,7 +181,7 @@ class HistogramPlotPanel(ttk.Frame):
         return {key: dict(cfg) for key, cfg in self._hist_settings.items()}
 
     def _own_rotation_vars(self):
-        return {key: tk.StringVar(self, value=f"{value:g}") for key, value in ETOF_CORR_ROTATION_DEFAULTS.items()}
+        return {key: tk.StringVar(self, value=f"{value:g}") for key, value in ROTATION_DEFAULTS.items()}
 
     def showing_etof_correlation(self):
         return self._corr_enabled and bool(self.show_etof_corr_var.get())
@@ -314,27 +343,22 @@ class HistogramPlotPanel(ttk.Frame):
         ttk.Label(plot_opts, textvariable=self.gamma_label_var, width=5).grid(row=2, column=5, sticky="w")
         ttk.Button(plot_opts, text="Reset", command=self._reset_gamma).grid(row=2, column=6, sticky="w", padx=(6, 0))
 
+        ttk.Separator(plot_opts, orient="horizontal").grid(
+            row=3, column=0, columnspan=12, sticky="ew", pady=(8, 8)
+        )
+        build_rotation_row(plot_opts, self._rotation_vars, "clusters").grid(
+            row=4, column=0, columnspan=12, sticky="w"
+        )
+
         if self._corr_enabled:
-            ttk.Separator(plot_opts, orient="horizontal").grid(
-                row=3, column=0, columnspan=12, sticky="ew", pady=(8, 8)
-            )
             ttk.Checkbutton(
                 plot_opts, text="Show x / y vs e-ToF", variable=self.show_etof_corr_var,
                 command=self._on_show_corr_toggle,
-            ).grid(row=4, column=0, columnspan=3, sticky="w")
+            ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
             ttk.Checkbutton(
                 plot_opts, text="Log scale (x / y vs e-ToF)", variable=self.log_etof_corr_var,
                 command=self._on_log_toggle,
-            ).grid(row=4, column=3, columnspan=4, sticky="w", padx=(6, 0))
-            rotation = ttk.Frame(plot_opts)
-            rotation.grid(row=5, column=0, columnspan=12, sticky="w", pady=(6, 0))
-            ttk.Label(rotation, text="Rotate x / y by").grid(row=0, column=0, sticky="w")
-            ttk.Entry(rotation, textvariable=self._rotation_vars["angle"], width=7).grid(row=0, column=1, padx=(6, 2))
-            ttk.Label(rotation, text="° about x").grid(row=0, column=2)
-            ttk.Entry(rotation, textvariable=self._rotation_vars["cx"], width=7).grid(row=0, column=3, padx=(6, 2))
-            ttk.Label(rotation, text="y").grid(row=0, column=4, padx=(4, 0))
-            ttk.Entry(rotation, textvariable=self._rotation_vars["cy"], width=7).grid(row=0, column=5, padx=(6, 2))
-            ttk.Label(rotation, text="px (counter-clockwise; 0 = none)").grid(row=0, column=6, padx=(4, 0))
+            ).grid(row=5, column=3, columnspan=4, sticky="w", padx=(6, 0), pady=(6, 0))
 
     def _build_hist_frame(self, container):
         # Two separate titled/bordered tables (QGroupBox via ttk.LabelFrame)
@@ -488,9 +512,8 @@ class HistogramPlotPanel(ttk.Frame):
         for key in keys:
             for field in ("bins", "min", "max"):
                 self._hist_vars[key][field].trace_add("write", self._on_hist_setting_change)
-        if self._corr_enabled:
-            for var in self._rotation_vars.values():
-                var.trace_add("write", self._on_hist_setting_change)
+        for var in self._rotation_vars.values():
+            var.trace_add("write", self._on_hist_setting_change)
 
     def _read_hist_settings(self):
         settings = {}
@@ -514,13 +537,8 @@ class HistogramPlotPanel(ttk.Frame):
                     cfg["max"] = high
             except ValueError:
                 pass
-            if key == ETOF_CORR_KEY:
-                for field, default in ETOF_CORR_ROTATION_DEFAULTS.items():
-                    try:
-                        cfg[field] = float(self._rotation_vars[field].get())
-                    except ValueError:
-                        cfg.setdefault(field, default)
             settings[key] = cfg
+        settings[ROTATION_KEY] = read_rotation(self._rotation_vars, self._hist_settings.get(ROTATION_KEY))
         return settings
 
     def _on_hist_setting_change(self, *_):

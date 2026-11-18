@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 
 import apply_calibration as ac
+from tpx_processing import rotate_points
 
 
 @dataclasses.dataclass(frozen=True)
@@ -92,6 +93,23 @@ class Dataset:
     n_electrons: int
     parameter_label: str = ""
     path: str = ""
+    # The unrotated x and y columns, kept so the rotation can be changed.
+    detector_xy: tuple = None
+
+    @property
+    def rotatable(self):
+        """True for uncalibrated rows with cluster x and y, which
+        set_rotation turns."""
+        return self.detector_xy is not None
+
+    def set_rotation(self, angle_deg, cx, cy):
+        """Replace the x and y columns with the detector x / y rotated by
+        angle_deg (counter-clockwise) about (cx, cy). False if there is
+        nothing to rotate."""
+        if self.detector_xy is None:
+            return False
+        self.arrays["x"], self.arrays["y"] = rotate_points(*self.detector_xy, angle_deg, cx, cy)
+        return True
 
     @property
     def calibrated(self):
@@ -224,7 +242,10 @@ def dataset_from_tables(electrons, ions, parameter_label="", path="", ion_offset
     for column in rows.columns:
         if column not in arrays and pd.api.types.is_numeric_dtype(rows[column]):
             arrays[column] = rows[column].to_numpy(dtype=np.float64)[keep]
-    return Dataset(arrays=arrays, n_electrons=len(electrons), parameter_label=parameter_label, path=path)
+    dataset = Dataset(arrays=arrays, n_electrons=len(electrons), parameter_label=parameter_label, path=path)
+    if missing and "x" in arrays and "y" in arrays:
+        dataset.detector_xy = (arrays["x"], arrays["y"])
+    return dataset
 
 
 def default_range(values, pad=0.02):
