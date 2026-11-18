@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 import cv4_writer
 import tdc_mapping
+from cluster_timing import CLUSTER_TIMING_ATTR, ClusterTimingCalibration
 from cv4_writer import Cv4Writer
 from timewalk import apply_timewalk_correction
 from tpx_processing import (
@@ -22,68 +23,51 @@ from tpx_processing import (
     get_min_cluster_size,
     missing_trigger_warning,
     decode_tpx3,
-    classify_tdcs,
-    group_pixels_by_pulse,
-    group_times_relative,
-    cluster_pixels_by_pulse,
-    make_pixel_hist_from_pulses,
+    build_frame_events,
+    make_pixel_hist,
     make_cluster_hists,
     make_hist_1d,
     hist_args,
-    flatten_dict,
     copy_hist,
     add_hist,
     add_hist_2d,
-    summarize_records,
+    summarize_frame,
     merge_stats,
 )
 
 
 # ---- per-file pipeline ----------------------------------------------------
 
-def process_raw_file(path, settings, timewalk=None, min_cluster_size=None):
-    """Decode one raw file, optionally timewalk-correct its pixels, cluster
-    it, and bin its plot histograms with `settings` (a
-    HistogramPlotPanel.hist_snapshot()), dropping clusters under
-    `min_cluster_size` hits (default: the saved setting). Returns pulses_sorted /
-    clusters_by_pulse / etof_by_pulse / itof_by_pulse (what
-    Cv4Writer.append_frame takes) plus plot_result."""
+def process_raw_file(path, settings, timewalk=None, min_cluster_size=None, max_packets=None):
+    """Decode one raw file (its first `max_packets` packets, or all of them),
+    optionally timewalk-correct its pixels, cluster it, and bin its plot
+    histograms with `settings` (a HistogramPlotPanel.hist_snapshot()),
+    dropping clusters under `min_cluster_size` hits (default: the saved
+    setting). Returns "events" (a tpx_processing.FrameEvents, what
+    Cv4Writer.append_events takes) plus "plot_result"."""
     start = time.perf_counter()
 
-    # No max_packets cap: every packet is processed.
-    pixels, tdcs, processed_packets, total_packets = decode_tpx3(str(path), max_packets=None)
+    pixels, tdcs, processed_packets, total_packets = decode_tpx3(str(path), max_packets=max_packets)
     if timewalk is not None:
         pixels = apply_timewalk_correction(pixels, timewalk)
-    etof, itof, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
-
-    pulses_sorted = sorted(pulses)
-    pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)
-    clusters_by_pulse, cluster_size_sum, cluster_count = cluster_pixels_by_pulse(
-        pixels_by_pulse, min_size=min_cluster_size
+    # A cluster-timing calibration (.npz) replaces the cluster time; a legacy
+    # LUT (.json) has already done all its work in apply_timewalk_correction.
+    timing = timewalk if isinstance(timewalk, ClusterTimingCalibration) else None
+    events, cluster_size_sum, cluster_count = build_frame_events(
+        pixels, tdcs, tdc_mapping.get_active_mapping(), min_size=min_cluster_size, timing=timing
     )
-    etof_by_pulse = group_times_relative(etof, pulses_sorted)
-    itof_by_pulse = group_times_relative(itof, pulses_sorted)
 
-    pulse_records = []
-    for pulse_time in pulses_sorted:
-        pulse_records.append(
-            (
-                pulse_time,
-                pixels_by_pulse.get(pulse_time, []),
-                clusters_by_pulse.get(pulse_time, []),
-                etof_by_pulse.get(pulse_time, []),
-                itof_by_pulse.get(pulse_time, []),
-            )
-        )
-
-    pixel_hist = make_pixel_hist_from_pulses(
-        pixels_by_pulse,
+    pixel_hist = make_pixel_hist(
+        events.pixel_x,
+        events.pixel_y,
         bins=int(settings["pixel"]["bins"]),
         range_min=settings["pixel"]["min"],
         range_max=settings["pixel"]["max"],
     )
     cluster_hist, cluster_t_hist = make_cluster_hists(
-        clusters_by_pulse,
+        events.cluster_x,
+        events.cluster_y,
+        events.cluster_t,
         t_bins=int(settings["cluster_t"]["bins"]),
         t_min=settings["cluster_t"]["min"],
         t_max=settings["cluster_t"]["max"],
@@ -91,12 +75,10 @@ def process_raw_file(path, settings, timewalk=None, min_cluster_size=None):
         xy_min=settings["cluster"]["min"],
         xy_max=settings["cluster"]["max"],
     )
-    itof_hist = make_hist_1d(flatten_dict(itof_by_pulse), **hist_args(settings["itof"]))
-    etof_hist = make_hist_1d(flatten_dict(etof_by_pulse), **hist_args(settings["etof"]))
+    itof_hist = make_hist_1d(events.itof_t, **hist_args(settings["itof"]))
+    etof_hist = make_hist_1d(events.etof_t, **hist_args(settings["etof"]))
 
-    stats = summarize_records(
-        pulse_records, cluster_size_sum, cluster_count, processed_packets, total_packets, start
-    )
+    stats = summarize_frame(events, cluster_size_sum, cluster_count, processed_packets, total_packets, start)
     stats["analysis_time_last"] = time.perf_counter() - start
 
     plot_result = {
@@ -107,16 +89,9 @@ def process_raw_file(path, settings, timewalk=None, min_cluster_size=None):
         "cluster_t_hist": cluster_t_hist,
         "stats": stats,
         "settings": settings,
-        "warning": missing_trigger_warning(len(pixels), len(pulses_sorted)),
+        "warning": missing_trigger_warning(len(pixels), len(events.pulses)),
     }
-
-    return {
-        "pulses_sorted": pulses_sorted,
-        "clusters_by_pulse": clusters_by_pulse,
-        "etof_by_pulse": etof_by_pulse,
-        "itof_by_pulse": itof_by_pulse,
-        "plot_result": plot_result,
-    }
+    return {"events": events, "plot_result": plot_result}
 
 
 def accumulate_plot_result(accumulated, result):
@@ -242,7 +217,10 @@ def convert_job(job, hist_settings, timewalk=None, stop_event=None, on_file=None
     # from what it records.
     min_cluster_size = get_min_cluster_size()
     partial_path = cv4_writer.partial_path_for(job.cv4_path)
-    writer = Cv4Writer(partial_path, metadata={**job.metadata, MIN_CLUSTER_SIZE_ATTR: min_cluster_size})
+    metadata = {**job.metadata, MIN_CLUSTER_SIZE_ATTR: min_cluster_size}
+    if isinstance(timewalk, ClusterTimingCalibration):
+        metadata[CLUSTER_TIMING_ATTR] = timewalk.describe()
+    writer = Cv4Writer(partial_path, metadata=metadata)
     processed = 0
     try:
         for path in job.raw_files:
@@ -250,12 +228,7 @@ def convert_job(job, hist_settings, timewalk=None, stop_event=None, on_file=None
                 break
             try:
                 frame = process_raw_file(path, hist_settings(), timewalk, min_cluster_size)
-                writer.append_frame(
-                    frame["pulses_sorted"],
-                    frame["clusters_by_pulse"],
-                    frame["etof_by_pulse"],
-                    frame["itof_by_pulse"],
-                )
+                writer.append_events(frame["events"])
                 writer.flush()
             except Exception as exc:
                 if on_file is not None:

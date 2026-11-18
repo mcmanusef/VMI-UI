@@ -21,7 +21,8 @@ import shared_state
 import time_estimate
 import ui_style
 from plot_panel import HistogramPlotPanel
-from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection
+from cluster_timing import load_correction
+from timewalk import DEFAULT_CORRECTION_PATH
 
 
 class ConversionInterface(ttk.Frame):
@@ -47,6 +48,7 @@ class ConversionInterface(ttk.Frame):
         )
         self._plot_shared_vars = plot_shared_vars
         self.min_cluster_size_var = shared_state.min_cluster_size_var(self, plot_shared_vars)
+        self.cluster_timing_mode_var = shared_state.cluster_timing_mode_var(self, plot_shared_vars)
 
         self.status_var = tk.StringVar(self, value="Idle")
         self._progress_var = tk.DoubleVar(self, value=0.0)
@@ -125,7 +127,8 @@ class ConversionInterface(ttk.Frame):
         ui_style.build_path_field(params, self.timewalk_path_var, self._browse_timewalk).grid(
             row=4, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
-        ui_style.add_form_row(params, 5, "Min cluster size (hits):", ttk.Entry(params, textvariable=self.min_cluster_size_var, width=18))
+        ui_style.build_cluster_timing_mode_row(params, 5, self.cluster_timing_mode_var)
+        ui_style.add_form_row(params, 7, "Min cluster size (hits):", ttk.Entry(params, textvariable=self.min_cluster_size_var, width=18))
 
         found = ui_style.build_section(sidebar, 3, "Detected files")
         list_row = ui_style.add_stat_rows(found, [
@@ -174,7 +177,7 @@ class ConversionInterface(ttk.Frame):
         chosen = filedialog.askopenfilename(
             title="Load time-walk correction",
             initialdir=str(pathlib.Path(initial).parent),
-            filetypes=[("JSON", "*.json")],
+            filetypes=[("Time-walk / cluster timing", "*.json *.npz"), ("Legacy LUT", "*.json"), ("Cluster timing", "*.npz")],
             parent=self,
         )
         if chosen:
@@ -241,7 +244,7 @@ class ConversionInterface(ttk.Frame):
 
         if self.timewalk_enabled_var.get():
             try:
-                timewalk = TimewalkCorrection.load(self.timewalk_path_var.get().strip())
+                timewalk = load_correction(self.timewalk_path_var.get().strip(), mode=self.cluster_timing_mode_var.get())
             except Exception as exc:
                 self.status_var.set(f"Could not load timewalk correction: {exc}")
                 return

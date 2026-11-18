@@ -43,7 +43,7 @@ class Cv4Writer:
         previous Cv4Writer for the same path was opened, written to, and
         closed), reopens it in place -- existing data is kept, and
         _pulse_count is re-derived from what's already on disk so further
-        append_frame() calls keep indexing correctly. This is what lets
+        append_events() calls keep indexing correctly. This is what lets
         callers close the file after each raw file is processed and reopen
         it for the next one instead of holding one handle open for an
         entire run."""
@@ -90,46 +90,24 @@ class Cv4Writer:
         ds.resize(old + len(arr), axis=0)
         ds[old:old + len(arr)] = arr
 
-    def append_frame(self, pulses_sorted, clusters_by_pulse, etof_by_pulse, itof_by_pulse):
-        """Append one processed raw-file's worth of events.
-
-        pulses_sorted: sorted list of absolute pulse times (ns) for this frame.
-        clusters_by_pulse / etof_by_pulse / itof_by_pulse: dicts keyed by the
-        same pulse times, as produced by tpx_processing's grouping helpers
-        (etof/itof values are times relative to their pulse).
-        """
-        n_pulses = len(pulses_sorted)
+    def append_events(self, events):
+        """Append one processed raw file's worth of events (a
+        tpx_processing.FrameEvents): its pulses, then every cluster /
+        e-ToF / i-ToF row pointing at its pulse's index in t_pulse."""
+        n_pulses = len(events.pulses)
         if n_pulses == 0:
             return
 
         base_index = self._pulse_count
-
-        xs, ys, ts, cc = [], [], [], []
-        te, ec = [], []
-        tt, tc = [], []
-        for local_idx, pulse_time in enumerate(pulses_sorted):
-            idx = base_index + local_idx
-            for cluster in clusters_by_pulse.get(pulse_time, []):
-                xs.append(cluster["avg_x"])
-                ys.append(cluster["avg_y"])
-                ts.append(cluster["avg_t_rel_ns"])
-                cc.append(idx)
-            for rel_t in etof_by_pulse.get(pulse_time, []):
-                te.append(rel_t)
-                ec.append(idx)
-            for rel_t in itof_by_pulse.get(pulse_time, []):
-                tt.append(rel_t)
-                tc.append(idx)
-
-        self._append("t_pulse", np.asarray(pulses_sorted, dtype=np.float64))
-        self._append("x", np.asarray(xs, dtype=np.float64))
-        self._append("y", np.asarray(ys, dtype=np.float64))
-        self._append("t", np.asarray(ts, dtype=np.float64))
-        self._append("cluster_corr", np.asarray(cc, dtype=np.int32))
-        self._append("t_etof", np.asarray(te, dtype=np.float64))
-        self._append("etof_corr", np.asarray(ec, dtype=np.int32))
-        self._append("t_tof", np.asarray(tt, dtype=np.float64))
-        self._append("tof_corr", np.asarray(tc, dtype=np.int32))
+        self._append("t_pulse", np.asarray(events.pulses, dtype=np.float64))
+        self._append("x", np.asarray(events.cluster_x, dtype=np.float64))
+        self._append("y", np.asarray(events.cluster_y, dtype=np.float64))
+        self._append("t", np.asarray(events.cluster_t, dtype=np.float64))
+        self._append("cluster_corr", (events.cluster_pulse + base_index).astype(np.int32))
+        self._append("t_etof", np.asarray(events.etof_t, dtype=np.float64))
+        self._append("etof_corr", (events.etof_pulse + base_index).astype(np.int32))
+        self._append("t_tof", np.asarray(events.itof_t, dtype=np.float64))
+        self._append("tof_corr", (events.itof_pulse + base_index).astype(np.int32))
 
         self._pulse_count += n_pulses
 

@@ -58,16 +58,28 @@ DEFAULT_CORRECTION_PATH = pathlib.Path(__file__).with_name("timewalk_correction.
 
 
 def apply_timewalk_correction(pixels, correction):
-    """Subtract correction.correct(tot) from every pixel's time_ns. Returns a
-    new list; `pixels` (list of tpx_processing.PixelData) is left untouched."""
-    if correction is None or not pixels:
+    """Subtract correction.correct(tot) from every pixel's time. Returns a
+    new tpx_processing.PixelHits; `pixels` is left untouched.
+
+    `correction` may also be a cluster_timing.ClusterTimingCalibration (a
+    .npz picked in a tab's time-walk field). Then only its whole-column
+    25 ns coarse-clock fix is applied here; the rest of it acts on whole
+    clusters (tpx_processing.cluster_hits(timing=...))."""
+    if correction is None or len(pixels) == 0:
         return pixels
-    tots = np.fromiter((p.tot for p in pixels), dtype=np.float64, count=len(pixels))
-    offsets = correction.correct(tots)
-    return [
-        type(pix)(time_ns=pix.time_ns - off, x=pix.x, y=pix.y, tot=pix.tot)
-        for pix, off in zip(pixels, offsets)
-    ]
+    if hasattr(correction, "column_fix_map"):
+        import chip_layout
+        fix = correction.column_fix_map(chip_layout.get_active_layout())
+        if not fix.any():
+            return pixels
+        nx, ny = fix.shape
+        x = np.asarray(pixels.x)
+        y = np.asarray(pixels.y)
+        inside = (x >= 0) & (x < nx) & (y >= 0) & (y < ny)
+        offsets = np.zeros(len(pixels))
+        offsets[inside] = fix[x[inside], y[inside]]
+        return pixels.with_times(pixels.time_ns - offsets)
+    return pixels.with_times(pixels.time_ns - correction.correct(pixels.tot))
 
 
 def generate_correction(hist2d, tot_edges, t_edges, min_counts=20, anchor_top_frac=0.1):

@@ -18,7 +18,8 @@ import tpx_processing
 import ui_style
 from cv4_writer import Cv4Writer
 from plot_panel import HistogramPlotPanel
-from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection
+from cluster_timing import CLUSTER_TIMING_ATTR, ClusterTimingCalibration, load_correction
+from timewalk import DEFAULT_CORRECTION_PATH
 
 
 class AcquisitionInterface(ttk.Frame):
@@ -41,6 +42,7 @@ class AcquisitionInterface(ttk.Frame):
         self._plot_shared_vars = plot_shared_vars
         self._run_min_cluster_size = None
         self.min_cluster_size_var = shared_state.min_cluster_size_var(self, plot_shared_vars)
+        self.cluster_timing_mode_var = shared_state.cluster_timing_mode_var(self, plot_shared_vars)
 
         # Shared live with the Collection parameters tab (see shared_state.py)
         # when acq_shared_vars is given; otherwise falls back to independent,
@@ -154,7 +156,8 @@ class AcquisitionInterface(ttk.Frame):
         ui_style.build_path_field(params, self.timewalk_path_var, self._browse_timewalk).grid(
             row=5, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
-        ui_style.add_form_row(params, 6, "Min cluster size (hits):", ttk.Entry(params, textvariable=self.min_cluster_size_var, width=18))
+        ui_style.build_cluster_timing_mode_row(params, 6, self.cluster_timing_mode_var)
+        ui_style.add_form_row(params, 8, "Min cluster size (hits):", ttk.Entry(params, textvariable=self.min_cluster_size_var, width=18))
 
         self.notes = ui_style.build_metadata_section(sidebar, 3, self)
 
@@ -187,7 +190,7 @@ class AcquisitionInterface(ttk.Frame):
         chosen = filedialog.askopenfilename(
             title="Load time-walk correction",
             initialdir=str(pathlib.Path(initial).parent),
-            filetypes=[("JSON", "*.json")],
+            filetypes=[("Time-walk / cluster timing", "*.json *.npz"), ("Legacy LUT", "*.json"), ("Cluster timing", "*.npz")],
             parent=self,
         )
         if chosen:
@@ -252,7 +255,7 @@ class AcquisitionInterface(ttk.Frame):
 
         if self.timewalk_enabled_var.get():
             try:
-                self._active_timewalk = TimewalkCorrection.load(self.timewalk_path_var.get().strip())
+                self._active_timewalk = load_correction(self.timewalk_path_var.get().strip(), mode=self.cluster_timing_mode_var.get())
             except Exception as exc:
                 self.status_var.set(f"Could not load timewalk correction: {exc}")
                 return
@@ -277,6 +280,8 @@ class AcquisitionInterface(ttk.Frame):
         metadata["Target Frames"] = target_frames
         if self._active_timewalk is not None:
             metadata["Timewalk Correction File"] = self.timewalk_path_var.get().strip()
+            if isinstance(self._active_timewalk, ClusterTimingCalibration):
+                metadata[CLUSTER_TIMING_ATTR] = self._active_timewalk.describe()
         # Fixed for the whole run, so every frame matches what's recorded.
         self._run_min_cluster_size = tpx_processing.get_min_cluster_size()
         metadata[tpx_processing.MIN_CLUSTER_SIZE_ATTR] = self._run_min_cluster_size
@@ -539,12 +544,7 @@ class AcquisitionInterface(ttk.Frame):
 
                 try:
                     frame = self._process_file(path)
-                    writer.append_frame(
-                        frame["pulses_sorted"],
-                        frame["clusters_by_pulse"],
-                        frame["etof_by_pulse"],
-                        frame["itof_by_pulse"],
-                    )
+                    writer.append_events(frame["events"])
                     writer.flush()
                     frame_index += 1
 

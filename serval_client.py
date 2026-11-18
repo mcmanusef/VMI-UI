@@ -1,5 +1,7 @@
-"""Small Serval HTTP helpers for the "one raw file per trigger, poll for it"
-acquisition pattern shared by the Diagnostics and Monitored Acquisition tabs.
+"""Small Serval HTTP helpers for the "one raw file per frame, poll for it"
+acquisition patterns shared by the acquisition tabs: a fresh start per
+frame (configure_single_trigger_destination) or one start per batch of
+frames (configure_continuous_destination, restart_continuous_batch).
 """
 import json
 import math
@@ -127,6 +129,19 @@ def _configure_destination(server, frame_time, dest_dir, file_pattern, n_trigger
     SESSION.put(f"{server}/server/destination", data=json.dumps(destination), timeout=timeout)
 
 
+def restart_continuous_batch(server, frame_time, n_triggers, timeout=5):
+    """Start the next CONTINUOUS-mode batch of `n_triggers` frames once the
+    previous one has auto-stopped. Only /detector/config is reset; the
+    destination set by configure_continuous_destination stays as it is."""
+    config = json.loads(SESSION.get(f"{server}/detector/config", timeout=timeout).text)
+    config["TriggerMode"] = "CONTINUOUS"
+    config["ExposureTime"] = frame_time
+    config["TriggerPeriod"] = frame_time
+    config["nTriggers"] = n_triggers
+    SESSION.put(f"{server}/detector/config", data=json.dumps(config), timeout=timeout)
+    start_measurement(server, timeout=timeout)
+
+
 def start_measurement(server, timeout=5):
     # Raise on a rejected start (e.g. Serval still busy finishing the
     # previous measurement) rather than letting the caller wait out its
@@ -136,6 +151,19 @@ def start_measurement(server, timeout=5):
 
 def stop_measurement(server, timeout=5):
     SESSION.get(f"{server}/measurement/stop", timeout=timeout)
+
+
+# Substrings of Measurement.Status values that mean Serval is still busy --
+# "STOPPING" specifically, not the bare "STOP" a final "STOPPED" contains.
+_BUSY_MARKERS = ("RECORD", "PREPAR", "STOPPING", "STARTING")
+
+
+def measurement_busy(server, timeout=2):
+    """True while /dashboard reports a measurement recording, preparing,
+    starting or stopping."""
+    resp = SESSION.get(f"{server}/dashboard", timeout=timeout)
+    status = str(json.loads(resp.text).get("Measurement", {}).get("Status", "")).upper()
+    return any(marker in status for marker in _BUSY_MARKERS)
 
 
 def wait_for_measurement_idle(server, timeout=30.0, poll=0.2):
@@ -152,16 +180,12 @@ def wait_for_measurement_idle(server, timeout=30.0, poll=0.2):
     like anything recognizable, just returns after `timeout` rather than
     blocking forever.
     """
-    # Substrings of known/likely "still busy" states -- "STOPPING" (in
-    # progress) specifically, not the bare "STOP" that a legitimate final
-    # "STOPPED"/"IDLE" status could also be mistaken to contain.
-    busy_markers = ("RECORD", "PREPAR", "STOPPING", "STARTING")
     start = time.time()
     while time.time() - start < timeout:
         try:
             resp = SESSION.get(f"{server}/dashboard", timeout=5)
             status = str(json.loads(resp.text).get("Measurement", {}).get("Status", "")).upper()
-            if status and not any(marker in status for marker in busy_markers):
+            if status and not any(marker in status for marker in _BUSY_MARKERS):
                 return status
         except Exception:
             pass

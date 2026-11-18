@@ -161,6 +161,16 @@ is anchored to ≈0 at the high-ToT end. Saves JSON that the diagnostics,
 monitored acquisition and conversion tabs can load and apply before
 clustering.
 
+Those same time-walk fields also accept a **cluster timing calibration**
+(`.npz`, made with the timewalk calibration tab's **Fit Cluster Timing** button
+or `python fit_cluster_timing.py <raw folder> --out file.npz`, from data with
+an e-ToF reference): a 25 ns column fix on the hits, then a
+corrected time for each whole cluster (2D walk, per-pixel terms, charge and
+position terms) instead of the ToT-weighted mean, by the estimator picked in
+the shared **Cluster timing mode** dropdown (core / bright / all). Only valid for the
+detector settings and chip layout it was fitted with. The cv4 records which
+calibration was used.
+
 **parameter sweep** — moves the stage through a list of positions,
 collecting into **one cv4 per physical position** (revisits append to the
 same file, so multiple passes accumulate). Frames are triggered one at a
@@ -449,6 +459,8 @@ own default when the file or key is missing, so a fresh clone just works.
 | `raw_conversion.py` | The per-file pipeline and cv4 job planning shared by live and offline paths |
 | `cv4_writer.py` | The cv4 HDF5 layout, append/reopen/finalize |
 | `timewalk.py` | Timewalk correction curve: generate, save, apply |
+| `cluster_timing.py` | Cluster-level timing calibration (.npz): fit, save, apply |
+| `fit_cluster_timing.py` | Command-line fit + out-of-sample validation of a cluster timing calibration |
 | `electron_calibration.py` | 3D electron momentum calibration |
 | `mass_calibration.py` | Ion ToF → m/q calibration, formula parsing, isotope masses |
 | `apply_calibration.py` | cv4 → calibrated DataFrames in HDF5 |

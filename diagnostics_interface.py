@@ -1,4 +1,6 @@
+import collections
 import json
+import os
 import pathlib
 import threading
 import time
@@ -13,37 +15,61 @@ from qtk import filedialog, messagebox
 import app_settings
 import chip_layout
 import platform_paths
+import raw_conversion
 import serval_client
 import shared_state
-import tdc_mapping
 import ui_style
 from plot_panel import HistogramPlotPanel
-from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection, apply_timewalk_correction
-from tpx_processing import (
-    decode_tpx3,
-    missing_trigger_warning,
-    classify_tdcs,
-    group_pixels_by_pulse,
-    group_times_relative,
-    cluster_pixels_by_pulse,
-    make_pixel_hist_from_pulses,
-    make_cluster_hists,
-    make_hist_1d,
-    hist_args,
-    flatten_dict,
-    copy_hist,
-    add_hist,
-    add_hist_2d,
-    summarize_records,
-    merge_stats,
-)
+from cluster_timing import load_correction
+from timewalk import DEFAULT_CORRECTION_PATH
+from tpx_processing import copy_hist, add_hist, add_hist_2d, merge_stats
 
 
 DEFAULT_TEMP_DIR = str(platform_paths.SCRATCH_ROOT / "serval_diag")
 # Serval names Diagnostics' files <prefix><time>..., and only those are read
 # or cleaned up, so the temp folder can be any folder.
 FILE_PREFIX = "diag"
-FILE_GLOB = f"{FILE_PREFIX}*.tpx3"
+# How often the temp folder is checked for a newly finished frame.
+_FILE_POLL_S = 0.02
+# The newest frame (no newer file after it yet) counts as finished once it
+# has gone this long unmodified -- the last frame of a batch.
+_SETTLE_S = 0.2
+# How often Serval is asked whether a finished batch has wound down.
+_BATCH_POLL_S = 0.05
+# Plot refresh period (ms): results that arrive in between are merged and
+# drawn once.
+_REDRAW_MS = 30
+
+
+def _list_frames(temp_dir):
+    """(path, mtime, size) of every Diagnostics frame in temp_dir, oldest
+    first (Serval's own file counter breaks mtime ties)."""
+    frames = []
+    with os.scandir(temp_dir) as entries:
+        for entry in entries:
+            if entry.name.startswith(FILE_PREFIX) and entry.name.endswith(".tpx3"):
+                try:
+                    st = entry.stat()
+                except OSError:
+                    continue
+                frames.append((pathlib.Path(entry.path), st.st_mtime, st.st_size))
+    frames.sort(key=lambda f: (f[1], f[0].name))
+    return frames
+
+
+def _newest_finished(frames):
+    """Index into `frames` of the newest frame Serval is done writing, or
+    None. In continuous mode Serval opens the next frame's file when a
+    frame ends, so any frame with a newer one after it is finished; the
+    newest one only counts once it has sat unmodified for _SETTLE_S."""
+    now = time.time()
+    for i in range(len(frames) - 1, -1, -1):
+        _, mtime, size = frames[i]
+        if size <= 0:
+            continue
+        if i < len(frames) - 1 or now - mtime > _SETTLE_S:
+            return i
+    return None
 
 
 class DiagnosticsInterface(ttk.Frame):
@@ -57,10 +83,13 @@ class DiagnosticsInterface(ttk.Frame):
             coordinator.register(self)
         self._plot_shared_vars = plot_shared_vars
         self.min_cluster_size_var = shared_state.min_cluster_size_var(self, plot_shared_vars)
+        self.cluster_timing_mode_var = shared_state.cluster_timing_mode_var(self, plot_shared_vars)
 
         # Loaded from whatever was last saved via the "Save current as
         # default" button (next to the tab bar); untouched until then.
         self.frame_rate_var = tk.StringVar(self, value=app_settings.get("diag.frame_rate", "10"))
+        # Off = every packet of each frame is analysed.
+        self.limit_packets_var = tk.BooleanVar(self, value=app_settings.get("diag.limit_packets", True))
         self.max_packets_var = tk.StringVar(self, value=app_settings.get("diag.max_packets", "10000"))
         self.temp_dir_var = tk.StringVar(self, value=app_settings.get("diag.temp_dir", DEFAULT_TEMP_DIR))
         self.accumulate_var = tk.BooleanVar(self, value=False)
@@ -84,6 +113,11 @@ class DiagnosticsInterface(ttk.Frame):
 
         self._accumulated = None
         self._reset_accumulation = False
+        # When each recent frame was shown (for the displayed frame rate),
+        # and how many finished frames the live loop had to skip.
+        self._shown_times = collections.deque()
+        self._frames_skipped = 0
+        self._batch_frames = 1
 
         self._build_ui()
         self._poll_queue()
@@ -102,7 +136,15 @@ class DiagnosticsInterface(ttk.Frame):
         ui_style.add_form_row(
             params, 0, "Frame rate (fps):", ttk.Entry(params, textvariable=self.frame_rate_var, width=18)
         )
-        ui_style.add_form_row(params, 1, "Max packets:", ttk.Entry(params, textvariable=self.max_packets_var, width=18))
+        packets = ttk.Frame(params)
+        packets.columnconfigure(1, weight=1)
+        ttk.Checkbutton(
+            packets, text="Limit to", variable=self.limit_packets_var, command=self._on_limit_packets_toggle,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self._max_packets_entry = ttk.Entry(packets, textvariable=self.max_packets_var, width=10)
+        self._max_packets_entry.grid(row=0, column=1, sticky="ew")
+        ui_style.add_form_row(params, 1, "Packets per frame:", packets)
+        self._on_limit_packets_toggle()
         ui_style.add_form_row(
             params, 2, "Temp folder:", ui_style.build_path_field(params, self.temp_dir_var, self._browse_temp_dir),
         )
@@ -126,7 +168,8 @@ class DiagnosticsInterface(ttk.Frame):
         ui_style.build_path_field(params, self.timewalk_path_var, self._browse_timewalk).grid(
             row=8, column=0, columnspan=2, sticky="ew", pady=(2, 4)
         )
-        ui_style.add_form_row(params, 9, "Min cluster size (hits):", ttk.Entry(params, textvariable=self.min_cluster_size_var, width=18))
+        ui_style.build_cluster_timing_mode_row(params, 9, self.cluster_timing_mode_var)
+        ui_style.add_form_row(params, 11, "Min cluster size (hits):", ttk.Entry(params, textvariable=self.min_cluster_size_var, width=18))
 
         # An occasional maintenance action, not an every-session one.
         mask = ui_style.build_section(sidebar, 3, "Hot pixel masking", collapsed=True)
@@ -141,6 +184,8 @@ class DiagnosticsInterface(ttk.Frame):
         self._stat_vars = {}
         stat_groups = [
             ("Rates", [
+                ("Frames shown (fps):", "display_fps"),
+                ("Frames skipped:", "frames_skipped"),
                 ("Laser repetition rate:", "pulses_per_second"),
                 ("Analysis speed:", "analysis_speed"),
                 ("Analysis frame time:", "analysis_time_last"),
@@ -203,13 +248,23 @@ class DiagnosticsInterface(ttk.Frame):
         return url
 
     def _poll_queue(self):
+        """Merge every result that arrived since the last tick, then redraw
+        once -- drawing costs the same however many frames went into it."""
+        got_frame = False
         try:
             while True:
                 result = self._queue.get_nowait()
-                self._apply_result(result)
+                if "error" in result:
+                    self.status_var.set(f"Processing error: {result['error']}")
+                    continue
+                self._accumulate(result)
+                got_frame = True
         except Empty:
             pass
-        self.after(200, self._poll_queue)
+        if got_frame:
+            self._plot_panel.update_plots(self._accumulated)
+            self._update_stats(self._accumulated["stats"])
+        self.after(_REDRAW_MS, self._poll_queue)
 
     def is_running(self):
         return bool(self._worker and self._worker.is_alive())
@@ -218,6 +273,7 @@ class DiagnosticsInterface(ttk.Frame):
         """Fields the global "Save current as default" button can persist."""
         return {
             "diag.frame_rate": self.frame_rate_var,
+            "diag.limit_packets": self.limit_packets_var,
             "diag.max_packets": self.max_packets_var,
             "diag.temp_dir": self.temp_dir_var,
             "diag.use_test_file": self.use_test_file_var,
@@ -236,14 +292,17 @@ class DiagnosticsInterface(ttk.Frame):
 
         try:
             frame_rate = float(self.frame_rate_var.get())
-            max_packets = int(self.max_packets_var.get())
+            max_packets = int(self.max_packets_var.get()) if self.limit_packets_var.get() else None
         except ValueError:
-            self.status_var.set("Invalid frame rate or max packets.")
+            self.status_var.set("Invalid frame rate or packet limit.")
+            return
+        if max_packets is not None and max_packets < 1:
+            self.status_var.set("The packet limit must be at least 1 (or untick Limit to).")
             return
 
         if self.timewalk_enabled_var.get():
             try:
-                self._active_timewalk = TimewalkCorrection.load(self.timewalk_path_var.get().strip())
+                self._active_timewalk = load_correction(self.timewalk_path_var.get().strip(), mode=self.cluster_timing_mode_var.get())
             except Exception as exc:
                 self.status_var.set(f"Could not load timewalk correction: {exc}")
                 return
@@ -252,6 +311,8 @@ class DiagnosticsInterface(ttk.Frame):
 
         self._reset_accumulation = True
         self._accumulated = None
+        self._shown_times.clear()
+        self._frames_skipped = 0
         self._stop_event.clear()
         test_mode = self.use_test_file_var.get()
         try:
@@ -284,12 +345,15 @@ class DiagnosticsInterface(ttk.Frame):
             self._worker.join(timeout=2)
         self.status_var.set("Stopped.")
 
+    def _on_limit_packets_toggle(self):
+        self._max_packets_entry.setEnabled(bool(self.limit_packets_var.get()))
+
     def _browse_timewalk(self):
         initial = self.timewalk_path_var.get().strip() or str(DEFAULT_CORRECTION_PATH)
         chosen = filedialog.askopenfilename(
             title="Load time-walk correction",
             initialdir=str(pathlib.Path(initial).parent),
-            filetypes=[("JSON", "*.json")],
+            filetypes=[("Time-walk / cluster timing", "*.json *.npz"), ("Legacy LUT", "*.json"), ("Cluster timing", "*.npz")],
             parent=self,
         )
         if chosen:
@@ -316,15 +380,17 @@ class DiagnosticsInterface(ttk.Frame):
             self.test_file_var.set(chosen)
 
     def _configure_server(self, frame_rate):
-        # One frame per trigger, restarted every frame (see _worker_loop) --
-        # Diagnostics wants a fresh trigger for each single frame rather
-        # than the continuous, many-frames-per-command pattern used by
-        # Monitored Acquisition and the Parameter Sweep tab.
+        """Continuous mode: one start_measurement() makes Serval write a new
+        raw file every frame on its own, so the view isn't held back by a
+        start/re-arm round trip per frame. Each start is a bounded batch
+        (serval_client.max_frames_per_batch); _live_loop starts the next
+        batch once Serval goes idle."""
+        server = self._server_url()
         try:
-            server = self._server_url()
             frame_time = 1.0 / frame_rate if frame_rate > 0 else 0.1
-            serval_client.configure_single_trigger_destination(
-                server, frame_time, self._temp_dir, f"{FILE_PREFIX}%Hms_",
+            self._batch_frames = serval_client.max_frames_per_batch(frame_time)
+            serval_client.configure_continuous_destination(
+                server, frame_time, self._temp_dir, f"{FILE_PREFIX}%Hms_", n_triggers=self._batch_frames,
             )
             return True
         except Exception as exc:
@@ -337,13 +403,6 @@ class DiagnosticsInterface(ttk.Frame):
         folder.mkdir(parents=True, exist_ok=True)
         return str(folder)
 
-    def _start_measurement(self):
-        try:
-            server = self._server_url()
-            serval_client.SESSION.get(f"{server}/measurement/start", timeout=5)
-        except Exception as exc:
-            self.status_var.set(f"Start failed: {type(exc).__name__}: {exc}")
-
     def _stop_measurement(self):
         try:
             server = self._server_url()
@@ -351,143 +410,115 @@ class DiagnosticsInterface(ttk.Frame):
         except Exception as exc:
             self.status_var.set(f"Stop failed: {type(exc).__name__}: {exc}")
 
-    def _worker_loop(self, temp_dir: pathlib.Path, frame_rate: float, max_packets: int, test_mode: bool):
-        last_path = None
-        last_mtime = None
+    def _worker_loop(self, temp_dir: pathlib.Path, frame_rate: float, max_packets, test_mode: bool):
+        frame_time = 1.0 / frame_rate if frame_rate > 0 else 0.1
+        if test_mode:
+            self._test_file_loop(frame_time, max_packets)
+        else:
+            self._live_loop(temp_dir, frame_time, max_packets)
+
+    def _test_file_loop(self, frame_time, max_packets):
+        """Re-process the test file once per frame period."""
+        while not self._stop_event.is_set():
+            started = time.perf_counter()
+            try:
+                path = pathlib.Path(self.test_file_var.get().strip())
+                if path.is_file() and path.stat().st_size > 0:
+                    self._queue.put(self._process_file(path, max_packets))
+            except Exception as exc:
+                self._queue.put({"error": str(exc)})
+            self._stop_event.wait(max(0.0, frame_time - (time.perf_counter() - started)))
+
+    def _live_loop(self, temp_dir, frame_time, max_packets):
+        """Show the newest finished frame Serval has written, as soon as it
+        is finished. Serval keeps writing frames on its own (continuous
+        mode), so if processing a frame takes longer than a frame period
+        the frames that finished meanwhile are skipped (and counted) rather
+        than queued -- the view never lags behind the detector."""
+        server = self._server_url()
+        test_path = self.test_file_var.get().strip()
+        keep = pathlib.Path(test_path).resolve() if test_path else None
+        last_shown = None
+        last_new_file = time.perf_counter()
+        last_idle_check = 0.0
+        skipped = 0
+        # Finished frames seen in the current batch: once the whole batch
+        # is in, the next one is started as soon as Serval reports idle.
+        batch_seen = 0
+        # Fallback if frames stop arriving before a batch looks complete.
+        idle_check = max(1.0, 3.0 * frame_time + 0.5)
+
+        try:
+            serval_client.start_measurement(server)
+        except Exception as exc:
+            self._queue.put({"error": f"Start failed: {type(exc).__name__}: {exc}"})
 
         while not self._stop_event.is_set():
             try:
-                if test_mode:
-                    newest = pathlib.Path(self.test_file_var.get().strip())
-                    if not newest.exists():
-                        time.sleep(0.5)
-                        continue
-                    newest_stat = newest.stat()
-                    if newest_stat.st_size == 0:
-                        time.sleep(0.5)
-                        continue
-                else:
-                    # nTriggers=1 (see _configure_server) means Serval
-                    # auto-stops after each single frame, so a fresh start
-                    # is needed for every one.
-                    self._start_measurement()
-                    newest = self._wait_for_new_file(temp_dir, last_path, last_mtime)
-                    if newest is None:
-                        continue
-
-                    newest_stat = newest.stat()
-                    if newest_stat.st_size == 0:
-                        time.sleep(0.2)
-                        continue
-
-                    files = sorted(temp_dir.glob(FILE_GLOB), key=lambda p: p.stat().st_mtime)
-                    test_path = pathlib.Path(self.test_file_var.get().strip()) if self.test_file_var.get() else None
-                    for old in files[:-1]:
-                        if test_path and old.resolve() == test_path.resolve():
-                            continue
-                        try:
-                            old.unlink()
-                        except OSError:
-                            pass
-
-                result = self._process_file(newest, frame_rate, max_packets)
-                if result:
+                frames = _list_frames(temp_dir)
+                index = _newest_finished(frames)
+                if index is not None and frames[index][0] != last_shown:
+                    path = frames[index][0]
+                    # Finished frames since the last one shown never get shown.
+                    names = [f[0] for f in frames]
+                    start = 0
+                    if last_shown is not None and last_shown in names:
+                        start = names.index(last_shown) + 1
+                    if last_shown is not None:
+                        skipped += max(0, index - start)
+                    batch_seen += index - start + 1
+                    # Everything older than this frame is done with.
+                    for old in names[:index]:
+                        if keep is None or old.resolve() != keep:
+                            try:
+                                old.unlink()
+                            except OSError:
+                                pass
+                    last_shown = path
+                    last_new_file = time.perf_counter()
+                    result = self._process_file(path, max_packets)
+                    result["frames_skipped"] = skipped
                     self._queue.put(result)
+                    continue
 
-                last_path = newest
-                last_mtime = newest_stat.st_mtime
-                if test_mode:
-                    time.sleep(0.5)
+                now = time.perf_counter()
+                batch_done = batch_seen >= self._batch_frames and now - last_idle_check > _BATCH_POLL_S
+                if batch_done or now - last_new_file > idle_check:
+                    last_idle_check = last_new_file = now
+                    if self._restart_batch_if_idle(server, frame_time):
+                        batch_seen = 0
+                self._stop_event.wait(_FILE_POLL_S)
             except Exception as exc:
                 self._queue.put({"error": str(exc)})
-                time.sleep(1)
+                self._stop_event.wait(0.5)
 
-    def _wait_for_new_file(self, temp_dir: pathlib.Path, last_path, last_mtime):
-        start = time.time()
-        while not self._stop_event.is_set():
-            files = sorted(temp_dir.glob(FILE_GLOB), key=lambda p: p.stat().st_mtime)
-            if files:
-                newest = files[-1]
-                newest_stat = newest.stat()
-                if newest != last_path or newest_stat.st_mtime != last_mtime:
-                    if newest_stat.st_size > 0 and (time.time() - newest_stat.st_mtime) > 0.2:
-                        return newest
-            if time.time() - start > 5:
-                return None
-            time.sleep(0.1)
-        return None
+    def _restart_batch_if_idle(self, server, frame_time):
+        """Serval auto-stops after each batch of frames; start the next.
+        True if a new batch was started."""
+        try:
+            if serval_client.measurement_busy(server):
+                return False
+            serval_client.restart_continuous_batch(server, frame_time, self._batch_frames)
+            return True
+        except Exception as exc:
+            if not self._stop_event.is_set():
+                self._queue.put({"error": f"Batch restart failed: {type(exc).__name__}: {exc}"})
+            return False
 
-    def _process_file(self, path: pathlib.Path, frame_rate: float, max_packets: int):
-        start = time.perf_counter()
-        settings = self._plot_panel.hist_snapshot()
-
-        pixels, tdcs, processed_packets, total_packets = decode_tpx3(str(path), max_packets=max_packets)
-        if self._active_timewalk is not None:
-            pixels = apply_timewalk_correction(pixels, self._active_timewalk)
-        etof, itof, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
-
-        pulses_sorted = sorted(pulses)
-        pixels_by_pulse = group_pixels_by_pulse(pixels, pulses_sorted)
-        clusters_by_pulse, cluster_size_sum, cluster_count = cluster_pixels_by_pulse(pixels_by_pulse)
-        etof_by_pulse = group_times_relative(etof, pulses_sorted)
-        itof_by_pulse = group_times_relative(itof, pulses_sorted)
-
-        pulse_records = []
-        for pulse_time in pulses_sorted:
-            pulse_records.append(
-                (
-                    pulse_time,
-                    pixels_by_pulse.get(pulse_time, []),
-                    clusters_by_pulse.get(pulse_time, []),
-                    etof_by_pulse.get(pulse_time, []),
-                    itof_by_pulse.get(pulse_time, []),
-                )
-            )
-
-        pixel_hist = make_pixel_hist_from_pulses(
-            pixels_by_pulse,
-            bins=int(settings["pixel"]["bins"]),
-            range_min=settings["pixel"]["min"],
-            range_max=settings["pixel"]["max"],
+    def _process_file(self, path: pathlib.Path, max_packets):
+        """max_packets: analyse only each frame's first max_packets packets
+        (None = all of them)."""
+        frame = raw_conversion.process_raw_file(
+            path, self._plot_panel.hist_snapshot(), self._active_timewalk, max_packets=max_packets
         )
-        cluster_hist, cluster_t_hist = make_cluster_hists(
-            clusters_by_pulse,
-            t_bins=int(settings["cluster_t"]["bins"]),
-            t_min=settings["cluster_t"]["min"],
-            t_max=settings["cluster_t"]["max"],
-            xy_bins=int(settings["cluster"]["bins"]),
-            xy_min=settings["cluster"]["min"],
-            xy_max=settings["cluster"]["max"],
-        )
-        itof_hist = make_hist_1d(flatten_dict(itof_by_pulse), **hist_args(settings["itof"]))
-        etof_hist = make_hist_1d(flatten_dict(etof_by_pulse), **hist_args(settings["etof"]))
+        return frame["plot_result"]
 
-        stats = summarize_records(
-            pulse_records,
-            cluster_size_sum,
-            cluster_count,
-            processed_packets,
-            total_packets,
-            start,
-        )
-        stats["analysis_time_last"] = time.perf_counter() - start
-
-        return {
-            "pixel_hist": pixel_hist,
-            "cluster_hist": cluster_hist,
-            "itof_hist": itof_hist,
-            "etof_hist": etof_hist,
-            "cluster_t_hist": cluster_t_hist,
-            "stats": stats,
-            "pulse_records": pulse_records,
-            "settings": settings,
-            "warning": missing_trigger_warning(len(pixels), len(pulses_sorted)),
-        }
-
-    def _apply_result(self, result):
-        if "error" in result:
-            self.status_var.set(f"Processing error: {result['error']}")
-            return
+    def _accumulate(self, result):
+        now = time.perf_counter()
+        self._shown_times.append(now)
+        while self._shown_times and now - self._shown_times[0] > 2.0:
+            self._shown_times.popleft()
+        self._frames_skipped = result.get("frames_skipped", self._frames_skipped)
 
         settings_changed = (
             self._accumulated is not None
@@ -525,8 +556,6 @@ class DiagnosticsInterface(ttk.Frame):
             )
             self._accumulated["stats"] = merge_stats(self._accumulated["stats"], result["stats"])
 
-        self._plot_panel.update_plots(self._accumulated)
-        self._update_stats(self._accumulated["stats"])
         if result.get("warning"):
             self.status_var.set(f"Warning: {result['warning']}")
         elif self.status_var.get().startswith("Warning: "):
@@ -537,10 +566,14 @@ class DiagnosticsInterface(ttk.Frame):
             return f"{value:.3f}" if isinstance(value, float) else str(value)
 
         analysis_speed = (stats["real_time"] / stats["analysis_time"]) if stats["analysis_time"] > 0 else 0
-        # Every other stat var is keyed by its own summarize_records key.
+        # Every other stat var is keyed by its own summarize_frame key.
+        shown = self._shown_times
+        display_fps = (len(shown) - 1) / (shown[-1] - shown[0]) if len(shown) > 1 and shown[-1] > shown[0] else 0.0
         derived = {
             "analysis_speed": analysis_speed,
             "analysis_time_last": stats.get("analysis_time_last", 0),
+            "display_fps": display_fps,
+            "frames_skipped": self._frames_skipped,
         }
         for key, var in self._stat_vars.items():
             var.set(fmt(derived[key] if key in derived else stats[key]))
