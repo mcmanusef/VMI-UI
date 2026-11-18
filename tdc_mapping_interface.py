@@ -80,6 +80,10 @@ class TdcMappingInterface(ttk.Frame):
             self._build_signal_section(section, name)
             row += 1
 
+        pairing = ui_style.build_section(page, row, "Pulse pairing")
+        self._build_pairing_section(pairing)
+        row += 1
+
         presets = ui_style.build_section(page, row, "Presets")
         ui_style.build_button_bar(presets, 0, [
             ("Save Preset...", self._save_preset),
@@ -185,6 +189,26 @@ class TdcMappingInterface(ttk.Frame):
         ttk.Checkbutton(dither_row, text="On, width:", variable=dither_var).grid(row=0, column=0, sticky="w")
         ttk.Entry(dither_row, textvariable=dither_ns_var).grid(row=0, column=1, sticky="ew", padx=(4, 0))
         ui_style.add_form_row(section, row + 5, "Dither (ns):", dither_row)
+
+    def _build_pairing_section(self, section):
+        labels = list(tdc_mapping.PULSE_OFFSET_LABELS.values())
+        for row, (species, title) in enumerate(tdc_mapping.PULSE_OFFSET_SPECIES):
+            var = app_settings.persistent_var(
+                self, tk.StringVar, tdc_mapping.pulse_offset_key(species), tdc_mapping.PULSE_OFFSET_LABELS[0]
+            )
+            ui_style.add_form_row(section, row, f"{title} from:", ttk.Combobox(
+                section, textvariable=var, values=labels, state="readonly", width=18,
+            ))
+        ui_style.add_note(
+            section, len(tdc_mapping.PULSE_OFFSET_SPECIES),
+            "Pair each kind of hit with the others from the previous or next pulse instead of its own. "
+            "Pairing across pulses gives only random coincidences: the false-coincidence background. "
+            "A neighbour more than half a trigger period away (first / last pulse, frame gaps) is left "
+            "unpaired. Applies to what's shown and analysed -- Diagnostics' x / y vs e-ToF maps and the "
+            "Coincidence tab (on its next Load) -- never to saved cv4 / calibrated files or calibration "
+            "fits, which always keep every hit's own pulse.",
+            pady=(4, 4),
+        )
 
     # ---- presets ------------------------------------------------------------
 

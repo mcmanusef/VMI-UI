@@ -662,6 +662,52 @@ def hist2d_ranges(xs, ys, x_bins, x_lo, x_hi, y_bins, y_lo, y_hi):
     return np.bincount(flat, minlength=x_bins * y_bins).reshape(x_bins, y_bins).astype(np.float64)
 
 
+def shift_frame_pulses(events: FrameEvents, offsets) -> FrameEvents:
+    """A copy of `events` re-paired across pulses for display: with offset
+    +1 for a species ({"clusters", "etof", "tof"} -> -1/0/+1), its rows from
+    pulse p+1 are labelled pulse p, so they pair with the other species of
+    pulse p (-1: from p-1). Rows whose neighbour pulse isn't about one
+    trigger period away (the frame's first / last pulse, gaps) are dropped.
+    Times stay relative to each row's own pulse; rows stay sorted by pulse."""
+    offsets = offsets or {}
+    if not any(offsets.values()):
+        return events
+    pulses = np.asarray(events.pulses, dtype=np.float64)
+    gaps = np.diff(pulses)
+    gaps = gaps[gaps > 0]
+    period = float(np.median(gaps)) if gaps.size else float("nan")
+
+    def shift(pulse, offset):
+        """(new pulse labels, rows kept)."""
+        pulse = np.asarray(pulse, dtype=np.int64)
+        if not offset:
+            return pulse, np.ones(pulse.size, dtype=bool)
+        target = pulse - int(offset)
+        ok = (target >= 0) & (target < pulses.size)
+        if np.isfinite(period) and period > 0:
+            steps = np.full(pulse.size, np.nan)
+            steps[ok] = (pulses[pulse[ok]] - pulses[target[ok]]) / period
+            ok &= np.abs(steps - offset) < 0.5
+        else:
+            ok[:] = False
+        return target[ok], ok
+
+    fields = {}
+    c_pulse, c_ok = shift(events.cluster_pulse, offsets.get("clusters", 0))
+    fields["cluster_pulse"] = c_pulse
+    for name in ("cluster_x", "cluster_y", "cluster_t", "cluster_tot", "cluster_n"):
+        fields[name] = getattr(events, name)[c_ok]
+    p_pulse, p_ok = shift(events.pixel_pulse, offsets.get("clusters", 0))
+    fields["pixel_pulse"] = p_pulse
+    for name in ("pixel_x", "pixel_y", "pixel_t", "pixel_tot"):
+        fields[name] = getattr(events, name)[p_ok]
+    e_pulse, e_ok = shift(events.etof_pulse, offsets.get("etof", 0))
+    fields["etof_pulse"], fields["etof_t"] = e_pulse, events.etof_t[e_ok]
+    i_pulse, i_ok = shift(events.itof_pulse, offsets.get("tof", 0))
+    fields["itof_pulse"], fields["itof_t"] = i_pulse, events.itof_t[i_ok]
+    return FrameEvents(pulses=events.pulses, **fields)
+
+
 def cluster_etof_pairs(events: FrameEvents):
     """(cluster row, e-ToF row) index arrays for every cluster / e-ToF hit
     pair that share a pulse -- a cluster in a pulse with two e-ToF hits

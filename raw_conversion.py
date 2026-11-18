@@ -29,6 +29,7 @@ from tpx_processing import (
     make_hist_1d,
     make_etof_correlation_hists,
     rotate_points,
+    shift_frame_pulses,
     hist_args,
     copy_hist,
     add_hist,
@@ -107,9 +108,14 @@ def process_raw_file(path, settings, timewalk=None, min_cluster_size=None, max_p
     }
     corr = settings.get(ETOF_CORRELATION_KEY)
     if corr is not None:
-        # Only asked for by a plot panel showing the x / y vs e-ToF maps.
+        # Only asked for by a plot panel showing the x / y vs e-ToF maps:
+        # paired per the TDC mapping's pulse pairing (display only -- the
+        # returned events keep every hit's own pulse). The offsets go in the
+        # result's settings so a change restarts accumulation.
+        offsets = tdc_mapping.get_pulse_offsets()
+        plot_result["settings"] = {**settings, "pulse_offsets": offsets}
         plot_result["x_etof_hist"], plot_result["y_etof_hist"] = make_etof_correlation_hists(
-            events, corr["bins"], corr["min"], corr["max"], settings["cluster"]["min"], settings["cluster"]["max"],
+            shift_frame_pulses(events, offsets), corr["bins"], corr["min"], corr["max"], settings["cluster"]["min"], settings["cluster"]["max"],
             angle_deg=angle, cx=cx, cy=cy,
         )
     return {"events": events, "plot_result": plot_result}

@@ -184,6 +184,42 @@ def _settings_key(signal_name, field):
     return f"tdc_mapping.{signal_name}.{field}"
 
 
+# ---- pulse pairing ------------------------------------------------------------
+#
+# Which pulse clusters, e-ToF hits and i-ToF hits are taken from when they
+# are paired with each other: -1 the previous pulse, 0 their own, +1 the
+# next. Anything but 0 pairs them across pulses, which gives only random
+# coincidences -- the false-coincidence background. Applied to what is shown
+# and analysed (the live x / y vs e-ToF maps, the Coincidence tab), never to
+# saved files, which always keep every hit's own pulse.
+
+PULSE_OFFSET_SPECIES = (("clusters", "Clusters"), ("etof", "e-ToF"), ("tof", "i-ToF"))
+PULSE_OFFSET_LABELS = {-1: "Previous pulse", 0: "Same pulse", 1: "Next pulse"}
+_PULSE_OFFSET_BY_LABEL = {label: offset for offset, label in PULSE_OFFSET_LABELS.items()}
+
+
+def pulse_offset_key(species):
+    return f"tdc_mapping.pulse_offset.{species}"
+
+
+def get_pulse_offsets():
+    """{"clusters", "etof", "tof"} -> -1, 0 or +1, as set on the Hardware
+    tab's TDC mapping page (stored as its labels)."""
+    return {
+        species: _PULSE_OFFSET_BY_LABEL.get(app_settings.get(pulse_offset_key(species), PULSE_OFFSET_LABELS[0]), 0)
+        for species, _ in PULSE_OFFSET_SPECIES
+    }
+
+
+def describe_pulse_offsets(offsets):
+    """e.g. "i-ToF from the next pulse", or "" when every offset is 0."""
+    names = dict(PULSE_OFFSET_SPECIES)
+    return ", ".join(
+        f"{names[species]} from the {PULSE_OFFSET_LABELS[offset].lower()}"
+        for species, offset in (offsets or {}).items() if offset
+    )
+
+
 def get_active_mapping():
     """The mapping every collection/analysis call site should use right
     now: whatever the "tdc mapping" Hardware tab's widgets last wrote to

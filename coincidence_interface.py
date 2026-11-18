@@ -12,8 +12,8 @@ import qtk as tk
 from qtk import ttk, filedialog, grid_into
 
 import app_settings
-import apply_calibration as ac
 import coincidence as co
+import tdc_mapping
 import ui_style
 from calibration_apply_interface import CalibrationPicker
 from calibration_interface import (
@@ -98,11 +98,9 @@ class CoincidenceInterface(ttk.Frame):
         self.cv4_path_var = pvar(tk.StringVar, "cv4_path", "")
         self.apply_momentum_var = pvar(tk.BooleanVar, "apply_momentum", True)
         self.apply_mq_var = pvar(tk.BooleanVar, "apply_mq", True)
-        # Which pulse each species is taken from (see coincidence.load_dataset).
-        same = co.PULSE_OFFSET_LABELS[0]
-        self.pulse_offset_vars = {
-            species: pvar(tk.StringVar, f"pulse_offset_{species}", same) for species in ac.PULSE_SPECIES
-        }
+        # Which pulse each species is taken from: set on the Hardware tab's
+        # TDC mapping page (tdc_mapping.get_pulse_offsets), shown here.
+        self._pairing_var = tk.StringVar(self, value="")
         self._source_note_var = tk.StringVar(self, value="")
         self.mode_var = pvar(tk.StringVar, "mode", MODE_2D)
         self.x_var = pvar(tk.StringVar, "x", "px")
@@ -163,6 +161,7 @@ class CoincidenceInterface(ttk.Frame):
                     self.split_var, self.split_bins_var):
             var.trace_add("write", self._schedule_main_redraw)
         self.gate_bins_var.trace_add("write", self._on_gate_bins_changed)
+        self._refresh_pairing()
         for var in self._rotation_vars.values():
             var.trace_add("write", self._on_rotation_changed)
         self._redraw()
@@ -218,23 +217,12 @@ class CoincidenceInterface(ttk.Frame):
             "the same rotation as the live tabs' cluster maps.",
             pady=(0, 4),
         )
-        pairing = ttk.Frame(data)
-        pairing.grid(row=7, column=0, columnspan=2, sticky="ew")
-        pairing.columnconfigure(1, weight=1)
-        for row, (species, label) in enumerate(
-            (("clusters", "Clusters from:"), ("etof", "e-ToF from:"), ("tof", "i-ToF from:"))
-        ):
-            ui_style.add_form_row(pairing, row, label, ttk.Combobox(
-                pairing, textvariable=self.pulse_offset_vars[species],
-                values=list(co.PULSE_OFFSET_LABELS.values()), state="readonly", width=18,
-            ))
+        ui_style.add_form_row(data, 7, "Pulse pairing:", ttk.Label(data, textvariable=self._pairing_var))
         ui_style.add_note(
             data, 8,
-            "Taking one kind of hit from the previous or next pulse pairs it with the others across "
-            "pulses, which gives only random coincidences: the false-coincidence background. A neighbour "
-            "more than half a trigger period off (first/last pulse, frame gaps) is left unpaired. A "
-            "calibrated file's clusters and e-ToF are already paired, so with one only i-ToF can differ. "
-            "Applies on the next Load.",
+            "Set on Hardware > TDC mapping; applies on the next Load. Pairing across pulses gives only "
+            "random coincidences (the false-coincidence background). A calibrated file's clusters and "
+            "e-ToF are already paired, so with one only i-ToF can come from a different pulse.",
             pady=(0, 4),
         )
 
@@ -572,8 +560,7 @@ class CoincidenceInterface(ttk.Frame):
         if not pathlib.Path(path).is_file():
             self.status_var.set(f"File not found: {path}")
             return
-        values = {label: offset for offset, label in co.PULSE_OFFSET_LABELS.items()}
-        offsets = {species: values.get(var.get(), 0) for species, var in self.pulse_offset_vars.items()}
+        offsets = tdc_mapping.get_pulse_offsets()
         if cv4:
             momentum = self._picker.calibrations[KIND_MOMENTUM] if self.apply_momentum_var.get() else None
             mq = self._picker.calibrations[KIND_MQ] if self.apply_mq_var.get() else None
@@ -595,6 +582,14 @@ class CoincidenceInterface(ttk.Frame):
             work, self._on_loaded,
             lambda exc: self.status_var.set(f"Error: could not load the dataset: {exc}"),
         )
+
+    def _refresh_pairing(self):
+        """Keep the "Pulse pairing" line in step with the TDC mapping page."""
+        text = tdc_mapping.describe_pulse_offsets(tdc_mapping.get_pulse_offsets())
+        text = text[:1].upper() + text[1:] if text else "Same pulse for all (true coincidences)"
+        if self._pairing_var.get() != text:
+            self._pairing_var.set(text)
+        self.after(1000, self._refresh_pairing)
 
     def _on_rotation_changed(self, *_):
         if self._rotation_after is not None:
@@ -633,7 +628,7 @@ class CoincidenceInterface(ttk.Frame):
         self.rows_var.set(str(dataset.n_rows))
         columns = len(dataset.variables)
         calibrated = "" if dataset.calibrated else " (uncalibrated: no momenta)"
-        shifted = co.describe_pulse_offsets(self._loaded_offsets)
+        shifted = tdc_mapping.describe_pulse_offsets(self._loaded_offsets)
         shifted = f" Pairing {shifted}." if shifted else ""
         self.status_var.set(
             f"Loaded {dataset.n_rows} coincidence rows and {columns} columns from "

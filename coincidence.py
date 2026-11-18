@@ -131,19 +131,6 @@ class Dataset:
         return variable_for(key).axis_label
 
 
-PULSE_OFFSET_LABELS = {-1: "Previous pulse", 0: "Same pulse", 1: "Next pulse"}
-
-
-def describe_pulse_offsets(pulse_offsets):
-    """e.g. "i-ToF from the next pulse", or "" when every offset is 0."""
-    names = {"clusters": "clusters", "etof": "e-ToF", "tof": "i-ToF"}
-    parts = [
-        f"{names[species]} from the {PULSE_OFFSET_LABELS[offset].lower()}"
-        for species, offset in (pulse_offsets or {}).items() if offset
-    ]
-    return ", ".join(parts)
-
-
 def load_dataset(path, pulse_offsets=None):
     """Electron rows joined to their pulse's ions (see the module docstring),
     from a file the apply calibration tab wrote.
