@@ -102,6 +102,7 @@ def process_raw_file(path, settings, timewalk=None, min_cluster_size=None, max_p
         # Only asked for by a plot panel showing the x / y vs e-ToF maps.
         plot_result["x_etof_hist"], plot_result["y_etof_hist"] = make_etof_correlation_hists(
             events, corr["bins"], corr["min"], corr["max"], settings["cluster"]["min"], settings["cluster"]["max"],
+            angle_deg=corr.get("angle", 0.0), cx=corr.get("cx", 0.0), cy=corr.get("cy", 0.0),
         )
     return {"events": events, "plot_result": plot_result}
 

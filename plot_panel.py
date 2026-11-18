@@ -54,6 +54,9 @@ DEFAULT_HIST_SETTINGS = {
     "etof": {"bins": 2000, "min": 0.0, "max": 1000.0},
     ETOF_CORR_KEY: {"bins": 256, "min": 0.0, "max": 1000.0},
 }
+# Rotation of the cluster positions before the x / y vs e-ToF maps are
+# binned: angle (degrees, counter-clockwise) about the point (cx, cy) px.
+ETOF_CORR_ROTATION_DEFAULTS = {"angle": 0.0, "cx": _DETECTOR_PX / 2, "cy": _DETECTOR_PX / 2}
 
 
 class HistogramPlotPanel(ttk.Frame):
@@ -98,6 +101,7 @@ class HistogramPlotPanel(ttk.Frame):
             self._hist_vars = shared_vars["hist_vars"]
             self.log_etof_corr_var = shared_vars.get("log_etof_corr_var") or tk.BooleanVar(self, value=False)
             self.show_etof_corr_var = shared_vars.get("show_etof_corr_var") or tk.BooleanVar(self, value=False)
+            self._rotation_vars = shared_vars.get("etof_corr_rotation_vars") or self._own_rotation_vars()
         else:
             self.log_pixel_var = tk.BooleanVar(self, value=False)
             self.log_cluster_var = tk.BooleanVar(self, value=False)
@@ -117,6 +121,7 @@ class HistogramPlotPanel(ttk.Frame):
             }
             self.log_etof_corr_var = tk.BooleanVar(self, value=False)
             self.show_etof_corr_var = tk.BooleanVar(self, value=False)
+            self._rotation_vars = self._own_rotation_vars()
 
         # Base to fall back on for any field that fails to parse below, then
         # immediately replaced with whatever the (possibly shared/persisted)
@@ -145,6 +150,9 @@ class HistogramPlotPanel(ttk.Frame):
 
     def hist_snapshot(self):
         return {key: dict(cfg) for key, cfg in self._hist_settings.items()}
+
+    def _own_rotation_vars(self):
+        return {key: tk.StringVar(self, value=f"{value:g}") for key, value in ETOF_CORR_ROTATION_DEFAULTS.items()}
 
     def showing_etof_correlation(self):
         return self._corr_enabled and bool(self.show_etof_corr_var.get())
@@ -318,6 +326,15 @@ class HistogramPlotPanel(ttk.Frame):
                 plot_opts, text="Log scale (x / y vs e-ToF)", variable=self.log_etof_corr_var,
                 command=self._on_log_toggle,
             ).grid(row=4, column=3, columnspan=4, sticky="w", padx=(6, 0))
+            rotation = ttk.Frame(plot_opts)
+            rotation.grid(row=5, column=0, columnspan=12, sticky="w", pady=(6, 0))
+            ttk.Label(rotation, text="Rotate x / y by").grid(row=0, column=0, sticky="w")
+            ttk.Entry(rotation, textvariable=self._rotation_vars["angle"], width=7).grid(row=0, column=1, padx=(6, 2))
+            ttk.Label(rotation, text="° about x").grid(row=0, column=2)
+            ttk.Entry(rotation, textvariable=self._rotation_vars["cx"], width=7).grid(row=0, column=3, padx=(6, 2))
+            ttk.Label(rotation, text="y").grid(row=0, column=4, padx=(4, 0))
+            ttk.Entry(rotation, textvariable=self._rotation_vars["cy"], width=7).grid(row=0, column=5, padx=(6, 2))
+            ttk.Label(rotation, text="px (counter-clockwise; 0 = none)").grid(row=0, column=6, padx=(4, 0))
 
     def _build_hist_frame(self, container):
         # Two separate titled/bordered tables (QGroupBox via ttk.LabelFrame)
@@ -471,6 +488,9 @@ class HistogramPlotPanel(ttk.Frame):
         for key in keys:
             for field in ("bins", "min", "max"):
                 self._hist_vars[key][field].trace_add("write", self._on_hist_setting_change)
+        if self._corr_enabled:
+            for var in self._rotation_vars.values():
+                var.trace_add("write", self._on_hist_setting_change)
 
     def _read_hist_settings(self):
         settings = {}
@@ -494,6 +514,12 @@ class HistogramPlotPanel(ttk.Frame):
                     cfg["max"] = high
             except ValueError:
                 pass
+            if key == ETOF_CORR_KEY:
+                for field, default in ETOF_CORR_ROTATION_DEFAULTS.items():
+                    try:
+                        cfg[field] = float(self._rotation_vars[field].get())
+                    except ValueError:
+                        cfg.setdefault(field, default)
             settings[key] = cfg
         return settings
 

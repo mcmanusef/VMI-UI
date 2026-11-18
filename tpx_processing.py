@@ -679,11 +679,25 @@ def cluster_etof_pairs(events: FrameEvents):
     return cluster_rows, np.repeat(starts, counts) + within
 
 
+def rotate_points(x, y, angle_deg, cx, cy):
+    """(x, y) rotated by angle_deg (counter-clockwise, with y up) about (cx, cy)."""
+    if not angle_deg:
+        return np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    theta = np.deg2rad(angle_deg)
+    c, s = np.cos(theta), np.sin(theta)
+    dx = np.asarray(x, dtype=np.float64) - cx
+    dy = np.asarray(y, dtype=np.float64) - cy
+    return cx + dx * c - dy * s, cy + dx * s + dy * c
+
+
 def make_etof_correlation_hists(events: FrameEvents, bins: int, t_min: float, t_max: float,
-                                pos_min: float, pos_max: float):
+                                pos_min: float, pos_max: float, angle_deg: float = 0.0,
+                                cx: float = 0.0, cy: float = 0.0):
     """(x vs e-ToF, y vs e-ToF) 2D histograms, each [e-ToF time bin,
     position bin], over every cluster / e-ToF pair in the same pulse (see
-    cluster_etof_pairs). `bins` is used for both axes."""
+    cluster_etof_pairs). `bins` is used for both axes. The cluster positions
+    are first rotated by angle_deg about (cx, cy) (see rotate_points), so x
+    and y can be lined up with e.g. the laser polarization."""
     bins = max(1, int(bins))
     if t_max <= t_min:
         t_max = t_min + 1.0
@@ -691,9 +705,10 @@ def make_etof_correlation_hists(events: FrameEvents, bins: int, t_min: float, t_
         pos_min, pos_max = 0.0, float(chip_layout.get_active_layout().size)
     cluster_rows, etof_rows = cluster_etof_pairs(events)
     t = events.etof_t[etof_rows]
+    xs, ys = rotate_points(events.cluster_x, events.cluster_y, angle_deg, cx, cy)
     return tuple(
         hist2d_ranges(t, pos[cluster_rows], bins, t_min, t_max, bins, pos_min, pos_max)
-        for pos in (events.cluster_x, events.cluster_y)
+        for pos in (xs, ys)
     )
 
 

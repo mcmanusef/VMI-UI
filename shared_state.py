@@ -24,7 +24,7 @@ import app_settings
 import platform_paths
 from cluster_timing import DEFAULT_MODE as CLUSTER_TIMING_DEFAULT_MODE
 from cluster_timing import MODE_SETTINGS_KEY as CLUSTER_TIMING_MODE_KEY
-from plot_panel import DEFAULT_HIST_SETTINGS
+from plot_panel import DEFAULT_HIST_SETTINGS, ETOF_CORR_ROTATION_DEFAULTS
 from tpx_processing import DEFAULT_MIN_CLUSTER_SIZE, MIN_CLUSTER_SIZE_KEY
 
 _LOG_KEYS = (
@@ -57,6 +57,10 @@ def make_plot_shared_vars(master):
     # Whether a panel built with etof_correlation=True shows its x / y vs
     # e-ToF maps.
     shared["show_etof_corr_var"] = app_settings.persistent_var(master, tk.BooleanVar, "plot.show_etof_corr", False)
+    shared["etof_corr_rotation_vars"] = {
+        field: app_settings.persistent_var(master, tk.StringVar, f"plot.etof_corr.{field}", f"{value:g}")
+        for field, value in ETOF_CORR_ROTATION_DEFAULTS.items()
+    }
     # Not a plot setting, but every tab with a plot panel clusters, and
     # sharing it here keeps their "Min cluster size" fields in step.
     shared["min_cluster_size_var"] = app_settings.persistent_var(
