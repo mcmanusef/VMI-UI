@@ -223,6 +223,7 @@ class DiagnosticsInterface(ttk.Frame):
             on_settings_changed=self._on_panel_settings_changed,
             plots_first=True,
             shared_vars=self._plot_shared_vars,
+            etof_correlation=True,
         )
         self._plot_panel.grid(row=0, column=0, sticky="nsew")
 
@@ -539,6 +540,7 @@ class DiagnosticsInterface(ttk.Frame):
                 "cluster_t_hist": copy_hist(result["cluster_t_hist"]),
                 "stats": result["stats"].copy(),
                 "settings": result["settings"],
+                **{key: result[key].copy() for key in raw_conversion.OPTIONAL_2D_HISTS if key in result},
             }
             self._reset_accumulation = False
         else:
@@ -555,6 +557,9 @@ class DiagnosticsInterface(ttk.Frame):
                 result["cluster_t_hist"],
             )
             self._accumulated["stats"] = merge_stats(self._accumulated["stats"], result["stats"])
+            for key in raw_conversion.OPTIONAL_2D_HISTS:
+                if key in result:
+                    self._accumulated[key] = add_hist_2d(self._accumulated.get(key), result[key])
 
         if result.get("warning"):
             self.status_var.set(f"Warning: {result['warning']}")

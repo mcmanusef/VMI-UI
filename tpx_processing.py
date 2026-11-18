@@ -650,6 +650,53 @@ def hist2d_uniform(xs, ys, bins, lo, hi):
     return np.bincount(flat, minlength=bins * bins).reshape(bins, bins).astype(np.float64)
 
 
+def hist2d_ranges(xs, ys, x_bins, x_lo, x_hi, y_bins, y_lo, y_hi):
+    """np.histogram2d(xs, ys, (x_bins, y_bins), range=[[x_lo, x_hi], [y_lo, y_hi]])[0],
+    with each axis binned on its own."""
+    if len(xs) == 0:
+        return np.zeros((x_bins, y_bins), dtype=np.float64)
+    ix, okx = _uniform_bin_index(xs, x_bins, x_lo, x_hi)
+    iy, oky = _uniform_bin_index(ys, y_bins, y_lo, y_hi)
+    ok = okx & oky
+    flat = ix[ok] * y_bins + iy[ok]
+    return np.bincount(flat, minlength=x_bins * y_bins).reshape(x_bins, y_bins).astype(np.float64)
+
+
+def cluster_etof_pairs(events: FrameEvents):
+    """(cluster row, e-ToF row) index arrays for every cluster / e-ToF hit
+    pair that share a pulse -- a cluster in a pulse with two e-ToF hits
+    gives two pairs. Relies on etof_pulse being sorted (FrameEvents rows are
+    ordered by pulse)."""
+    starts = np.searchsorted(events.etof_pulse, events.cluster_pulse, side="left")
+    ends = np.searchsorted(events.etof_pulse, events.cluster_pulse, side="right")
+    counts = ends - starts
+    total = int(counts.sum())
+    if total == 0:
+        empty = np.zeros(0, dtype=np.int64)
+        return empty, empty
+    cluster_rows = np.repeat(np.arange(len(counts)), counts)
+    within = np.arange(total) - np.repeat(np.cumsum(counts) - counts, counts)
+    return cluster_rows, np.repeat(starts, counts) + within
+
+
+def make_etof_correlation_hists(events: FrameEvents, bins: int, t_min: float, t_max: float,
+                                pos_min: float, pos_max: float):
+    """(x vs e-ToF, y vs e-ToF) 2D histograms, each [e-ToF time bin,
+    position bin], over every cluster / e-ToF pair in the same pulse (see
+    cluster_etof_pairs). `bins` is used for both axes."""
+    bins = max(1, int(bins))
+    if t_max <= t_min:
+        t_max = t_min + 1.0
+    if pos_max <= pos_min:
+        pos_min, pos_max = 0.0, float(chip_layout.get_active_layout().size)
+    cluster_rows, etof_rows = cluster_etof_pairs(events)
+    t = events.etof_t[etof_rows]
+    return tuple(
+        hist2d_ranges(t, pos[cluster_rows], bins, t_min, t_max, bins, pos_min, pos_max)
+        for pos in (events.cluster_x, events.cluster_y)
+    )
+
+
 def make_pixel_hist(xs, ys, bins: int = 256, range_min: float = 0.0, range_max: float = 256.0):
     bins = max(1, int(bins))
     if range_max <= range_min:

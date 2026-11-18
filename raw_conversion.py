@@ -27,6 +27,7 @@ from tpx_processing import (
     make_pixel_hist,
     make_cluster_hists,
     make_hist_1d,
+    make_etof_correlation_hists,
     hist_args,
     copy_hist,
     add_hist,
@@ -37,6 +38,11 @@ from tpx_processing import (
 
 
 # ---- per-file pipeline ----------------------------------------------------
+
+# The hist settings key that asks process_raw_file for the x / y vs e-ToF
+# maps (see plot_panel), and the plot_result keys those come back under.
+ETOF_CORRELATION_KEY = "etof_corr"
+OPTIONAL_2D_HISTS = ("x_etof_hist", "y_etof_hist")
 
 def process_raw_file(path, settings, timewalk=None, min_cluster_size=None, max_packets=None):
     """Decode one raw file (its first `max_packets` packets, or all of them),
@@ -91,6 +97,12 @@ def process_raw_file(path, settings, timewalk=None, min_cluster_size=None, max_p
         "settings": settings,
         "warning": missing_trigger_warning(len(pixels), len(events.pulses)),
     }
+    corr = settings.get(ETOF_CORRELATION_KEY)
+    if corr is not None:
+        # Only asked for by a plot panel showing the x / y vs e-ToF maps.
+        plot_result["x_etof_hist"], plot_result["y_etof_hist"] = make_etof_correlation_hists(
+            events, corr["bins"], corr["min"], corr["max"], settings["cluster"]["min"], settings["cluster"]["max"],
+        )
     return {"events": events, "plot_result": plot_result}
 
 
@@ -107,7 +119,11 @@ def accumulate_plot_result(accumulated, result):
             "cluster_t_hist": copy_hist(result["cluster_t_hist"]),
             "stats": result["stats"].copy(),
             "settings": result["settings"],
+            **{key: result[key].copy() for key in OPTIONAL_2D_HISTS if key in result},
         }
+    for key in OPTIONAL_2D_HISTS:
+        if key in result:
+            accumulated[key] = add_hist_2d(accumulated.get(key), result[key])
     accumulated["pixel_hist"] = add_hist_2d(accumulated["pixel_hist"], result["pixel_hist"])
     accumulated["cluster_hist"] = add_hist_2d(accumulated["cluster_hist"], result["cluster_hist"])
     accumulated["itof_hist"] = add_hist(accumulated["itof_hist"], result["itof_hist"])

@@ -34,6 +34,7 @@ _LOG_KEYS = (
     "log_itof_var",
     "log_cluster_t_var",
     "log_etof_var",
+    "log_etof_corr_var",
 )
 
 
@@ -53,6 +54,9 @@ def make_plot_shared_vars(master):
             "max": app_settings.persistent_var(master, tk.StringVar, f"plot.{key}.max", f"{cfg['max']:g}"),
         }
     shared["hist_vars"] = hist_vars
+    # Whether a panel built with etof_correlation=True shows its x / y vs
+    # e-ToF maps.
+    shared["show_etof_corr_var"] = app_settings.persistent_var(master, tk.BooleanVar, "plot.show_etof_corr", False)
     # Not a plot setting, but every tab with a plot panel clusters, and
     # sharing it here keeps their "Min cluster size" fields in step.
     shared["min_cluster_size_var"] = app_settings.persistent_var(
