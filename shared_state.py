@@ -57,6 +57,7 @@ def make_plot_shared_vars(master):
     # Whether a panel built with etof_correlation=True shows its x / y vs
     # e-ToF maps.
     shared["show_etof_corr_var"] = app_settings.persistent_var(master, tk.BooleanVar, "plot.show_etof_corr", False)
+    shared["etof_walk_corr_var"] = app_settings.persistent_var(master, tk.BooleanVar, "plot.etof_walk_corr", False)
     # Cluster x / y rotation: the plot panels' cluster and x / y vs e-ToF
     # maps, and the Coincidence tab's uncalibrated x / y columns.
     shared["rotation_vars"] = {

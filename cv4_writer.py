@@ -10,9 +10,15 @@ Layout (as observed in a reference .cv4 file):
     etof_corr     (N_etof,)    i4   index into t_pulse for each e-ToF event
     t_tof         (N_tof,)     f8   i-ToF time relative to its pulse (ns)
     tof_corr      (N_tof,)     i4   index into t_pulse for each i-ToF event
+    cluster_tot_sum (N_cluster,) f8 the cluster's summed ToT -- its charge --
+                                     in ToT codes (25 ns each)
+    cluster_tot_max (N_cluster,) f8 its largest single-hit ToT (codes)
+    cluster_n     (N_cluster,) i4   number of pixel hits in the cluster
 
-x/y/t/cluster_corr always have matching length, same for t_etof/etof_corr and
-t_tof/tof_corr. t_pulse[0] is a -1.0 sentinel (no events reference it; it just
+x/y/t/cluster_corr/cluster_tot_sum/cluster_tot_max/cluster_n always have
+matching length, same for t_etof/etof_corr and t_tof/tof_corr. Files written
+before the cluster ToT datasets existed lack them; reopening one for
+appending adds them, NaN (0 for cluster_n) for the clusters already there. t_pulse[0] is a -1.0 sentinel (no events reference it; it just
 keeps the indexing convention seen in reference files where the first real
 pulse lands at index 1).
 
@@ -33,7 +39,14 @@ _DATASETS = {
     "etof_corr": "i4",
     "t_tof": "f8",
     "tof_corr": "i4",
+    "cluster_tot_sum": "f8",
+    "cluster_tot_max": "f8",
+    "cluster_n": "i4",
 }
+# Per-cluster datasets added after the original layout: what a reopened
+# older file is padded with for its existing clusters.
+_CLUSTER_EXTRA_FILL = {"cluster_tot_sum": np.nan, "cluster_tot_max": np.nan, "cluster_n": 0}
+TOT_UNITS = "ToT codes (25 ns each)"
 
 
 class Cv4Writer:
@@ -54,21 +67,32 @@ class Cv4Writer:
 
         if is_new:
             for name, dtype in _DATASETS.items():
-                self._datasets[name] = self._file.create_dataset(
-                    name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=True
-                )
+                self._datasets[name] = self._create(name, dtype, 0)
             # Sentinel pulse at index 0; no event ever points at it today,
             # but it keeps corr==0 reserved for "no matching pulse" per the
             # cv4 convention.
             self._append("t_pulse", np.array([-1.0], dtype=np.float64))
             self._pulse_count = 1
         else:
-            for name in _DATASETS:
-                self._datasets[name] = self._file[name]
+            n_clusters = self._file["x"].shape[0]
+            for name, dtype in _DATASETS.items():
+                if name in self._file:
+                    self._datasets[name] = self._file[name]
+                else:
+                    # An older file: keep the per-cluster rows aligned.
+                    self._datasets[name] = self._create(name, dtype, n_clusters, _CLUSTER_EXTRA_FILL[name])
             self._pulse_count = self._datasets["t_pulse"].shape[0]
 
         if metadata:
             self.set_attrs(metadata)
+
+    def _create(self, name, dtype, length, fill=None):
+        ds = self._file.create_dataset(name, shape=(length,), maxshape=(None,), dtype=dtype, chunks=True)
+        if length and fill is not None:
+            ds[:] = fill
+        if name in ("cluster_tot_sum", "cluster_tot_max"):
+            ds.attrs["units"] = TOT_UNITS
+        return ds
 
     def set_attrs(self, attrs):
         """Set/update root-group attributes after construction -- used to
@@ -104,6 +128,9 @@ class Cv4Writer:
         self._append("y", np.asarray(events.cluster_y, dtype=np.float64))
         self._append("t", np.asarray(events.cluster_t, dtype=np.float64))
         self._append("cluster_corr", (events.cluster_pulse + base_index).astype(np.int32))
+        self._append("cluster_tot_sum", np.asarray(events.cluster_tot_sum, dtype=np.float64))
+        self._append("cluster_tot_max", np.asarray(events.cluster_tot_max, dtype=np.float64))
+        self._append("cluster_n", np.asarray(events.cluster_n, dtype=np.int32))
         self._append("t_etof", np.asarray(events.etof_t, dtype=np.float64))
         self._append("etof_corr", (events.etof_pulse + base_index).astype(np.int32))
         self._append("t_tof", np.asarray(events.itof_t, dtype=np.float64))

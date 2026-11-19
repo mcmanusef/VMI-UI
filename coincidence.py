@@ -53,6 +53,8 @@ KNOWN = {
     "mq": ("m/q", "u/e"), "x": ("x", "px"), "y": ("y", "px"), "pulse": ("Pulse", ""),
     "n_clusters": ("Clusters in pulse", ""), "n_etof": ("e-ToF hits in pulse", ""),
     "n_tof": ("Ions in pulse", ""), "parameter": ("Parameter", ""),
+    "tot_sum": ("Cluster ToT sum", "codes"), "n_hits": ("Cluster hits", ""),
+    "t_etof_raw": ("e-ToF t, no walk correction", "ns"),
 }
 # Shown in the gate plots and offered as main-plot axes unless the user says
 # otherwise.
@@ -157,14 +159,16 @@ def load_dataset(path, pulse_offsets=None):
     )
 
 
-def load_cv4_dataset(path, momentum=None, mq=None, progress=None, stop_event=None, pulse_offsets=None):
+def load_cv4_dataset(path, momentum=None, mq=None, progress=None, stop_event=None, pulse_offsets=None,
+                     walk=None):
     """As load_dataset, but straight from a cv4 (or grouped) file: the
     calibrations are applied in memory the way the apply calibration tab
     would (apply_calibration.calibrate_in_memory), with nothing saved.
     Either calibration can be None to leave that part uncalibrated.
-    pulse_offsets as in apply_calibration.build_tables, each species free."""
+    pulse_offsets as in apply_calibration.build_tables, each species free;
+    walk (an etof_walk.EtofWalkCorrection) corrects the e-ToF times."""
     electrons, ions, parameter_label = ac.calibrate_in_memory(
-        path, momentum, mq, progress=progress, stop_event=stop_event, pulse_offsets=pulse_offsets,
+        path, momentum, mq, progress=progress, stop_event=stop_event, pulse_offsets=pulse_offsets, walk=walk,
     )
     return dataset_from_tables(electrons, ions, parameter_label, str(path))
 

@@ -43,11 +43,14 @@ import numpy as np
 import pandas as pd
 
 import electron_calibration as ec
+import etof_walk as ew
 import parameter_grouping as pgr
 
 OUTPUT_SUFFIX = "_calibrated.h5"
 ELECTRON_FIELDS = ("x", "y", "t", "cluster_corr", "t_etof", "etof_corr", "t_pulse")
 ION_FIELDS = ("t_tof", "tof_corr")
+# Per-cluster ToT, in cv4 files written since it was recorded (optional).
+CLUSTER_TOT_FIELDS = ("cluster_tot_sum", "cluster_n")
 
 
 def default_output_path(cv4_path):
@@ -73,6 +76,9 @@ def _read_node(node, electrons_only, name):
     if missing:
         raise ValueError(f"{name} has no {', '.join(missing)} dataset(s).")
     raw = {field: np.asarray(node[field]) for field in fields}
+    for field in CLUSTER_TOT_FIELDS:
+        if field in node:
+            raw[field] = np.asarray(node[field])
     return raw, {key: _plain(value) for key, value in node.attrs.items()}
 
 
@@ -161,7 +167,8 @@ def shift_to_neighbour_pulse(corr, offset, t_pulse, period=None):
     return np.where(ok, target, 0)
 
 
-def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, parameter=None, pulse_offsets=None):
+def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, parameter=None, pulse_offsets=None,
+                 walk=None):
     """The DataFrames described in the module docstring. With `parameter`,
     each table starts with a "parameter" column holding that value.
 
@@ -172,7 +179,12 @@ def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, paramet
     pulse_offsets ({"clusters", "etof", "tof"} -> -1, 0 or +1) takes that
     species from the previous or next pulse instead of the same one (see
     shift_to_neighbour_pulse), for the electrons and ions tables; the raw/
-    tables keep every hit's own pulse."""
+    tables keep every hit's own pulse.
+
+    Files with cluster ToT also give the electrons tot_sum (ToT codes) and
+    n_hits columns. walk (an etof_walk.EtofWalkCorrection) corrects each
+    pair's t_etof from its cluster before anything else uses it, keeping
+    the uncorrected time as t_etof_raw; it needs a file with cluster ToT."""
     offsets = {**NO_PULSE_OFFSETS, **(pulse_offsets or {})}
     t_pulse = np.asarray(raw["t_pulse"], dtype=np.float64)
     cluster_corr = np.asarray(raw["cluster_corr"], dtype=np.int64)
@@ -209,6 +221,13 @@ def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, paramet
     t_etof = np.asarray(raw["t_etof"], dtype=np.float64)[e_rows]
     if momentum is None:
         t_etof[e_rows < 0] = np.nan
+    tot_sum = raw.get("cluster_tot_sum")
+    tot_sum = None if tot_sum is None else np.asarray(tot_sum, dtype=np.float64)[c_rows]
+    t_etof_raw = t_etof
+    if walk is not None:
+        if tot_sum is None:
+            raise ValueError(ew.NO_TOT_MESSAGE.format(name="This cv4 file"))
+        t_etof = walk.apply(t_etof, tot_sum, x, y)
     pulse = cluster_corr[c_rows]
     electrons = {
         "pulse": pulse.astype(np.int32),
@@ -220,6 +239,12 @@ def build_tables(raw, momentum, mq=None, electrons_only=False, rng=None, paramet
         "n_clusters": clusters_per_pulse[pulse].astype(np.int32),
         "n_etof": etof_per_pulse[pulse].astype(np.int32),
     }
+    if tot_sum is not None:
+        electrons["tot_sum"] = tot_sum
+        if "cluster_n" in raw:
+            electrons["n_hits"] = np.asarray(raw["cluster_n"], dtype=np.int32)[c_rows]
+    if walk is not None:
+        electrons["t_etof_raw"] = t_etof_raw
     if momentum is not None:
         t_used = t_etof
         if momentum.dither_ns > 0 and t_etof.size:
@@ -274,13 +299,13 @@ def has_ion_fields(node):
 
 
 def calibrate_in_memory(cv4_path, momentum=None, mq=None, rng=None, progress=None, stop_event=None,
-                        pulse_offsets=None):
+                        pulse_offsets=None, walk=None):
     """The electrons and ions tables apply_to_file would write, kept in
     memory instead: (electrons, ions, parameter label). Either calibration
     can be None, which leaves that part uncalibrated (see build_tables).
     ions is an empty DataFrame when the file has no i-ToF data. The raw/
     tables are left out. progress and stop_event work as in apply_to_file;
-    pulse_offsets as in build_tables."""
+    pulse_offsets and walk as in build_tables."""
     source_name = pathlib.Path(cv4_path).name
     if pgr.is_grouped(cv4_path):
         label, _, groups = pgr.read_group_info(cv4_path)
@@ -299,7 +324,7 @@ def calibrate_in_memory(cv4_path, momentum=None, mq=None, rng=None, progress=Non
             electrons_only = not has_ion_fields(node)
             raw, _ = _read_node(node, electrons_only, source_name if name is None else f"Group {name}")
             tables = build_tables(
-                raw, momentum, None if electrons_only else mq, electrons_only, rng, value, pulse_offsets,
+                raw, momentum, None if electrons_only else mq, electrons_only, rng, value, pulse_offsets, walk,
             )
             del raw
             electrons.append(tables["electrons"])
@@ -332,9 +357,10 @@ class ApplyResult:
 
 
 def apply_to_file(cv4_path, output_path, momentum, mq=None, electrons_only=False, rng=None,
-                  progress=None, stop_event=None):
+                  progress=None, stop_event=None, walk=None):
     """Calibrates a cv4 or grouped file into one output file, a part at a
-    time (see the module docstring). progress(done, total, name) is called
+    time (see the module docstring), e-ToF walk-corrected with `walk` if
+    given (see build_tables). progress(done, total, name) is called
     before each part and at the end. Raises ApplyStopped, leaving no file,
     if stop_event is set between parts."""
     mq = None if electrons_only else mq
@@ -345,6 +371,7 @@ def apply_to_file(cv4_path, output_path, momentum, mq=None, electrons_only=False
         "pz_time_source": ec.TIME_SOURCE_ETOF,
         "momentum_calibration": json.dumps(momentum.to_dict()),
         "mq_calibration": json.dumps(mq.to_dict()) if mq is not None else "",
+        "etof_walk_correction": json.dumps(walk.to_dict()) if walk is not None else "",
         "parameter_label": "",
         "parameter_mode": "",
         "groups": "",
@@ -381,7 +408,7 @@ def apply_to_file(cv4_path, output_path, momentum, mq=None, electrons_only=False
                     raw, metadata = _read_node(source, electrons_only, source_name)
                 else:
                     raw, metadata[name] = _read_node(source[name], electrons_only, f"Group {name}")
-                tables = build_tables(raw, momentum, mq, electrons_only, rng, parameter=value)
+                tables = build_tables(raw, momentum, mq, electrons_only, rng, parameter=value, walk=walk)
                 del raw
                 for key, frame in tables.items():
                     store.append(

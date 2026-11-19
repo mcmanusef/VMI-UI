@@ -373,7 +373,9 @@ class FrameEvents:
     """One raw file's events, everything indexed by `pulses` (sorted
     absolute trigger times). Cluster/e-ToF/i-ToF rows are ordered by pulse
     index; *_t are times relative to their pulse. pixel_* are the hits that
-    fell after some pulse (what the clusters were built from)."""
+    fell after some pulse (what the clusters were built from).
+    cluster_tot is the ToT-weighted mean ToT; cluster_tot_sum (the cluster's
+    total charge) and cluster_tot_max are in ToT codes, like pixel_tot."""
     pulses: np.ndarray
     cluster_pulse: np.ndarray
     cluster_x: np.ndarray
@@ -381,6 +383,8 @@ class FrameEvents:
     cluster_t: np.ndarray
     cluster_tot: np.ndarray
     cluster_n: np.ndarray
+    cluster_tot_sum: np.ndarray
+    cluster_tot_max: np.ndarray
     etof_pulse: np.ndarray
     etof_t: np.ndarray
     itof_pulse: np.ndarray
@@ -428,6 +432,8 @@ def build_frame_events(pixels: PixelHits, tdcs: TdcHits, mapping, min_size: int 
         cluster_t=clusters["t"],
         cluster_tot=clusters["tot"],
         cluster_n=clusters["n"],
+        cluster_tot_sum=clusters["tot_sum"],
+        cluster_tot_max=clusters["tot_max"],
         etof_pulse=etof_pulse,
         etof_t=etof_t,
         itof_pulse=itof_pulse,
@@ -508,8 +514,9 @@ def cluster_hits(pulse_idx, x, y, t_rel, tot, min_size: int = None, t_jitter_ns:
     otherwise by timing.jitter_ns (0 by default); a cluster the
     calibration gives no finite time keeps its undithered weighted mean.
 
-    Returns a dict of per-cluster arrays (pulse, x, y, t, tot, n), ordered
-    by pulse."""
+    Returns a dict of per-cluster arrays (pulse, x, y, t, tot, n, tot_sum,
+    tot_max), ordered by pulse: tot_sum is the cluster's summed ToT (its
+    charge) and tot_max its largest hit ToT."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
 
@@ -520,7 +527,8 @@ def cluster_hits(pulse_idx, x, y, t_rel, tot, min_size: int = None, t_jitter_ns:
     empty_f = np.zeros(0, dtype=np.float64)
     empty_i = np.zeros(0, dtype=np.int64)
     if len(pulse_idx) == 0:
-        return {"pulse": empty_i, "x": empty_f, "y": empty_f, "t": empty_f, "tot": empty_f, "n": empty_i}
+        return {"pulse": empty_i, "x": empty_f, "y": empty_f, "t": empty_f, "tot": empty_f, "n": empty_i,
+                "tot_sum": empty_f, "tot_max": empty_f}
 
     x = np.asarray(x)
     y = np.asarray(y)
@@ -569,6 +577,9 @@ def cluster_hits(pulse_idx, x, y, t_rel, tot, min_size: int = None, t_jitter_ns:
     n = np.bincount(label, minlength=n_comp)
     tot_f = np.asarray(tot, dtype=np.float64)
     wsum = np.bincount(label, weights=tot_f, minlength=n_comp)
+    tot_sum = wsum.copy()  # before the zero-ToT fallback below adds hit counts
+    tot_max = np.zeros(n_comp, dtype=np.float64)
+    np.maximum.at(tot_max, label, tot_f)
     sum_x = np.bincount(label, weights=tot_f * x, minlength=n_comp)
     sum_y = np.bincount(label, weights=tot_f * y, minlength=n_comp)
     sum_t = np.bincount(label, weights=tot_f * t_rel, minlength=n_comp)
@@ -602,6 +613,8 @@ def cluster_hits(pulse_idx, x, y, t_rel, tot, min_size: int = None, t_jitter_ns:
         "t": t_avg,
         "tot": sum_tot[keep] / ws,
         "n": n[keep],
+        "tot_sum": tot_sum[keep],
+        "tot_max": tot_max[keep],
     }
 
 
@@ -695,7 +708,8 @@ def shift_frame_pulses(events: FrameEvents, offsets) -> FrameEvents:
     fields = {}
     c_pulse, c_ok = shift(events.cluster_pulse, offsets.get("clusters", 0))
     fields["cluster_pulse"] = c_pulse
-    for name in ("cluster_x", "cluster_y", "cluster_t", "cluster_tot", "cluster_n"):
+    for name in ("cluster_x", "cluster_y", "cluster_t", "cluster_tot", "cluster_n",
+                 "cluster_tot_sum", "cluster_tot_max"):
         fields[name] = getattr(events, name)[c_ok]
     p_pulse, p_ok = shift(events.pixel_pulse, offsets.get("clusters", 0))
     fields["pixel_pulse"] = p_pulse
@@ -738,12 +752,14 @@ def rotate_points(x, y, angle_deg, cx, cy):
 
 def make_etof_correlation_hists(events: FrameEvents, bins: int, t_min: float, t_max: float,
                                 pos_min: float, pos_max: float, angle_deg: float = 0.0,
-                                cx: float = 0.0, cy: float = 0.0):
+                                cx: float = 0.0, cy: float = 0.0, walk=None):
     """(x vs e-ToF, y vs e-ToF) 2D histograms, each [e-ToF time bin,
     position bin], over every cluster / e-ToF pair in the same pulse (see
     cluster_etof_pairs). `bins` is used for both axes. The cluster positions
     are first rotated by angle_deg about (cx, cy) (see rotate_points), so x
-    and y can be lined up with e.g. the laser polarization."""
+    and y can be lined up with e.g. the laser polarization. walk (an
+    etof_walk.EtofWalkCorrection) corrects each pair's e-ToF time from its
+    cluster's ToT sum and detector x / y first."""
     bins = max(1, int(bins))
     if t_max <= t_min:
         t_max = t_min + 1.0
@@ -751,6 +767,10 @@ def make_etof_correlation_hists(events: FrameEvents, bins: int, t_min: float, t_
         pos_min, pos_max = 0.0, float(chip_layout.get_active_layout().size)
     cluster_rows, etof_rows = cluster_etof_pairs(events)
     t = events.etof_t[etof_rows]
+    if walk is not None:
+        t = walk.apply(
+            t, events.cluster_tot_sum[cluster_rows], events.cluster_x[cluster_rows], events.cluster_y[cluster_rows],
+        )
     xs, ys = rotate_points(events.cluster_x, events.cluster_y, angle_deg, cx, cy)
     return tuple(
         hist2d_ranges(t, pos[cluster_rows], bins, t_min, t_max, bins, pos_min, pos_max)

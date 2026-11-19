@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass, field
 
 import cv4_writer
+import etof_walk
 import tdc_mapping
 from cluster_timing import CLUSTER_TIMING_ATTR, ClusterTimingCalibration
 from cv4_writer import Cv4Writer
@@ -114,9 +115,18 @@ def process_raw_file(path, settings, timewalk=None, min_cluster_size=None, max_p
         # result's settings so a change restarts accumulation.
         offsets = tdc_mapping.get_pulse_offsets()
         plot_result["settings"] = {**settings, "pulse_offsets": offsets}
+        walk = None
+        walk_ref = corr.get("walk")
+        if walk_ref:
+            try:
+                walk = etof_walk.load_cached(walk_ref["path"])
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                plot_result["warning"] = plot_result["warning"] or (
+                    f"e-ToF walk correction not applied ({walk_ref.get('path') or 'none saved yet'}): {exc}"
+                )
         plot_result["x_etof_hist"], plot_result["y_etof_hist"] = make_etof_correlation_hists(
             shift_frame_pulses(events, offsets), corr["bins"], corr["min"], corr["max"], settings["cluster"]["min"], settings["cluster"]["max"],
-            angle_deg=angle, cx=cx, cy=cy,
+            angle_deg=angle, cx=cx, cy=cy, walk=walk,
         )
     return {"events": events, "plot_result": plot_result}
 

@@ -9,6 +9,7 @@ from analysis_interface import ConversionInterface
 from coincidence_interface import CoincidenceInterface
 from calibration_apply_interface import CalibrationApplyInterface
 from calibration_interface import CalibrationHub, MassCalibrationInterface, MomentumCalibrationInterface
+from etof_walk_interface import EtofWalkCalibrationInterface
 from chip_layout_interface import ChipLayoutInterface
 from collection_interface import CollectionInterface
 from diagnostics_interface import DiagnosticsInterface
@@ -102,6 +103,7 @@ class App(tk.Tk):
         # Analysis tabs
         conversion_tab = ttk.Frame(analysis)
         raw_to_h5_tab = ttk.Frame(analysis)
+        etof_walk_tab = ttk.Frame(analysis)
         momentum_calibration_tab = ttk.Frame(analysis)
         mq_calibration_tab = ttk.Frame(analysis)
         apply_calibration_tab = ttk.Frame(analysis)
@@ -109,6 +111,7 @@ class App(tk.Tk):
         coincidence_tab = ttk.Frame(analysis)
         analysis.add(conversion_tab, text="conversion")
         analysis.add(raw_to_h5_tab, text="tpx to h5")
+        analysis.add(etof_walk_tab, text="e-ToF walk calibration")
         analysis.add(momentum_calibration_tab, text="momentum calibration")
         analysis.add(mq_calibration_tab, text="m/q calibration")
         analysis.add(apply_calibration_tab, text="apply calibration")
@@ -135,6 +138,7 @@ class App(tk.Tk):
         self._build_sweep(sweep_tab)
         self._build_conversion(conversion_tab)
         self._build_raw_to_h5(raw_to_h5_tab)
+        self._build_etof_walk(etof_walk_tab)
         self._build_momentum_calibration(momentum_calibration_tab)
         self._build_mq_calibration(mq_calibration_tab)
         self._build_apply_calibration(apply_calibration_tab)
@@ -242,6 +246,12 @@ class App(tk.Tk):
 
         momentum_ui = MomentumCalibrationInterface(parent, hub=self._calibration_hub)
         momentum_ui.grid(row=0, column=0, sticky="nsew")
+
+    def _build_etof_walk(self, parent: ttk.Frame):
+        _prepare_tab(parent)
+
+        etof_walk_ui = EtofWalkCalibrationInterface(parent, hub=self._calibration_hub)
+        etof_walk_ui.grid(row=0, column=0, sticky="nsew")
 
     def _build_mq_calibration(self, parent: ttk.Frame):
         _prepare_tab(parent)

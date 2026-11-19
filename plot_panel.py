@@ -4,6 +4,8 @@ Shared by the Diagnostics tab and the Monitored Acquisition tab so both get
 identical plots, zoom/focus behavior, log-scale toggles, gamma control, and
 bin/range settings without duplicating the code.
 """
+import os
+
 import qtk as tk
 from qtk import grid_into, ttk
 
@@ -12,7 +14,9 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui
 
+import app_settings
 import chip_layout
+import etof_walk
 from collapsible_frame import CollapsibleFrame, set_background
 from qt_plots import hist_to_rgba, ZoomFocusViewBox
 
@@ -130,6 +134,7 @@ class HistogramPlotPanel(ttk.Frame):
             self._hist_vars = shared_vars["hist_vars"]
             self.log_etof_corr_var = shared_vars.get("log_etof_corr_var") or tk.BooleanVar(self, value=False)
             self.show_etof_corr_var = shared_vars.get("show_etof_corr_var") or tk.BooleanVar(self, value=False)
+            self.etof_walk_corr_var = shared_vars.get("etof_walk_corr_var") or tk.BooleanVar(self, value=False)
             self._rotation_vars = shared_vars.get("rotation_vars") or self._own_rotation_vars()
         else:
             self.log_pixel_var = tk.BooleanVar(self, value=False)
@@ -150,6 +155,7 @@ class HistogramPlotPanel(ttk.Frame):
             }
             self.log_etof_corr_var = tk.BooleanVar(self, value=False)
             self.show_etof_corr_var = tk.BooleanVar(self, value=False)
+            self.etof_walk_corr_var = tk.BooleanVar(self, value=False)
             self._rotation_vars = self._own_rotation_vars()
 
         # Base to fall back on for any field that fails to parse below, then
@@ -178,7 +184,25 @@ class HistogramPlotPanel(ttk.Frame):
     # ---- public API -----------------------------------------------------
 
     def hist_snapshot(self):
-        return {key: dict(cfg) for key, cfg in self._hist_settings.items()}
+        snapshot = {key: dict(cfg) for key, cfg in self._hist_settings.items()}
+        if ETOF_CORR_KEY in snapshot:
+            # Looked up on every call, so a newly saved correction is picked
+            # up (and, being a settings change, restarts accumulation).
+            snapshot[ETOF_CORR_KEY]["walk"] = self._walk_ref()
+        return snapshot
+
+    def _walk_ref(self):
+        """{"path", "mtime"} of the e-ToF walk correction the x / y vs e-ToF
+        maps use (the last one saved or loaded in the calibration tabs), or
+        None while "Correct e-ToF walk" is off."""
+        if not self.etof_walk_corr_var.get():
+            return None
+        path = app_settings.get(etof_walk.LATEST_PATH_KEY) or ""
+        try:
+            mtime = os.path.getmtime(path) if path else None
+        except OSError:
+            mtime = None
+        return {"path": path, "mtime": mtime}
 
     def _own_rotation_vars(self):
         return {key: tk.StringVar(self, value=f"{value:g}") for key, value in ROTATION_DEFAULTS.items()}
@@ -359,6 +383,9 @@ class HistogramPlotPanel(ttk.Frame):
                 plot_opts, text="Log scale (x / y vs e-ToF)", variable=self.log_etof_corr_var,
                 command=self._on_log_toggle,
             ).grid(row=5, column=3, columnspan=4, sticky="w", padx=(6, 0), pady=(6, 0))
+            ttk.Checkbutton(
+                plot_opts, text="Correct e-ToF walk (last saved correction)", variable=self.etof_walk_corr_var,
+            ).grid(row=6, column=0, columnspan=7, sticky="w", pady=(2, 0))
 
     def _build_hist_frame(self, container):
         # Two separate titled/bordered tables (QGroupBox via ttk.LabelFrame)

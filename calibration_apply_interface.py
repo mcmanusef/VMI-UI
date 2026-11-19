@@ -14,26 +14,40 @@ from qtk import ttk, filedialog, messagebox, grid_into
 import app_settings
 import apply_calibration as ac
 import electron_calibration as ec
+import etof_walk as ew
 import mass_calibration as mc
 import ui_style
 from calibration_interface import (
-    BLUE, KIND_MOMENTUM, KIND_MQ, BackgroundTask, CalibrationHub, PlotGrid, add_image, browse_cv4,
+    BLUE, KIND_ETOF_WALK, KIND_MOMENTUM, KIND_MQ, BackgroundTask, CalibrationHub, PlotGrid, add_image, browse_cv4,
     latest_path_key, relax_titles, show_placeholder,
 )
 
 EMPTY_TEXT = "No data — press Apply and Save"
-LOADERS = {KIND_MOMENTUM: ec.MomentumCalibration.load, KIND_MQ: mc.MassCalibration.load}
-TAB_NAMES = {KIND_MOMENTUM: "momentum calibration", KIND_MQ: "m/q calibration"}
+LOADERS = {
+    KIND_MOMENTUM: ec.MomentumCalibration.load,
+    KIND_MQ: mc.MassCalibration.load,
+    KIND_ETOF_WALK: ew.EtofWalkCorrection.load,
+}
+TAB_NAMES = {
+    KIND_MOMENTUM: "momentum calibration",
+    KIND_MQ: "m/q calibration",
+    KIND_ETOF_WALK: "e-ToF walk calibration",
+}
+KINDS = (KIND_MOMENTUM, KIND_MQ, KIND_ETOF_WALK)
 
 
 class CalibrationPicker:
-    """The momentum and m/q calibrations a tab applies, shown with their
-    source and "Load..." buttons, in a frame gridded into `parent` at `row`.
-    They follow the calibration tabs through the hub (a fit, edit, save or
-    load there replaces them), and start from the last saved or loaded
-    files. `status(text)` reports changes; while `is_busy()` it's skipped."""
+    """The momentum and m/q calibrations and the e-ToF walk correction a tab
+    applies, shown with their source and "Load..." buttons, in a frame
+    gridded into `parent` at `row`. They follow the calibration tabs through
+    the hub (a fit, edit, save or load there replaces them), and start from
+    the last saved or loaded files. `status(text)` reports changes; while
+    `is_busy()` it's skipped. Whether the walk correction is used is the
+    owner's "Apply e-ToF walk correction" box, saved under walk_setting_key;
+    see walk()."""
 
-    def __init__(self, owner, hub, parent, row, status, is_busy=lambda: False):
+    def __init__(self, owner, hub, parent, row, status, is_busy=lambda: False,
+                 walk_setting_key="calibration_picker.apply_etof_walk"):
         self._owner = owner
         self._hub = hub
         self._status = status
@@ -42,7 +56,10 @@ class CalibrationPicker:
         self.momentum_source_var = tk.StringVar(owner, value="")
         self.mq_info_var = tk.StringVar(owner, value="--")
         self.mq_source_var = tk.StringVar(owner, value="")
-        self.calibrations = {KIND_MOMENTUM: None, KIND_MQ: None}
+        self.walk_info_var = tk.StringVar(owner, value="--")
+        self.walk_source_var = tk.StringVar(owner, value="")
+        self.walk_enabled_var = app_settings.persistent_var(owner, tk.BooleanVar, walk_setting_key, False)
+        self.calibrations = {kind: None for kind in KINDS}
 
         self.frame = ttk.Frame(parent)
         self.frame.grid(row=row, column=0, columnspan=2, sticky="ew")
@@ -54,12 +71,18 @@ class CalibrationPicker:
         ttk.Label(cal, text="m/q:").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ui_style.add_note(cal, 4, textvariable=self.mq_info_var, pady=0)
         ui_style.add_note(cal, 5, textvariable=self.mq_source_var)
-        ui_style.build_button_bar(cal, 6, [
+        ttk.Checkbutton(cal, text="Apply e-ToF walk correction", variable=self.walk_enabled_var).grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
+        ui_style.add_note(cal, 7, textvariable=self.walk_info_var, pady=0)
+        ui_style.add_note(cal, 8, textvariable=self.walk_source_var)
+        ui_style.build_button_bar(cal, 9, [
             ("Load Momentum...", lambda: self._browse_calibration(KIND_MOMENTUM)),
             ("Load m/q...", lambda: self._browse_calibration(KIND_MQ)),
+            ("Load e-ToF walk...", lambda: self._browse_calibration(KIND_ETOF_WALK)),
         ], pady=(4, 6), columnspan=2)
         ui_style.add_note(
-            cal, 7,
+            cal, 10,
             "These follow the calibration tabs: a fit, edit, save or load there replaces them here. "
             "At startup the last saved or loaded calibration files are used.",
             pady=(0, 4),
@@ -71,7 +94,7 @@ class CalibrationPicker:
     def _load_latest(self):
         """The calibrations the tabs already published, or else the last
         saved or loaded files."""
-        for kind in (KIND_MOMENTUM, KIND_MQ):
+        for kind in KINDS:
             latest = self._hub.latest(kind)
             if latest is not None:
                 self._on_published(kind, *latest)
@@ -113,8 +136,28 @@ class CalibrationPicker:
         self.calibrations[kind] = type(calibration).from_dict(calibration.to_dict())
         self._show_calibration(kind, note=source)
 
+    def walk(self):
+        """The e-ToF walk correction to apply: None unless "Apply e-ToF walk
+        correction" is ticked. Raises ValueError if it is ticked but there
+        is no correction."""
+        if not self.walk_enabled_var.get():
+            return None
+        walk = self.calibrations[KIND_ETOF_WALK]
+        if walk is None:
+            raise ValueError(
+                "No e-ToF walk correction. Fit, save or load one, or untick \"Apply e-ToF walk correction\"."
+            )
+        return walk
+
     def _show_calibration(self, kind, note=""):
         calibration = self.calibrations[kind]
+        if kind == KIND_ETOF_WALK:
+            self.walk_info_var.set(
+                "None. Fit, save or load one in the e-ToF walk calibration tab." if calibration is None
+                else calibration.describe()
+            )
+            self.walk_source_var.set(note.strip())
+            return
         if kind == KIND_MOMENTUM:
             if calibration is None:
                 self.momentum_info_var.set("None. Fit, save or load one in the momentum calibration tab.")
@@ -178,7 +221,10 @@ class CalibrationApplyInterface(ttk.Frame):
         ui_style.StatusBlock(sidebar, 1, self.status_var, progress_var=self._progress_var)
 
         cal = ui_style.build_section(sidebar, 2, "Calibrations")
-        self._picker = CalibrationPicker(self, self._hub, cal, 0, self.status_var.set, self._task.is_running)
+        self._picker = CalibrationPicker(
+            self, self._hub, cal, 0, self.status_var.set, self._task.is_running,
+            walk_setting_key="apply_calibration.apply_etof_walk",
+        )
 
         data = ui_style.build_section(sidebar, 3, "Dataset")
         ui_style.add_form_row(data, 0, "cv4 file:", ui_style.build_path_field(data, self.path_var, self._browse_cv4))
@@ -193,7 +239,8 @@ class CalibrationApplyInterface(ttk.Frame):
         )
         ui_style.add_note(
             data, 4,
-            "pz uses the e-ToF time, with the calibration's time dither added. Pairs outside the "
+            "pz uses the e-ToF time (walk-corrected if that is ticked, keeping the raw time as t_etof_raw), "
+            "with the calibration's time dither added. Pairs outside the "
             "calibration's valid Δt range are kept with NaN momenta. A grouped file from the parameter "
             "grouping tab is processed group by group, with its parameter value in a parameter column.",
             pady=(4, 4),
@@ -282,6 +329,11 @@ class CalibrationApplyInterface(ttk.Frame):
 
         electrons_only = self.electrons_only_var.get()
         mq = None if electrons_only else self._picker.calibrations[KIND_MQ]
+        try:
+            walk = self._picker.walk()
+        except ValueError as exc:
+            self.status_var.set(str(exc))
+            return
         self._stop_event.clear()
         self._progress = None
         self._progress_var.set(0.0)
@@ -289,6 +341,7 @@ class CalibrationApplyInterface(ttk.Frame):
         self._task.start(
             lambda: ac.apply_to_file(
                 path, output, momentum, mq, electrons_only, progress=self._on_progress, stop_event=self._stop_event,
+                walk=walk,
             ),
             self._on_done,
             self._on_error,

@@ -29,6 +29,7 @@ import app_settings
 import chip_layout
 import data_range
 import electron_calibration as ec
+import etof_walk as ew
 import mass_calibration as mc
 import ui_style
 from qt_plots import ZoomFocusViewBox, hist_to_rgba, mpl_color
@@ -52,6 +53,7 @@ CLICK_MODES = (CLICK_ZOOM, CLICK_CENTER, CLICK_ANGLE, CLICK_TC)
 
 KIND_MOMENTUM = "momentum"
 KIND_MQ = "mq"
+KIND_ETOF_WALK = "etof_walk"  # etof_walk.KIND
 
 
 def latest_path_key(kind):
@@ -326,6 +328,9 @@ class MomentumCalibrationInterface(ttk.Frame):
         self.time_source_var = pvar(tk.StringVar, "time_source", ec.TIME_SOURCE_ETOF)
         self.single_hit_var = pvar(tk.BooleanVar, "single_hit", True)
         self.dither_var = pvar(tk.StringVar, "dither_ns", "0.26")
+        self.apply_walk_var = pvar(tk.BooleanVar, "apply_etof_walk", False)
+        self._walk_note_var = tk.StringVar(self, value="")
+        self._walk_source = None  # what the loaded data were walk-corrected with
 
         self.xc_var = pvar(tk.StringVar, "xc", "128")
         self.yc_var = pvar(tk.StringVar, "yc", "128")
@@ -431,6 +436,17 @@ class MomentumCalibrationInterface(ttk.Frame):
             data, text="Only use pulses with a single hit", variable=self.single_hit_var,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self._mode_note = ui_style.add_note(data, 6, pady=(4, 4))
+        ttk.Checkbutton(
+            data, text="Apply e-ToF walk correction", variable=self.apply_walk_var,
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ui_style.add_note(
+            data, 8,
+            "Corrects each cluster / e-ToF pair's e-ToF time from its cluster's ToT, with the latest "
+            "correction from the e-ToF walk calibration tab (or the last one saved there). Needs cv4 "
+            "files with cluster ToT; applies to the e-ToF time source, on Load Data.",
+            pady=(4, 0),
+        )
+        ui_style.add_note(data, 9, textvariable=self._walk_note_var, pady=(0, 4))
 
         center = ui_style.build_section(sidebar, 3, "Center and angle")
         ui_style.add_form_row(center, 0, "Center x (px):", ttk.Entry(center, textvariable=self.xc_var, width=18))
@@ -709,10 +725,19 @@ class MomentumCalibrationInterface(ttk.Frame):
             return
         time_source = self.time_source_var.get()
         single_hit = self.single_hit_var.get()
+        walk, walk_source = None, None
+        if self.apply_walk_var.get() and time_source == ec.TIME_SOURCE_ETOF:
+            try:
+                walk, walk_source = self._latest_walk()
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                self.status_var.set(str(exc))
+                return
+        self._walk_source = walk_source
+        self._walk_note_var.set(f"Walk-corrected with: {walk_source}" if walk_source else "")
 
         def work():
             events = {
-                key: ec.load_electron_events(path, time_source, single_hit, max(0.0, dither))
+                key: ec.load_electron_events(path, time_source, single_hit, max(0.0, dither), walk=walk)
                 for key, path in paths.items()
             }
             for ev in events.values():
@@ -722,6 +747,21 @@ class MomentumCalibrationInterface(ttk.Frame):
 
         self.status_var.set("Loading...")
         self._task.start(work, self._on_loaded, lambda exc: self.status_var.set(f"Error: could not load data: {exc}"))
+
+    def _latest_walk(self):
+        """(EtofWalkCorrection, where it came from): the e-ToF walk tab's
+        latest, else the last saved or loaded file."""
+        latest = self._hub.latest(KIND_ETOF_WALK) if self._hub is not None else None
+        if latest is not None:
+            walk, path = latest
+            return walk, str(path) if path else "unsaved fit in the e-ToF walk calibration tab"
+        path = app_settings.get(ew.LATEST_PATH_KEY)
+        if not path:
+            raise ValueError(
+                "No e-ToF walk correction. Fit or load one in the e-ToF walk calibration tab, or untick "
+                "\"Apply e-ToF walk correction\"."
+            )
+        return ew.EtofWalkCorrection.load(path), str(path)
 
     def _on_loaded(self, events):
         self._events = events
@@ -1013,6 +1053,7 @@ class MomentumCalibrationInterface(ttk.Frame):
                 "S": self.time_path_var.get(), "P": self.p_path_var.get(),
             },
             "single_hit_only": self.single_hit_var.get(),
+            "etof_walk_correction": self._walk_source,
             "wavelength_nm": self.wavelength_var.get(),
             "k_from_ring_spacing": self._k_fit is not None and abs(self._k_fit.k - calibration.k) <= 1e-6 * calibration.k,
             "early_terms": self.early_terms_var.get(),

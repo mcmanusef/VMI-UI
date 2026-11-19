@@ -105,9 +105,12 @@ def pair_by_pulse(cluster_corr, etof_corr, single_hit_only):
     return c_rows, order[starts + offsets]
 
 
-def load_electron_events(path, time_source=TIME_SOURCE_ETOF, single_hit_only=True, dither_ns=0.0, rng=None):
+def load_electron_events(path, time_source=TIME_SOURCE_ETOF, single_hit_only=True, dither_ns=0.0, rng=None,
+                         walk=None):
     """Electron hits (x, y, t) from a cv4 file. With the e-ToF time source
-    each detector cluster is paired with the e-ToF hit(s) from its pulse.
+    each detector cluster is paired with the e-ToF hit(s) from its pulse,
+    and `walk` (an etof_walk.EtofWalkCorrection) corrects each pair's e-ToF
+    time from its cluster's ToT (the file needs cluster ToT).
     With the cluster time source, t is the camera time instead. dither_ns
     adds uniform(0, dither_ns) to t, which removes stripes from digitized
     times (doc: timing dither)."""
@@ -118,12 +121,21 @@ def load_electron_events(path, time_source=TIME_SOURCE_ETOF, single_hit_only=Tru
         if time_source == TIME_SOURCE_ETOF:
             t_etof = np.asarray(f["t_etof"], dtype=np.float64)
             etof_corr = np.asarray(f["etof_corr"])
+            if walk is not None:
+                if "cluster_tot_sum" not in f:
+                    raise ValueError(
+                        "{} has no cluster ToT (it was written before cv4 files recorded it). Reconvert it from "
+                        "raw (Analysis > conversion) to use the e-ToF walk correction.".format(pathlib.Path(path).name)
+                    )
+                tot_sum = np.asarray(f["cluster_tot_sum"], dtype=np.float64)
         else:
             t_cluster = np.asarray(f["t"], dtype=np.float64)
 
     if time_source == TIME_SOURCE_ETOF:
         c_rows, e_rows = pair_by_pulse(cluster_corr, etof_corr, single_hit_only)
         x, y, t = x[c_rows], y[c_rows], t_etof[e_rows]
+        if walk is not None:
+            t = walk.apply(t, tot_sum[c_rows], x, y)
     else:
         if single_hit_only:
             pulses, counts = np.unique(cluster_corr, return_counts=True)

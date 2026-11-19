@@ -200,7 +200,10 @@ class CoincidenceInterface(ttk.Frame):
         ttk.Checkbutton(self._apply_frame, text="Apply m/q calibration", variable=self.apply_mq_var).grid(
             row=1, column=0, sticky="w"
         )
-        self._picker = CalibrationPicker(self, self._hub, data, 4, self.status_var.set, self._task.is_running)
+        self._picker = CalibrationPicker(
+            self, self._hub, data, 4, self.status_var.set, self._task.is_running,
+            walk_setting_key="coincidence.apply_etof_walk",
+        )
         ui_style.add_note(data, 5, textvariable=self._source_note_var, pady=(4, 4))
         ui_style.add_note(
             data, 6,
@@ -572,8 +575,13 @@ class CoincidenceInterface(ttk.Frame):
                         f"No {name} calibration. Fit, save or load one, or untick \"Apply {name} calibration\"."
                     )
                     return
+            try:
+                walk = self._picker.walk()
+            except ValueError as exc:
+                self.status_var.set(str(exc))
+                return
             self.status_var.set(f"Reading {pathlib.Path(path).name}...")
-            work = lambda: co.load_cv4_dataset(path, momentum, mq, pulse_offsets=offsets)  # noqa: E731
+            work = lambda: co.load_cv4_dataset(path, momentum, mq, pulse_offsets=offsets, walk=walk)  # noqa: E731
         else:
             self.status_var.set("Loading...")
             work = lambda: co.load_dataset(path, pulse_offsets=offsets)  # noqa: E731
