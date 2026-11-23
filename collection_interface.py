@@ -13,6 +13,9 @@ import serval_client
 import time_estimate
 import ui_style
 
+# How often _next_batch rechecks a batch Serval is still running.
+_BATCH_RECHECK_MS = 200
+
 
 class CollectionInterface(ttk.Frame):
     def __init__(self, parent, server_var=None, acq_shared_vars=None, coordinator=None, **kwargs):
@@ -227,11 +230,14 @@ class CollectionInterface(ttk.Frame):
             n_triggers = max(1, int(run_duration / frame_time))
             batch_cap = serval_client.max_frames_per_batch(frame_time)
             first_batch = min(batch_cap, n_triggers)
+            # Another tab's measurement may still be stopping.
+            serval_client.ensure_idle(server, timeout=10.0)
             self._configure_detector(server, frame_time, first_batch)
             self._configure_destination(server, folder)
             self._write_metadata(folder)
 
             resp = serval_client.SESSION.get(f"{server}/measurement/start")
+            resp.raise_for_status()
             self.status_var.set(resp.text.strip() or "Run started.")
 
             self._batch_state = {
@@ -263,12 +269,25 @@ class CollectionInterface(ttk.Frame):
         state = self._batch_state
         if state is None or state["remaining"] <= 0:
             return
+        server = state["server"]
+        # The timer is only an estimate (Serval's start-up adds to each
+        # batch): while the batch is still running, check again shortly
+        # rather than block the UI or send a start Serval would reject.
+        try:
+            busy = serval_client.measurement_busy(server)
+        except Exception:
+            busy = False
+        if busy:
+            state["busy_checks"] = state.get("busy_checks", 0) + 1
+            if state["busy_checks"] * _BATCH_RECHECK_MS < 30_000:
+                self._batch_after_id = self.after(_BATCH_RECHECK_MS, self._next_batch)
+                return
+        state["busy_checks"] = 0
         try:
             batch = min(state["batch_cap"], state["remaining"])
-            server = state["server"]
-            serval_client.wait_for_measurement_idle(server, timeout=10.0)
+            serval_client.ensure_idle(server, timeout=5.0)
             self._configure_detector(server, state["frame_time"], batch)
-            serval_client.SESSION.get(f"{server}/measurement/start")
+            serval_client.SESSION.get(f"{server}/measurement/start").raise_for_status()
         except Exception as exc:
             self.status_var.set(f"Batch restart failed: {type(exc).__name__}: {exc}")
             return

@@ -97,6 +97,9 @@ def configure_continuous_destination(server, frame_time, dest_dir, file_pattern,
 
 
 def _configure_destination(server, frame_time, dest_dir, file_pattern, n_triggers, timeout):
+    # A config / destination change while a measurement is still running
+    # (e.g. one another tab just asked to stop) is rejected or hangs.
+    ensure_idle(server)
     # timeout defaults to 30s, not the 5s used for the simpler start/stop
     # GETs below -- applying a destination change (especially switching
     # SplitStrategy) appears to genuinely take Serval longer than a plain
@@ -133,6 +136,7 @@ def restart_continuous_batch(server, frame_time, n_triggers, timeout=5):
     """Start the next CONTINUOUS-mode batch of `n_triggers` frames once the
     previous one has auto-stopped. Only /detector/config is reset; the
     destination set by configure_continuous_destination stays as it is."""
+    ensure_idle(server)
     config = json.loads(SESSION.get(f"{server}/detector/config", timeout=timeout).text)
     config["TriggerMode"] = "CONTINUOUS"
     config["ExposureTime"] = frame_time
@@ -209,7 +213,10 @@ def ensure_idle(server, timeout=30.0):
     """Make sure no measurement is running before a start or a
     destination/config change: wait for the current one to end on its own,
     and if it doesn't within `timeout`, stop it and wait again. Raises
-    ServalBusy if Serval still reports a measurement after that."""
+    ServalBusy if Serval still reports a measurement after that, and the
+    request's own error straight away if Serval can't be reached at all."""
+    if not _is_busy(measurement_status(server)):
+        return
     if wait_for_measurement_idle(server, timeout=timeout) is not None:
         return
     try:

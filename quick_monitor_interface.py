@@ -354,6 +354,8 @@ class QuickMonitorInterface(ttk.Frame):
         batch_cap = serval_client.max_frames_per_batch(exposure)
 
         try:
+            # Another tab's measurement may still be stopping.
+            serval_client.ensure_idle(server, timeout=10.0)
             config = json.loads(serval_client.SESSION.get(f"{server}/detector/config", timeout=5).text)
             config["TriggerMode"] = "CONTINUOUS"
             config["ExposureTime"] = exposure
@@ -378,7 +380,7 @@ class QuickMonitorInterface(ttk.Frame):
             }
             serval_client.SESSION.put(f"{server}/server/destination", data=json.dumps(destination), timeout=5)
 
-            serval_client.SESSION.get(f"{server}/measurement/start", timeout=5)
+            serval_client.SESSION.get(f"{server}/measurement/start", timeout=5).raise_for_status()
         except Exception as exc:
             self.status_var.set(f"Config/start failed: {type(exc).__name__}: {exc} (server={server})")
             return
@@ -419,14 +421,17 @@ class QuickMonitorInterface(ttk.Frame):
         once the previous batch's frames are used up (Serval will have
         already auto-stopped on its own by then). Only /detector/config
         needs resetting; the destination (channels, save-tiff folder, ...)
-        doesn't change between batches."""
+        doesn't change between batches. Waits for the old batch to end
+        (stopping it if it won't -- this is only a preview), since a start
+        sent while it runs is rejected."""
+        serval_client.ensure_idle(server, timeout=10.0)
         config = json.loads(serval_client.SESSION.get(f"{server}/detector/config", timeout=5).text)
         config["TriggerMode"] = "CONTINUOUS"
         config["ExposureTime"] = exposure
         config["TriggerPeriod"] = exposure
         config["nTriggers"] = n_triggers
         serval_client.SESSION.put(f"{server}/detector/config", data=json.dumps(config), timeout=5)
-        serval_client.SESSION.get(f"{server}/measurement/start", timeout=5)
+        serval_client.SESSION.get(f"{server}/measurement/start", timeout=5).raise_for_status()
 
     def _fetch_loop(self, server, preview_period, exposure, batch_cap):
         # /measurement/image blocks server-side until the next preview image
@@ -447,7 +452,6 @@ class QuickMonitorInterface(ttk.Frame):
         while not self._stop_event.is_set():
             if time.perf_counter() - batch_start >= batch_seconds:
                 try:
-                    serval_client.wait_for_measurement_idle(server, timeout=10.0)
                     self._restart_batch(server, exposure, batch_cap)
                 except Exception as exc:
                     if not self._stop_event.is_set():

@@ -350,7 +350,8 @@ class TimewalkInterface(ttk.Frame):
 
         self._worker = threading.Thread(
             target=self._worker_loop,
-            args=(pathlib.Path(self._temp_dir), max_packets, test_mode, hist_settings),
+            args=(pathlib.Path(self._temp_dir), max_packets, test_mode, hist_settings,
+                  1.0 / frame_rate if frame_rate > 0 else 0.1),
             daemon=True,
         )
         self._worker.start()
@@ -366,10 +367,8 @@ class TimewalkInterface(ttk.Frame):
             self._worker.join(timeout=2)
         self.status_var.set("Stopped.")
 
-    def _worker_loop(self, temp_dir: pathlib.Path, max_packets, test_mode, hist_settings):
+    def _worker_loop(self, temp_dir: pathlib.Path, max_packets, test_mode, hist_settings, frame_time=0.1):
         server = self._server_url()
-        last_path = None
-        last_mtime = None
 
         while not self._stop_event.is_set():
             try:
@@ -383,28 +382,32 @@ class TimewalkInterface(ttk.Frame):
                         time.sleep(0.5)
                         continue
                 else:
+                    # One frame per start: wait for Serval to report it
+                    # finished (not just for the file to go quiet, which
+                    # can happen mid-exposure), so the next start never
+                    # lands on a running measurement.
                     try:
-                        serval_client.start_measurement(server)
+                        files = serval_client.capture_single_frame(
+                            server, temp_dir, frame_time, self._stop_event, pattern=FILE_GLOB,
+                        )
                     except Exception as exc:
-                        self._queue.put({"error": f"Start failed: {exc}"})
-                        time.sleep(1)
+                        self._queue.put({"error": f"Frame failed: {exc}"})
+                        self._stop_event.wait(1.0)
                         continue
-
-                    newest = serval_client.wait_for_new_file(
-                        temp_dir, self._stop_event, last_path, last_mtime, pattern=FILE_GLOB,
-                    )
-                    if newest is None:
+                    if not files:
                         continue
+                    newest = files[-1]
 
                     newest_stat = newest.stat()
                     if newest_stat.st_size == 0:
                         time.sleep(0.2)
                         continue
 
-                    files = sorted(temp_dir.glob(FILE_GLOB), key=lambda p: p.stat().st_mtime)
+                    # Earlier frames are done with (the histogram only needs
+                    # the newest); keep the test file if it lives here.
                     test_path = pathlib.Path(self.test_file_var.get().strip()) if self.test_file_var.get() else None
-                    for old in files[:-1]:
-                        if test_path and old.resolve() == test_path.resolve():
+                    for old in temp_dir.glob(FILE_GLOB):
+                        if old == newest or (test_path and old.resolve() == test_path.resolve()):
                             continue
                         try:
                             old.unlink()
@@ -415,8 +418,6 @@ class TimewalkInterface(ttk.Frame):
                 if result is not None:
                     self._queue.put(result)
 
-                last_path = newest
-                last_mtime = newest_stat.st_mtime
                 if test_mode:
                     time.sleep(0.5)
             except Exception as exc:
