@@ -158,39 +158,141 @@ def stop_measurement(server, timeout=5):
 _BUSY_MARKERS = ("RECORD", "PREPAR", "STOPPING", "STARTING")
 
 
+def measurement_status(server, timeout=5):
+    """Measurement.Status from /dashboard, upper-cased. "" when there is no
+    measurement at all (Serval reports "Measurement": null until the first
+    one, which used to raise here and read as "busy" until a timeout)."""
+    resp = SESSION.get(f"{server}/dashboard", timeout=timeout)
+    measurement = json.loads(resp.text).get("Measurement") or {}
+    return str(measurement.get("Status") or "").upper()
+
+
+def _is_busy(status):
+    return any(marker in status for marker in _BUSY_MARKERS)
+
+
 def measurement_busy(server, timeout=2):
     """True while /dashboard reports a measurement recording, preparing,
     starting or stopping."""
-    resp = SESSION.get(f"{server}/dashboard", timeout=timeout)
-    status = str(json.loads(resp.text).get("Measurement", {}).get("Status", "")).upper()
-    return any(marker in status for marker in _BUSY_MARKERS)
+    return _is_busy(measurement_status(server, timeout=timeout))
 
 
 def wait_for_measurement_idle(server, timeout=30.0, poll=0.2):
     """Poll /dashboard until Measurement.Status no longer looks like an
-    active recording/preparing state, or `timeout` elapses.
+    active recording/preparing state, or `timeout` elapses. Returns the
+    idle status ("IDLE" when there is no measurement), or None on timeout.
 
     stop_measurement() is fire-and-forget -- it doesn't confirm Serval has
-    actually wound down. That's usually fine, but under CONTINUOUS mode
-    with a very large nTriggers (configure_continuous_destination), Serval
-    can take a real moment to actually stop, and a destination/config PUT
-    issued for the *next* run while it's still stopping the previous one
-    can hang -- this closes that race by confirming idle first. Best-effort:
-    if /dashboard itself is unreachable or the status text doesn't look
-    like anything recognizable, just returns after `timeout` rather than
-    blocking forever.
+    actually wound down, and a start or destination/config PUT issued while
+    it is still stopping is rejected or can hang. Best-effort: if
+    /dashboard itself is unreachable, returns None after `timeout` rather
+    than blocking forever.
     """
     start = time.time()
-    while time.time() - start < timeout:
+    while True:
         try:
-            resp = SESSION.get(f"{server}/dashboard", timeout=5)
-            status = str(json.loads(resp.text).get("Measurement", {}).get("Status", "")).upper()
-            if status and not any(marker in status for marker in _BUSY_MARKERS):
-                return status
+            status = measurement_status(server)
+            if not _is_busy(status):
+                return status or "IDLE"
         except Exception:
             pass
+        if time.time() - start >= timeout:
+            return None
         time.sleep(poll)
-    return None
+
+
+class ServalBusy(RuntimeError):
+    """Serval is still running a measurement that won't stop."""
+
+
+def ensure_idle(server, timeout=30.0):
+    """Make sure no measurement is running before a start or a
+    destination/config change: wait for the current one to end on its own,
+    and if it doesn't within `timeout`, stop it and wait again. Raises
+    ServalBusy if Serval still reports a measurement after that."""
+    if wait_for_measurement_idle(server, timeout=timeout) is not None:
+        return
+    try:
+        stop_measurement(server)
+    except Exception:
+        pass
+    if wait_for_measurement_idle(server, timeout=15.0) is None:
+        raise ServalBusy("Serval is still running a measurement and didn't stop when asked.")
+
+
+def capture_single_frame(server, directory, frame_time, stop_event, pattern="*.tpx3", settle=0.3,
+                         poll=0.1, start_timeout=10.0):
+    """Take one frame with a destination set up by
+    configure_single_trigger_destination (nTriggers=1) and return the raw
+    file(s) it wrote into `directory`, oldest first -- or [] if stop_event
+    was set (the measurement is then stopped) or nothing was written.
+
+    Frame completion is taken from Serval itself: the measurement started
+    here has to come and go (busy, then idle) before the new file is
+    picked up. Waiting for the file's mtime to go quiet instead returns a
+    file that is still being written whenever the data rate pauses
+    mid-exposure, and the next start then lands while that measurement is
+    still running and is rejected.
+
+    Raises ServalBusy if Serval can't be brought idle first, and
+    TimeoutError if the frame doesn't finish within frame_time + 30 s."""
+    directory = pathlib.Path(directory)
+    ensure_idle(server, timeout=start_timeout)
+    before = {path: _stat_key(path) for path in directory.glob(pattern)}
+    start_measurement(server)
+    started = time.time()
+    seen_busy = False
+    deadline = started + frame_time + 30.0
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            try:
+                stop_measurement(server)
+                wait_for_measurement_idle(server, timeout=10.0)
+            except Exception:
+                pass
+            return []
+        try:
+            busy = _is_busy(measurement_status(server))
+        except Exception:
+            busy = None
+        if busy:
+            seen_busy = True
+        # Done once Serval is idle again -- after having been seen busy, or
+        # (in case the whole frame fell between two polls) after at least
+        # one exposure's worth of time.
+        elif busy is False and (seen_busy or time.time() - started >= frame_time + 0.5):
+            break
+        if time.time() > deadline:
+            try:
+                stop_measurement(server)
+            except Exception:
+                pass
+            raise TimeoutError(f"Serval didn't finish a {frame_time:g} s frame within {frame_time + 30:g} s.")
+        time.sleep(poll)
+
+    # The file is closed once the measurement ends; give the filesystem a
+    # moment for its size to settle (network shares can lag).
+    settle_deadline = time.time() + max(5.0, 10 * settle)
+    new_files, sizes = [], None
+    while time.time() < settle_deadline:
+        new_files = sorted(
+            (path for path in directory.glob(pattern) if before.get(path) != _stat_key(path)),
+            key=lambda path: (path.stat().st_mtime, path.name),
+        )
+        current = [path.stat().st_size for path in new_files]
+        if new_files and current == sizes and all(current):
+            return new_files
+        sizes = current
+        time.sleep(settle)
+    return [path for path in new_files if path.stat().st_size > 0]
+
+
+def _stat_key(path):
+    try:
+        st = path.stat()
+        return st.st_size, st.st_mtime
+    except OSError:
+        return None
 
 
 def wait_for_new_file(directory: pathlib.Path, stop_event, last_path, last_mtime, timeout=5.0, settle=0.2, poll=0.1,

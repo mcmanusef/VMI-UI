@@ -173,8 +173,12 @@ calibration was used.
 
 **parameter sweep** — moves the stage through a list of positions,
 collecting into **one cv4 per physical position** (revisits append to the
-same file, so multiple passes accumulate). Frames are triggered one at a
-time and handed to a single persistent processing thread, so stage motion
+same file, so multiple passes accumulate). A range runs back and forth
+(every other pass reversed); a typed list (commas, semicolons, spaces or new
+lines between values) runs in the order given on every pass. Frames are
+triggered one at a time — each waits for Serval to report the previous
+measurement finished before starting — and handed to a single persistent
+processing thread, so stage motion
 is fully decoupled from processing. In cluster-dwell mode the whole
 position list is calibrated once up front to fix each position's frame
 count. Optionally ramps a power-supply channel group down before every move

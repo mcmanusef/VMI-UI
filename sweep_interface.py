@@ -37,6 +37,7 @@ import datetime
 import json
 import math
 import pathlib
+import re
 import threading
 import time
 from queue import Queue, Empty
@@ -69,6 +70,11 @@ from tpx_processing import (
 )
 
 _CALIBRATION_FRAME_COUNT = 4  # frames collected per calibration point
+# Consecutive failed frames (Serval errors / no file written) before a
+# visit gives up and the sweep moves on.
+_MAX_FRAME_FAILURES = 5
+# Queued after a visit's last frame (see _sweep_processor_loop).
+_VISIT_END = object()
 
 _RATE_KEYS = ("clusters_per_shot", "electrons_per_shot", "ions_per_shot")
 _RATE_LABELS = {
@@ -87,6 +93,26 @@ class HVRampFailed(Exception):
     """An HV ramp around a stage move didn't finish (or the sweep was
     stopped while it was still ramping). Raised by HVMoveGuard, which has
     already reported why to the status line."""
+
+
+def parse_position_list(text):
+    """The typed position list as floats, in the order given. Positions
+    may be separated by commas, semicolons, spaces or new lines (so
+    "-21.8, 21.8", "-21.8 21.8" and "-21.8;21.8" all work). Raises
+    ValueError naming the entry that isn't a number."""
+    tokens = [t for t in re.split(r"[,;\s]+", str(text).strip()) if t]
+    if not tokens:
+        raise ValueError("Position list is empty.")
+    positions = []
+    for token in tokens:
+        try:
+            value = float(token)
+        except ValueError:
+            raise ValueError(f"{token!r} is not a number.") from None
+        if not math.isfinite(value):
+            raise ValueError(f"{token!r} is not a finite number.")
+        positions.append(value)
+    return positions
 
 
 class HVMoveGuard:
@@ -309,7 +335,7 @@ class SweepInterface(ttk.Frame):
             ttk.Entry(range_row, textvariable=var, width=5).grid(row=0, column=2 * idx + 1, sticky="ew")
             range_row.columnconfigure(2 * idx + 1, weight=1)
         ttk.Radiobutton(
-            positions, text="List (comma-separated)", value="list", variable=self.position_mode_var
+            positions, text="List (run in this order every pass)", value="list", variable=self.position_mode_var
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ttk.Entry(positions, textvariable=self.position_list_var).grid(
             row=3, column=0, columnspan=2, sticky="ew", pady=(2, 4)
@@ -461,10 +487,7 @@ class SweepInterface(ttk.Frame):
                 raise ValueError("Count must be at least 1.")
             return [float(v) for v in np.linspace(low, high, count)]
 
-        text = self.position_list_var.get().strip()
-        if not text:
-            raise ValueError("Position list is empty.")
-        return [float(v) for v in text.split(",") if v.strip()]
+        return parse_position_list(self.position_list_var.get())
 
     def _collect_metadata(self, frame_time, dwell_mode, dwell_value, passes):
         return {
@@ -615,6 +638,7 @@ class SweepInterface(ttk.Frame):
             args=(
                 stage, server, group_name, zero_offset, positions, passes,
                 dwell_mode, dwell_value, frame_time, raw_root, save_folder, metadata_base, hv,
+                self.position_mode_var.get() == "range",
             ),
             daemon=True,
         )
@@ -702,24 +726,16 @@ class SweepInterface(ttk.Frame):
         )
         return events, stats
 
-    def _wait_for_next_frame(self, raw_dir, wait_timeout, last_path, last_mtime):
-        """Block for the next raw file to land and settle. Doesn't trigger
-        anything itself -- the measurement is started once per position (see
-        _collect_position) in CONTINUOUS mode with a very large trigger
-        count, so Serval keeps writing a new raw file every frame_time on
-        its own; this just watches for the next one to show up. Returns
-        (path, stat) or (None, None) if nothing showed up within the
-        timeout."""
-        newest = serval_client.wait_for_new_file(raw_dir, self._stop_event, last_path, last_mtime, timeout=wait_timeout)
-        if newest is None:
-            return None, None
-        newest_stat = newest.stat()
-        if newest_stat.st_size == 0:
-            return None, None
-        return newest, newest_stat
+    def _capture_frame(self, server, raw_dir, frame_time):
+        """Trigger one frame (destination already configured for one
+        trigger per start) and return the raw file(s) it wrote, waiting for
+        Serval to report the measurement finished -- see
+        serval_client.capture_single_frame. Only a hard stop interrupts a
+        frame; finish-and-stop lets the one in progress complete."""
+        return serval_client.capture_single_frame(server, raw_dir, frame_time, self._stop_event)
 
     def _trigger_visit(self, server, raw_dir, frame_time, dwell_mode, dwell_value, frame_count,
-                        pending_queue, visit_id, visit_records):
+                       pending_queue, visit_id):
         """Collector half only -- triggers frames one at a time
         (nTriggers=1, a fresh start_measurement() per frame -- the
         destination was already configured for this by the caller,
@@ -729,28 +745,18 @@ class SweepInterface(ttk.Frame):
 
         Does NOT wait for those frames to actually be processed: this
         returns (and the caller moves the stage to the next position) as
-        soon as this visit's own dwell condition is met, regardless of how
-        far behind _sweep_processor_loop's persistent, single background
-        thread is. That thread drains pending_queue strictly in arrival
-        order, so files always get processed in the order they came in,
-        never out of order and never blocking the stage from moving on.
+        soon as this visit's own dwell condition is met. The caller then
+        queues the visit's end marker behind its frames, which is how the
+        processor knows the visit is complete (see _sweep_processor_loop).
 
-        Records this visit's outcome (how many frames it triggered, and
-        whether it reached its dwell target naturally vs. being cut short)
-        directly into visit_records[visit_id] for the processor to pick up
-        once it finishes that visit's last frame. Returns (frames_collected,
-        completed_naturally).
-        """
-        # Long enough for one exposure plus Serval's start-up and file
-        # write, and no longer: a frame that never arrives costs this much
-        # dead time. Re-triggering early can't overlap a running exposure,
-        # since every start first waits for Serval to be idle (below).
-        wait_timeout = frame_time + 5.0
-        last_path = None
-        last_mtime = None
+        Each frame is only counted once Serval reports it finished, and the
+        next start only goes out with Serval idle, so a start can't land on
+        a measurement still in progress. Returns (frames_collected,
+        completed_naturally)."""
         frames_collected = 0
         collection_start = time.time()
         completed_naturally = False
+        failures_in_a_row = 0
         # Absolute safety ceiling regardless of source (a pathological
         # calibration estimate can't spin the collector forever).
         max_frames = 5000
@@ -768,35 +774,28 @@ class SweepInterface(ttk.Frame):
                     break
 
                 try:
-                    # The previous file can look finished (no writes for
-                    # `settle` seconds) while Serval is still wrapping up
-                    # that measurement, and a start sent then is rejected.
-                    serval_client.wait_for_measurement_idle(server, timeout=10.0)
-                    if last_path is not None:
-                        # Its final writes, if any, aren't a new frame.
-                        # (Already gone if the processor deleted it.)
-                        try:
-                            last_mtime = last_path.stat().st_mtime
-                        except OSError:
-                            pass
-                    serval_client.start_measurement(server)
+                    files = self._capture_frame(server, raw_dir, frame_time)
                 except Exception as exc:
-                    self._queue.put({"error": f"Start failed: {exc}"})
-                    time.sleep(1)
+                    failures_in_a_row += 1
+                    self._queue.put({"error": f"Frame failed: {exc}"})
+                    if failures_in_a_row >= _MAX_FRAME_FAILURES:
+                        self._queue.put({"error": f"Giving up on this position after {failures_in_a_row} failed frames: {exc}"})
+                        break
+                    self._stop_event.wait(1.0)
                     continue
+                if not files:
+                    if self._stop_event.is_set():
+                        break
+                    failures_in_a_row += 1
+                    self._queue.put({"error": f"No raw file was written for a frame in {raw_dir.name}."})
+                    if failures_in_a_row >= _MAX_FRAME_FAILURES:
+                        break
+                    continue
+                failures_in_a_row = 0
 
-                try:
-                    newest, newest_stat = self._wait_for_next_frame(raw_dir, wait_timeout, last_path, last_mtime)
-                except Exception as exc:
-                    self._queue.put({"error": str(exc)})
-                    time.sleep(1)
-                    continue
-                if newest is None:
-                    continue
-
-                last_path, last_mtime = newest, newest_stat.st_mtime
-                frames_collected += 1
-                pending_queue.put((newest, visit_id))
+                for path in files:
+                    frames_collected += 1
+                    pending_queue.put((path, visit_id))
 
                 elapsed_wall = time.time() - collection_start
                 measured_time = frames_collected * frame_time
@@ -807,17 +806,14 @@ class SweepInterface(ttk.Frame):
                 })
         finally:
             try:
-                serval_client.stop_measurement(server)
-                # Doesn't confirm Serval actually wound down. Without
-                # waiting for it, the *next* position's move + destination
-                # reconfigure can race against a still-stopping measurement
-                # and hang.
-                serval_client.wait_for_measurement_idle(server)
+                # Normally already idle (every frame waits for its own
+                # measurement to end); this covers a frame cut off by an
+                # exception, so the next move + destination change doesn't
+                # race a still-running measurement.
+                serval_client.ensure_idle(server, timeout=5.0)
             except Exception:
                 pass
 
-        visit_records[visit_id]["frames_expected"] = frames_collected
-        visit_records[visit_id]["completed_naturally"] = completed_naturally
         return frames_collected, completed_naturally
 
     def _sweep_processor_loop(self, pending_queue, position_meta, visit_records,
@@ -859,6 +855,23 @@ class SweepInterface(ttk.Frame):
                     record = visit_records[visit_id]
                     position_key = record["position_key"]
                     meta = position_meta[position_key]
+                    if newest is _VISIT_END:
+                        # Queued behind the visit's last frame, so every
+                        # frame it collected has been through here already.
+                        # (Waiting for frames_processed to reach a count set
+                        # later by the mover raced: when processing kept up,
+                        # the last frame went by before the count was set and
+                        # the visit never finished.)
+                        meta["frames_collected"] += record["frames_expected"]
+                        if record["frames_expected"]:
+                            writer = Cv4Writer(
+                                cv4_writer.partial_path_for(meta["cv4_path"]), metadata=meta["base_metadata"]
+                            )
+                            try:
+                                self._finish_visit(writer, meta, record, position_key, summary, summary_path)
+                            finally:
+                                writer.close()
+                        continue
                     writer = Cv4Writer(
                         cv4_writer.partial_path_for(meta["cv4_path"]), metadata=meta["base_metadata"]
                     )
@@ -877,16 +890,11 @@ class SweepInterface(ttk.Frame):
                             "sweep_processed_total": total_processed,
                             "sweep_pending": pending_queue.qsize(),
                         })
-
-                        if (
-                            record["frames_expected"] is not None
-                            and record["frames_processed"] >= record["frames_expected"]
-                        ):
-                            self._finish_visit(writer, meta, record, position_key, summary, summary_path)
                     finally:
                         writer.close()
                 except Exception as exc:
-                    self._queue.put({"error": f"Processing {newest.name} failed: {exc}"})
+                    name = "visit end" if newest is _VISIT_END else newest.name
+                    self._queue.put({"error": f"Processing {name} failed: {exc}"})
                 finally:
                     pending_queue.task_done()
         except Exception as exc:
@@ -977,7 +985,6 @@ class SweepInterface(ttk.Frame):
         """
         calib_root = raw_root / "calibration"
         calib_root.mkdir(parents=True, exist_ok=True)
-        wait_timeout = max(120.0, frame_time * 5.0 + 2.0)
         frame_counts = {}
         total = len(positions)
 
@@ -1014,6 +1021,7 @@ class SweepInterface(ttk.Frame):
             calib_dir = calib_root / f"calib_{idx:03d}_{requested:+.4f}"
             calib_dir.mkdir(parents=True, exist_ok=True)
             try:
+                serval_client.ensure_idle(server)
                 serval_client.configure_single_trigger_destination(
                     server, frame_time, calib_dir, "calib%Hms_"
                 )
@@ -1023,54 +1031,32 @@ class SweepInterface(ttk.Frame):
 
             # Collect _CALIBRATION_FRAME_COUNT frames, one trigger at a
             # time, accumulating stats across all of them.
-            last_path = None
-            last_mtime = None
             frames_collected = 0
             combined_stats = None
             try:
                 while not stopping() and frames_collected < _CALIBRATION_FRAME_COUNT:
                     try:
-                        # The previous file can look finished (no writes for
-                        # `settle` seconds) while Serval is still wrapping up
-                        # that measurement, and a start sent then is rejected.
-                        serval_client.wait_for_measurement_idle(server, timeout=10.0)
-                        if last_path is not None:
-                            # Its final writes, if any, aren't a new frame.
-                            # (Already gone if the processor deleted it.)
-                            try:
-                                last_mtime = last_path.stat().st_mtime
-                            except OSError:
-                                pass
-                        serval_client.start_measurement(server)
+                        files = self._capture_frame(server, calib_dir, frame_time)
                     except Exception as exc:
-                        self._queue.put({"error": f"Calibration start failed at position {requested}: {exc}"})
+                        self._queue.put({"error": f"Calibration frame failed at position {requested}: {exc}"})
                         break
-
+                    if not files:
+                        break
                     try:
-                        newest, newest_stat = self._wait_for_next_frame(calib_dir, wait_timeout, last_path, last_mtime)
-                    except Exception as exc:
-                        self._queue.put({"error": f"Calibration collection failed at position {requested}: {exc}"})
-                        break
-                    if newest is None:
-                        break
-                    last_path, last_mtime = newest, newest_stat.st_mtime
-
-                    try:
-                        _, stats = self._process_frame(newest)
+                        for path in files:
+                            _, stats = self._process_frame(path)
+                            frames_collected += 1
+                            combined_stats = stats if combined_stats is None else merge_stats(combined_stats, stats)
                     except Exception as exc:
                         self._queue.put({"error": f"Calibration processing failed at position {requested}: {exc}"})
                         break
-
-                    frames_collected += 1
-                    combined_stats = stats if combined_stats is None else merge_stats(combined_stats, stats)
                     self._queue.put({
                         "calibration_position_collected": frames_collected,
                         "calibration_position_total": _CALIBRATION_FRAME_COUNT,
                     })
             finally:
                 try:
-                    serval_client.stop_measurement(server)
-                    serval_client.wait_for_measurement_idle(server)
+                    serval_client.ensure_idle(server, timeout=5.0)
                 except Exception:
                     pass
 
@@ -1100,6 +1086,7 @@ class SweepInterface(ttk.Frame):
     def _sweep_loop(
         self, stage, server, group_name, zero_offset, positions, passes,
         dwell_mode, dwell_value, frame_time, raw_root, save_folder, metadata_base, hv=None,
+        alternate_direction=True,
     ):
         """The mover: moves the stage through every position/pass and
         triggers each visit's frames (see _trigger_visit), but never waits
@@ -1116,13 +1103,23 @@ class SweepInterface(ttk.Frame):
         up to the collecting voltage (and fully ramped) before anything is
         triggered. A ramp that never gets there ends the sweep -- unlike a
         failed move, which only costs that one position.
+
+        alternate_direction (range mode): every other pass runs the
+        positions in reverse, so the stage doesn't fly back to the start.
+        Off for a typed list, which is run in the order given on every pass
+        (e.g. "-21.8, 21.8" alternates between the two every visit instead
+        of visiting each twice in a row at the turnarounds).
         """
         total_positions = len(positions) * passes
         global_index = 0
         move_failures = 0
         config_failures = 0
         hv_failed = False
-        position_index = {p: i + 1 for i, p in enumerate(positions)}
+        # A position listed more than once is still one physical position:
+        # one cv4 file (named after its first place in the list) and one
+        # calibration.
+        unique_positions = list(dict.fromkeys(positions))
+        position_index = {p: i + 1 for i, p in enumerate(unique_positions)}
 
         # Cluster-dwell mode: calibrate every position's frame count once,
         # up front, before triggering any real data collection -- see
@@ -1133,7 +1130,7 @@ class SweepInterface(ttk.Frame):
         if dwell_mode == "clusters":
             try:
                 frame_counts = self._calibrate_frame_counts(
-                    stage, server, group_name, zero_offset, positions, frame_time, dwell_value, raw_root, hv
+                    stage, server, group_name, zero_offset, unique_positions, frame_time, dwell_value, raw_root, hv
                 )
             except HVRampFailed:
                 stopped = self._stop_event.is_set() or self._finish_event.is_set()
@@ -1182,7 +1179,7 @@ class SweepInterface(ttk.Frame):
             for pass_idx in range(passes):
                 if self._stop_event.is_set() or self._finish_event.is_set():
                     break
-                direction = "forward" if pass_idx % 2 == 0 else "backward"
+                direction = "backward" if alternate_direction and pass_idx % 2 else "forward"
                 seq = positions if direction == "forward" else list(reversed(positions))
 
                 for requested in seq:
@@ -1234,6 +1231,9 @@ class SweepInterface(ttk.Frame):
                             "cv4_path": save_folder / f"pos_{position_index[requested]:03d}_{requested:+.4f}.cv4",
                             "base_metadata": base_metadata,
                             "visits": [],
+                            # Triggered by the mover vs. counted by the
+                            # processor at each visit's end marker.
+                            "frames_triggered": 0,
                             "frames_collected": 0,
                             "frames_processed": 0,
                         }
@@ -1256,6 +1256,9 @@ class SweepInterface(ttk.Frame):
                     # serval_client.configure_continuous_destination /
                     # max_frames_per_batch for future use).
                     try:
+                        # A destination change while a measurement is still
+                        # running is rejected or hangs.
+                        serval_client.ensure_idle(server)
                         serval_client.configure_single_trigger_destination(
                             server, frame_time, position_raw_dir, "sweep%Hms_"
                         )
@@ -1283,20 +1286,21 @@ class SweepInterface(ttk.Frame):
                     self._queue.put({"position_started": True})
                     if dwell_mode == "clusters" and frame_count:
                         self._queue.put({"position_estimate": frame_count})
-                    frames_collected, _ = self._trigger_visit(
+                    frames_collected, completed_naturally = self._trigger_visit(
                         server, position_raw_dir, frame_time, dwell_mode, dwell_value, frame_count,
-                        pending_queue, visit_id, visit_records,
+                        pending_queue, visit_id,
                     )
-                    visit_records[visit_id]["elapsed_seconds"] = time.time() - position_start
-                    position_meta[requested]["frames_collected"] += frames_collected
+                    record = visit_records[visit_id]
+                    record["elapsed_seconds"] = time.time() - position_start
+                    record["frames_expected"] = frames_collected
+                    record["completed_naturally"] = completed_naturally
+                    position_meta[requested]["frames_triggered"] += frames_collected
+                    # Behind this visit's frames in the FIFO: the processor
+                    # finishes the visit when it gets here (a visit with no
+                    # frames is just dropped there).
+                    pending_queue.put((_VISIT_END, visit_id))
 
                     if frames_collected == 0:
-                        # Nothing was even triggered (e.g. stopped right as
-                        # this visit began) -- no frame will ever arrive for
-                        # it, so the processor will never see it finish;
-                        # drop the empty record rather than leave it
-                        # dangling.
-                        visit_records.pop(visit_id, None)
                         continue
 
                     if self._finish_event.is_set():
@@ -1331,11 +1335,11 @@ class SweepInterface(ttk.Frame):
         for meta in position_meta.values():
             if meta["frames_processed"] == 0:
                 continue
-            all_processed = meta["frames_processed"] >= meta["frames_collected"]
+            all_processed = meta["frames_processed"] >= meta["frames_triggered"]
             partial_path = cv4_writer.partial_path_for(meta["cv4_path"])
             writer = Cv4Writer(partial_path)
             writer.set_attrs({
-                "Frames Collected": meta["frames_collected"],
+                "Frames Collected": meta["frames_triggered"],
                 "Frames Processed": meta["frames_processed"],
                 "Complete": sweep_completed_naturally,
                 "All Collected Frames Processed": all_processed,
