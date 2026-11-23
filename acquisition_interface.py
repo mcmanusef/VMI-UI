@@ -1,4 +1,6 @@
+import collections
 import datetime
+import os
 import pathlib
 import threading
 import time
@@ -21,6 +23,49 @@ from cv4_writer import Cv4Writer
 from plot_panel import HistogramPlotPanel
 from cluster_timing import CLUSTER_TIMING_ATTR, ClusterTimingCalibration, load_correction
 from timewalk import DEFAULT_CORRECTION_PATH
+
+
+# Serval names this tab's raw files <prefix><time>...; only those are picked
+# up, so stray files in the raw folder are left alone.
+FILE_PREFIX = "acq"
+# How often the raw folder is checked for newly finished frames.
+_FILE_POLL_S = 0.05
+# How often Serval is asked whether a batch that looks complete has ended.
+_BATCH_POLL_S = 0.05
+# Plot refresh period (ms): results that arrive in between are merged and
+# drawn once (as on Diagnostics).
+_REDRAW_MS = 30
+
+
+def _created(st):
+    """When a file was created, where the platform records it (Windows; some
+    other systems via st_birthtime), else its mtime. Windows only updates a
+    still-open file's listed mtime lazily, so by mtime the frame Serval is
+    still writing can sort before the one it just closed."""
+    birth = getattr(st, "st_birthtime", None)
+    if birth is not None:
+        return birth
+    return st.st_ctime if os.name == "nt" else st.st_mtime
+
+
+def _list_frames(raw_dir, exclude):
+    """(path, size) of every raw frame of this tab in raw_dir whose name
+    isn't in `exclude`, oldest first (Serval's own file counter breaks
+    ties). Sizes come from the listing and can lag on Windows: read a
+    finished file's real size from the file itself."""
+    frames = []
+    with os.scandir(raw_dir) as entries:
+        for entry in entries:
+            name = entry.name
+            if name in exclude or not (name.startswith(FILE_PREFIX) and name.endswith(".tpx3")):
+                continue
+            try:
+                st = entry.stat()
+            except OSError:
+                continue
+            frames.append((pathlib.Path(entry.path), _created(st), st.st_size))
+    frames.sort(key=lambda f: (f[1], f[0].name))
+    return [(path, size) for path, _, size in frames]
 
 
 class AcquisitionInterface(ttk.Frame):
@@ -77,6 +122,8 @@ class AcquisitionInterface(ttk.Frame):
         self.pending_var = tk.StringVar(self, value="--")
         self.analysis_speed_var = tk.StringVar(self, value="--")
         self.dead_time_var = tk.StringVar(self, value="--")
+        self.processing_fps_var = tk.StringVar(self, value="--")
+        self.rep_rate_var = tk.StringVar(self, value="--")
         self.pulses_var = tk.StringVar(self, value="--")
         self.clusters_var = tk.StringVar(self, value="--")
         self.etof_var = tk.StringVar(self, value="--")
@@ -101,6 +148,12 @@ class AcquisitionInterface(ttk.Frame):
         self._accumulated = None
         self._reset_accumulation = False
         self._target_frames = 0
+        self._batch_frames = 1
+        # Raw files already in the raw folder at Start (an earlier run's):
+        # never treated as this run's frames.
+        self._stale_names = frozenset()
+        # When each recent frame was processed (for the processing rate).
+        self._processed_times = collections.deque()
 
         self._build_ui()
         self._poll_queue()
@@ -121,6 +174,7 @@ class AcquisitionInterface(ttk.Frame):
             on_settings_changed=self._on_panel_settings_changed,
             plots_first=True,
             shared_vars=self._plot_shared_vars,
+            etof_correlation=True,
         )
         self._plot_panel.grid(row=0, column=0, sticky="nsew")
 
@@ -129,7 +183,7 @@ class AcquisitionInterface(ttk.Frame):
         # once collapsed sections have shrunk) so the real content stays
         # packed at the top and pulls upward as sections collapse, rather
         # than leftover space landing inside one of the rows above.
-        sidebar.rowconfigure(5, weight=1)
+        sidebar.rowconfigure(8, weight=1)
 
         # "Force Stop" aborts in-flight frames; the normal Stop lets them
         # finish processing cleanly -- hence the danger styling/separation.
@@ -162,13 +216,15 @@ class AcquisitionInterface(ttk.Frame):
 
         self.notes = ui_style.build_metadata_section(sidebar, 3, self)
 
-        live = ui_style.build_section(sidebar, 4, "Live totals", pady=0)
+        live = ui_style.build_section(sidebar, 4, "Live totals")
         cv4_row = ui_style.add_stat_rows(live, [
             ("Frames collected:", self.collected_var),
             ("Frames processed:", self.frames_var),
             ("Pending (backlog):", self.pending_var),
+            ("Processing rate (fps):", self.processing_fps_var),
             ("Dead time:", self.dead_time_var),
             ("Analysis speed:", self.analysis_speed_var),
+            ("Laser repetition rate:", self.rep_rate_var),
             ("Pulses:", self.pulses_var),
             ("Clusters:", self.clusters_var),
             ("e-ToF events:", self.etof_var),
@@ -176,6 +232,37 @@ class AcquisitionInterface(ttk.Frame):
         ])
         ttk.Label(live, text="cv4 file:", font=ui_style.SMALL_FONT).grid(row=cv4_row, column=0, sticky="nw", pady=(6, 0))
         ui_style.add_note(live, cv4_row + 1, textvariable=self.cv4_path_var, pady=0)
+
+        # The same run-wide rates Diagnostics shows, over everything
+        # processed so far.
+        self._stat_vars = {}
+        stat_groups = [
+            ("Per-shot rates", [
+                ("Cluster rate:", "clusters_per_shot"),
+                ("e-ToF rate:", "electrons_per_shot"),
+                ("i-ToF rate:", "ions_per_shot"),
+            ]),
+            ("Per-cluster ratios", [
+                ("e-ToF : cluster ratio:", "electrons_per_cluster"),
+                ("i-ToF : cluster ratio:", "ions_per_cluster"),
+                ("Average cluster size:", "avg_cluster_size"),
+            ]),
+            ("Event fractions", [
+                ("Coincidence rate:", "shots_all_three"),
+                ("e-ToF multi-hit rate:", "shots_multi_electrons"),
+                ("i-ToF multi-hit rate:", "shots_multi_ions"),
+                ("Cluster multi-hit rate:", "shots_multi_clusters"),
+            ]),
+        ]
+        for idx, (title, items) in enumerate(stat_groups):
+            last = idx == len(stat_groups) - 1
+            body = ui_style.build_section(sidebar, 5 + idx, title, pady=0 if last else (0, 8))
+            rows = []
+            for label, key in items:
+                var = tk.StringVar(self, value="--")
+                self._stat_vars[key] = var
+                rows.append((label, var))
+            ui_style.add_stat_rows(body, rows)
 
     def _browse_folder(self):
         chosen = filedialog.askdirectory(
@@ -289,15 +376,24 @@ class AcquisitionInterface(ttk.Frame):
         metadata[tdc_mapping.PIXEL_OFFSET_ATTR] = tdc_mapping.get_active_mapping().pixel_offset_ns
 
         try:
-            server = self._server_url()
-            # One frame per trigger, restarted every frame (see
-            # _collector_loop) -- back to this tab's original design rather
-            # than the continuous, many-frames-per-command pattern (still
-            # available in serval_client.configure_continuous_destination
-            # for future use).
-            serval_client.configure_single_trigger_destination(server, frame_time, raw_dir, "acq%Hms_")
+            self._stale_names = frozenset(path.name for path, _ in _list_frames(raw_dir, ()))
+        except OSError as exc:
+            self.status_var.set(f"Could not read {raw_dir}: {exc}")
+            return
+
+        server = self._server_url()
+        try:
+            # Continuous mode, as on Diagnostics: one start makes Serval
+            # write a new raw file every frame on its own, in bounded
+            # batches (see _collector_loop), instead of a start/re-arm
+            # round trip -- and its dead time -- per frame.
+            self._batch_frames = serval_client.max_frames_per_batch(frame_time)
+            first_batch = min(self._batch_frames, target_frames) if target_frames > 0 else self._batch_frames
+            serval_client.configure_continuous_destination(
+                server, frame_time, raw_dir, f"{FILE_PREFIX}%Hms_", n_triggers=first_batch,
+            )
         except Exception as exc:
-            self.status_var.set(f"Config failed: {exc}")
+            self.status_var.set(f"Config failed: {type(exc).__name__}: {exc} (server={server})")
             return
 
         self._reset_accumulation = True
@@ -312,6 +408,11 @@ class AcquisitionInterface(ttk.Frame):
         self.pending_var.set("0")
         self.dead_time_var.set("--")
         self.analysis_speed_var.set("--")
+        self.processing_fps_var.set("--")
+        self.rep_rate_var.set("--")
+        for var in self._stat_vars.values():
+            var.set("--")
+        self._processed_times.clear()
         self._progress_var.set(0.0)
         self.eta_var.set("Estimating..." if target_frames > 0 else "--")
         if target_frames > 0:
@@ -408,103 +509,123 @@ class AcquisitionInterface(ttk.Frame):
     # ---- detector allows -- never blocked on clustering -------------------
 
     def _collector_loop(self, raw_dir, frame_time, target_frames):
-        """Keeps triggering/collecting new raw files until `target_frames`
-        have been collected (target_frames <= 0 means "until stopped").
-        Going by frame count rather than wall time means dead time around
-        each start/stop cycle (server round-trips, polling, detector
-        readout) doesn't eat into how much data actually gets collected --
+        """Hand every frame Serval finishes writing to the processor, until
+        `target_frames` have been collected (target_frames <= 0 means
+        "until stopped"). Going by frame count rather than wall time means
         `target_frames * frame_time` is always the real exposure collected,
         however much wall time it ends up taking.
 
-        This loop is never blocked waiting on the processor: each new file
-        is handed off to the pending queue and this loop immediately moves
-        on to trigger the next frame, so a slow analysis never slows down
-        collection.
-
-        One frame per trigger: the destination was configured for
-        nTriggers=1 (configure_single_trigger_destination, called by
-        start()), so a fresh start_measurement() is issued every single
-        frame below -- this tab's original design. The continuous,
-        many-frames-per-command pattern (configure_continuous_destination,
-        serval_client.max_frames_per_batch, still used by Collection
-        parameters and Quick Monitor) remains available in serval_client.py
-        for future use; this tab just isn't using it right now.
+        Continuous mode, as on Diagnostics: one start_measurement() makes
+        Serval write a new raw file every frame on its own, in batches of at
+        most serval_client.max_frames_per_batch frames (the last batch of a
+        bounded run is cut to exactly the frames still wanted, so Serval
+        stops on the target frame itself). A frame is finished once Serval
+        has opened a newer file after it, or -- the last frame of a batch --
+        once Serval has gone idle; the next batch is started then. Unlike
+        Diagnostics, no frame is ever skipped: every finished frame is
+        queued, and this loop never waits on the processor.
 
         Stops triggering on either _stop_event (hard) or _finish_event
-        (graceful -- the processor keeps draining the backlog regardless,
-        see _processor_loop). An unbounded run (target_frames <= 0) has no
-        target to fall short of, so it's always "complete" whenever it ends;
-        a bounded run is only complete if it actually reached target_frames
-        under its own steam, not because it was stopped early.
+        (graceful: frames Serval already wrote are still queued, and the
+        processor keeps draining the backlog, see _processor_loop). An
+        unbounded run (target_frames <= 0) has no target to fall short of,
+        so it's always "complete" whenever it ends; a bounded run is only
+        complete if it actually reached target_frames under its own steam.
         """
         server = self._server_url()
-        last_path = None
-        last_mtime = None
         collection_start = time.time()
-        frame_index = 0
+        seen = set(self._stale_names)
+        collected = 0
         self._completed_naturally = target_frames <= 0
 
-        # Long enough for one exposure plus Serval's start-up and file
-        # write, and no longer: a frame that never arrives costs this much
-        # dead time. Re-triggering early can't overlap a running exposure,
-        # since every start first waits for Serval to be idle (below).
-        wait_timeout = frame_time + 5.0
+        def remaining():
+            return target_frames - collected if target_frames > 0 else None
 
-        try:
-            while not self._stop_event.is_set() and not self._finish_event.is_set():
-                if target_frames > 0 and frame_index >= target_frames:
-                    self._completed_naturally = True
-                    break
+        def batch_size():
+            left = remaining()
+            return self._batch_frames if left is None else min(self._batch_frames, left)
 
+        def take(frames):
+            """Queue finished frames (oldest first) and mark them seen."""
+            nonlocal collected
+            for path, _ in frames:
+                seen.add(path.name)
+                left = remaining()
+                if left is not None and left <= 0:
+                    continue
+                # From the file itself: on Windows a directory listing's
+                # size (and os.stat's, which can read the same entry) can
+                # still be 0 for a file Serval has only just closed.
                 try:
-                    # The previous file can look finished (no writes for
-                    # `settle` seconds) while Serval is still wrapping up
-                    # that measurement, and a start sent then is rejected.
-                    serval_client.wait_for_measurement_idle(server, timeout=10.0)
-                    if last_path is not None:
-                        # Its final writes, if any, aren't a new frame.
-                        # (Already gone if the processor deleted it.)
-                        try:
-                            last_mtime = last_path.stat().st_mtime
-                        except OSError:
-                            pass
-                    serval_client.start_measurement(server)
-                except Exception as exc:
-                    self._queue.put({"error": f"Start failed: {exc}"})
-                    time.sleep(1)
+                    with open(path, "rb") as handle:
+                        size = handle.seek(0, os.SEEK_END)
+                except OSError:
+                    size = 0
+                if size <= 0:
+                    self._queue.put({"error": f"{path.name} is empty; skipped."})
                     continue
-
-                newest = serval_client.wait_for_new_file(
-                    raw_dir, self._stop_event, last_path, last_mtime, timeout=wait_timeout
-                )
-                if newest is None:
-                    continue
-
-                newest_stat = newest.stat()
-                if newest_stat.st_size == 0:
-                    time.sleep(0.2)
-                    continue
-
-                last_path = newest
-                last_mtime = newest_stat.st_mtime
-                frame_index += 1
-                self._collected_frame_count = frame_index
-
+                collected += 1
+                self._collected_frame_count = collected
+                self._pending_queue.put(path)
                 elapsed_wall = time.time() - collection_start
-                measured_time = frame_index * frame_time
                 dead_time_pct = 0.0
                 if elapsed_wall > 0:
-                    dead_time_pct = max(0.0, (elapsed_wall - measured_time) / elapsed_wall * 100.0)
+                    dead_time_pct = max(0.0, (elapsed_wall - collected * frame_time) / elapsed_wall * 100.0)
+                self._queue.put({
+                    "collected_index": collected,
+                    "pending": self._pending_queue.qsize(),
+                    "dead_time_pct": dead_time_pct,
+                    "elapsed_wall": elapsed_wall,
+                })
 
-                self._pending_queue.put(newest)
-                self._queue.put(
-                    {
-                        "collected_index": frame_index,
-                        "pending": self._pending_queue.qsize(),
-                        "dead_time_pct": dead_time_pct,
-                        "elapsed_wall": elapsed_wall,
-                    }
-                )
+        # Frames this batch was started for, and how many of them have
+        # turned up so far.
+        batch_target = batch_size()
+        batch_seen = 0
+        last_new_file = time.perf_counter()
+        last_idle_check = 0.0
+        # Fallback if frames stop arriving before a batch looks complete.
+        idle_check = max(1.0, 3.0 * frame_time + 0.5)
+
+        try:
+            try:
+                serval_client.start_measurement(server)
+            except Exception as exc:
+                self._queue.put({"error": f"Start failed: {type(exc).__name__}: {exc}"})
+
+            while not self._stop_event.is_set() and not self._finish_event.is_set():
+                if target_frames > 0 and collected >= target_frames:
+                    self._completed_naturally = True
+                    break
+                try:
+                    frames = _list_frames(raw_dir, seen)
+                    # Every frame with a newer file after it is finished.
+                    if len(frames) > 1:
+                        take(frames[:-1])
+                        batch_seen += len(frames) - 1
+                        last_new_file = time.perf_counter()
+                        continue
+
+                    now = time.perf_counter()
+                    # The newest file is the batch's last frame: done once
+                    # Serval goes idle.
+                    batch_done = batch_seen + len(frames) >= batch_target and now - last_idle_check > _BATCH_POLL_S
+                    if batch_done or now - last_new_file > idle_check:
+                        last_idle_check = last_new_file = now
+                        if not serval_client.measurement_busy(server):
+                            take(_list_frames(raw_dir, seen))
+                            if target_frames > 0 and collected >= target_frames:
+                                continue
+                            if self._stop_event.is_set() or self._finish_event.is_set():
+                                break
+                            batch_target = batch_size()
+                            batch_seen = 0
+                            serval_client.restart_continuous_batch(server, frame_time, batch_target)
+                    self._stop_event.wait(_FILE_POLL_S)
+                except Exception as exc:
+                    if not self._stop_event.is_set():
+                        self._queue.put({"error": f"{type(exc).__name__}: {exc}"})
+                    self._stop_event.wait(0.5)
         except Exception as exc:
             self._queue.put({"error": str(exc)})
         finally:
@@ -516,8 +637,15 @@ class AcquisitionInterface(ttk.Frame):
                 serval_client.wait_for_measurement_idle(server)
             except Exception:
                 pass
+            if not self._stop_event.is_set():
+                # Finish & Stop (or the target reached): whatever Serval
+                # wrote before stopping is real data, so it's kept.
+                try:
+                    take(_list_frames(raw_dir, seen))
+                except Exception as exc:
+                    self._queue.put({"error": str(exc)})
             self._collection_done.set()
-            self._queue.put({"collection_done": True, "collected_index": frame_index})
+            self._queue.put({"collection_done": True, "collected_index": collected})
 
     # ---- processor thread: cluster + write cv4, draining the backlog -----
     # ---- until it's empty (collection finished) or Stop is pressed -------
@@ -605,13 +733,19 @@ class AcquisitionInterface(ttk.Frame):
     # ---- main-thread queue handling ---------------------------------------
 
     def _poll_queue(self):
+        """Apply every result that arrived since the last tick, then redraw
+        once -- drawing costs the same however many frames went into it, so
+        a backlog draining fast doesn't stall on redraws."""
+        got_frame = False
         try:
             while True:
                 result = self._queue.get_nowait()
-                self._apply_result(result)
+                got_frame = self._apply_result(result) or got_frame
         except Empty:
             pass
-        self.after(200, self._poll_queue)
+        if got_frame:
+            self._redraw()
+        self.after(_REDRAW_MS, self._poll_queue)
 
     def _apply_result(self, result):
         if "error" in result:
@@ -670,6 +804,13 @@ class AcquisitionInterface(ttk.Frame):
             self._reset_accumulation = False
         self._accumulated = raw_conversion.accumulate_plot_result(self._accumulated, result)
 
+        now = time.perf_counter()
+        self._processed_times.append(now)
+        while self._processed_times and now - self._processed_times[0] > 2.0:
+            self._processed_times.popleft()
+        return True
+
+    def _redraw(self):
         self._plot_panel.update_plots(self._accumulated)
 
         stats = self._accumulated["stats"]
@@ -684,3 +825,13 @@ class AcquisitionInterface(ttk.Frame):
             self.analysis_speed_var.set(f"{real_time / analysis_time:.3f}")
         else:
             self.analysis_speed_var.set("--")
+        rep_rate = stats.get("pulses_per_second", 0)
+        self.rep_rate_var.set(f"{rep_rate:.3f}" if rep_rate else "--")
+
+        shown = self._processed_times
+        if len(shown) > 1 and shown[-1] > shown[0]:
+            self.processing_fps_var.set(f"{(len(shown) - 1) / (shown[-1] - shown[0]):.2f}")
+
+        for key, var in self._stat_vars.items():
+            value = stats.get(key)
+            var.set(f"{value:.3f}" if isinstance(value, float) else str(value if value is not None else "--"))

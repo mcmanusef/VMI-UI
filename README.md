@@ -151,8 +151,12 @@ six live histograms (pixel map, cluster map, counts/pixel, i-ToF, cluster
 
 **monitored acquisition** — the main data-taking tab. One raw `.tpx3` file
 per frame, decoded, optionally timewalk-corrected, clustered and appended
-into a cv4 (HDF5) file as it arrives, with the same six plots updating
-live. Parameters in the sidebar, plots in the main area.
+into a cv4 (HDF5) file as it arrives, with the same live plots (including
+the optional x / y vs e-ToF maps) and rate statistics as diagnostics.
+Parameters in the sidebar, plots in the main area. Like diagnostics it runs
+Serval in continuous mode, in bounded batches restarted as each one ends,
+rather than re-arming Serval for every frame -- but unlike diagnostics it
+never skips a frame: every finished frame is queued and processed.
 
 **timewalk calibration** — accumulates a 2D histogram of pixel (ToT, *t*)
 and fits a per-ToT time offset out of it. A real arrival peak should not
