@@ -80,6 +80,10 @@ class TdcMappingInterface(ttk.Frame):
             self._build_signal_section(section, name)
             row += 1
 
+        pixel_timing = ui_style.build_section(page, row, "Pixel timing")
+        self._build_pixel_timing_section(pixel_timing)
+        row += 1
+
         pairing = ui_style.build_section(page, row, "Pulse pairing")
         self._build_pairing_section(pairing)
         row += 1
@@ -190,6 +194,24 @@ class TdcMappingInterface(ttk.Frame):
         ttk.Entry(dither_row, textvariable=dither_ns_var).grid(row=0, column=1, sticky="ew", padx=(4, 0))
         ui_style.add_form_row(section, row + 5, "Dither (ns):", dither_row)
 
+    def _build_pixel_timing_section(self, section):
+        self._pixel_offset_var = app_settings.persistent_var(
+            self, tk.StringVar, tdc_mapping.PIXEL_OFFSET_KEY, f"{tdc_mapping.DEFAULT_PIXEL_OFFSET_NS:g}"
+        )
+        ui_style.add_form_row(
+            section, 0, "Pixel clock offset (ns):", ttk.Entry(section, textvariable=self._pixel_offset_var),
+        )
+        ui_style.add_note(
+            section, 1,
+            "Added to every pixel hit time before it is put in a pulse. The Timepix pixel clock runs "
+            "~180 ns ahead of the TDC, so without it electrons arriving just before a trigger land at the "
+            "end of the previous pulse (t near one trigger period), split from their own e-ToF hit, with "
+            "their low-ToT, walked hits spilling into the next pulse -- which breaks the time-walk fits "
+            "and the cluster / e-ToF pairing. Cluster times shift by the same amount. Files converted with "
+            "a different value keep the offset they were converted with.",
+            pady=(4, 4),
+        )
+
     def _build_pairing_section(self, section):
         labels = list(tdc_mapping.PULSE_OFFSET_LABELS.values())
         for row, (species, title) in enumerate(tdc_mapping.PULSE_OFFSET_SPECIES):
@@ -226,7 +248,9 @@ class TdcMappingInterface(ttk.Frame):
                 dither=bool(v["dither"].get()),
                 dither_ns=tdc_mapping.parse_dither_ns(v["dither_ns"].get()),
             )
-        return tdc_mapping.TdcMapping(**signals)
+        return tdc_mapping.TdcMapping(
+            **signals, pixel_offset_ns=tdc_mapping.parse_pixel_offset_ns(self._pixel_offset_var.get()),
+        )
 
     def _apply_mapping(self, mapping):
         for name, _title in _SIGNALS:
@@ -243,6 +267,7 @@ class TdcMappingInterface(ttk.Frame):
             v["dither_ns"].set(f"{signal.dither_ns:g}")
             if "enabled" in v:
                 v["enabled"].set(signal.enabled)
+        self._pixel_offset_var.set(f"{mapping.pixel_offset_ns:g}")
 
     def _save_preset(self):
         chosen = filedialog.asksaveasfilename(

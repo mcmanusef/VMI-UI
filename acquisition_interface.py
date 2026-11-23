@@ -13,6 +13,7 @@ import platform_paths
 import raw_conversion
 import serval_client
 import shared_state
+import tdc_mapping
 import time_estimate
 import tpx_processing
 import ui_style
@@ -285,6 +286,7 @@ class AcquisitionInterface(ttk.Frame):
         # Fixed for the whole run, so every frame matches what's recorded.
         self._run_min_cluster_size = tpx_processing.get_min_cluster_size()
         metadata[tpx_processing.MIN_CLUSTER_SIZE_ATTR] = self._run_min_cluster_size
+        metadata[tdc_mapping.PIXEL_OFFSET_ATTR] = tdc_mapping.get_active_mapping().pixel_offset_ns
 
         try:
             server = self._server_url()

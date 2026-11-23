@@ -18,7 +18,7 @@ import tdc_mapping
 import ui_style
 from qt_plots import hist_to_rgba, mpl_color, ZoomFocusViewBox
 from timewalk import DEFAULT_CORRECTION_PATH, TimewalkCorrection, generate_correction
-from tpx_processing import decode_tpx3, classify_tdcs, assign_to_pulses
+from tpx_processing import decode_tpx3, classify_tdcs, assign_to_pulses, pixel_times_on_tdc_clock
 
 
 DEFAULT_TEMP_DIR = str(platform_paths.SCRATCH_ROOT / "serval_timewalk")
@@ -427,13 +427,15 @@ class TimewalkInterface(ttk.Frame):
         tot_bins, tot_min, tot_max, t_bins, t_min, t_max = hist_settings
 
         pixels, tdcs, _, _ = decode_tpx3(str(path), max_packets=max_packets)
-        _, _, pulses = classify_tdcs(tdcs, tdc_mapping.get_active_mapping())
-        pulse_idx = assign_to_pulses(pixels.time_ns, pulses)
+        mapping = tdc_mapping.get_active_mapping()
+        _, _, pulses = classify_tdcs(tdcs, mapping)
+        pixel_time = pixel_times_on_tdc_clock(pixels.time_ns, mapping)
+        pulse_idx = assign_to_pulses(pixel_time, pulses)
         after_pulse = pulse_idx >= 0
         if not after_pulse.any():
             return None
         tots = pixels.tot[after_pulse]
-        ts = pixels.time_ns[after_pulse] - pulses[pulse_idx[after_pulse]]
+        ts = pixel_time[after_pulse] - pulses[pulse_idx[after_pulse]]
 
         tot_edges = np.linspace(tot_min, tot_max, tot_bins + 1)
         t_edges = np.linspace(t_min, t_max, t_bins + 1)

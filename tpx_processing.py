@@ -360,6 +360,17 @@ def missing_trigger_warning(n_pixels: int, n_pulses: int):
 
 
 
+def pixel_times_on_tdc_clock(time_ns, mapping):
+    """Pixel hit times plus the mapping's pixel_offset_ns: the Timepix pixel
+    clock runs ahead of the TDC, and without this, electrons arriving just
+    before a trigger land at the end of the previous pulse (see
+    tdc_mapping's module docstring). Use it wherever pixel hits are put in
+    pulses."""
+    offset = float(getattr(mapping, "pixel_offset_ns", 0.0) or 0.0)
+    time_ns = np.asarray(time_ns, dtype=np.float64)
+    return time_ns + offset if offset else time_ns
+
+
 def assign_to_pulses(times, pulses_sorted):
     """Index of the latest pulse at or before each time (-1 if none)."""
     return np.searchsorted(pulses_sorted, times, side="right") - 1
@@ -410,15 +421,18 @@ def _relative_to_pulses(times, pulses_sorted):
 def build_frame_events(pixels: PixelHits, tdcs: TdcHits, mapping, min_size: int = None,
                        t_jitter_ns: float = None, timing=None):
     """Sorts one file's decoded hits into pulses and clusters its pixels
-    (cluster times per `timing` / `t_jitter_ns`, see cluster_hits).
+    (cluster times per `timing` / `t_jitter_ns`, see cluster_hits). Pixel
+    hit times are first moved onto the TDC clock by the mapping's
+    pixel_offset_ns (see pixel_times_on_tdc_clock).
     Returns (FrameEvents, cluster_size_sum, cluster_count)."""
     etof, itof, pulses = classify_tdcs(tdcs, mapping)
-    pidx = assign_to_pulses(pixels.time_ns, pulses)
+    pixel_time = pixel_times_on_tdc_clock(pixels.time_ns, mapping)
+    pidx = assign_to_pulses(pixel_time, pulses)
     ok = pidx >= 0
     pidx = pidx[ok]
     px = pixels.x[ok]
     py = pixels.y[ok]
-    pt = pixels.time_ns[ok] - pulses[pidx]
+    pt = pixel_time[ok] - pulses[pidx]
     ptot = pixels.tot[ok]
 
     clusters = cluster_hits(pidx, px, py, pt, ptot, min_size=min_size, t_jitter_ns=t_jitter_ns, timing=timing)

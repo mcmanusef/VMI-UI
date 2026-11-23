@@ -251,6 +251,13 @@ written out in full in `tpx_file_decoding.md`.
 `t_pulse[0]` is a `-1.0` sentinel so the first real pulse lands at index 1,
 matching the reference files. Run metadata sits in the root attributes.
 
+Pixel hit times are shifted by the TDC mapping's **pixel clock offset**
+(default 200 ns, recorded as the `Pixel Clock Offset (ns)` attribute) before
+they are assigned to a pulse. The Timepix pixel clock runs ~180 ns ahead of
+the TDC; without the offset, electrons arriving just before a trigger end up
+at the end of the previous pulse, split from their own e-ToF hit. Files
+converted before the offset existed have this problem: reconvert them.
+
 Files are written as `<name>.partial.cv4` and renamed to `<name>.cv4` only
 once every raw file has been processed — a stopped or failed run keeps the
 `.partial` name. `Cv4Writer` reopens an existing file in place rather than

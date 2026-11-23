@@ -39,6 +39,7 @@ from tpx_processing import (  # noqa: E402
     classify_tdcs,
     decode_tpx3,
     get_min_cluster_size,
+    pixel_times_on_tdc_clock,
     seam_pairs,
 )
 from timewalk import apply_timewalk_correction  # noqa: E402
@@ -148,7 +149,7 @@ def load_fit_file(path, layout, chip_map, col_map, mapping, reference, min_size,
     ref, pulses = reference_times(tdcs, mapping, reference)
     if len(pixels) == 0 or len(pulses) == 0 or len(ref) < 2:
         return None, delay
-    t = pixels.time_ns
+    t = pixel_times_on_tdc_clock(pixels.time_ns, mapping)
     x = pixels.x.astype(np.int64)
     y = pixels.y.astype(np.int64)
     tot = pixels.tot.astype(np.int64)

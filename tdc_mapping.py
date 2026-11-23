@@ -27,6 +27,16 @@ Each signal can also be dithered: a uniform random offset in
 [0, dither_ns) added to every time it yields, to smear out the TDC's
 quantization (the FPGA TDC's step is ~0.260 ns, the PicoTDC's ~3 ps). On
 by default for e-ToF and i-ToF, off for the pulse trigger.
+
+The mapping also holds the pixel clock offset: the Timepix pixel clock runs
+ahead of the TDC, so a pixel hit is time-stamped ~180 ns before the e-ToF
+edge of the same electron. Electrons arriving shortly before the next
+trigger (as they do on this setup) would otherwise be put in the previous
+pulse, at the very end of it, with the walked low-ToT hits of the same
+electrons spilling past the trigger into the next one -- breaking the
+time-walk fits and the cluster / e-ToF pairing. pixel_offset_ns is added to
+every pixel hit time before it is assigned to a pulse (see
+tpx_processing.build_frame_events).
 """
 import dataclasses
 import json
@@ -57,6 +67,14 @@ FPGA_TDC_SUBTYPES = {
 
 # Default dither width: about one FPGA TDC step.
 DEFAULT_DITHER_NS = 0.26
+
+# Added to every pixel hit time before it is put in a pulse (see the module
+# docstring). Measured on the 2026-11 data: pixel hits lead the e-ToF by
+# ~180 ns, so 200 ns lines cluster times up with the e-ToF times.
+DEFAULT_PIXEL_OFFSET_NS = 200.0
+PIXEL_OFFSET_KEY = "tdc_mapping.pixel_offset_ns"
+# The cv4 attribute recording the offset a file was converted with.
+PIXEL_OFFSET_ATTR = "Pixel Clock Offset (ns)"
 
 _SIGNAL_NAMES = ("pulse_trigger", "etof", "itof")
 # Signals the user may switch off; the pulse trigger is always required.
@@ -130,14 +148,19 @@ class TdcMapping:
     pulse_trigger: SignalMapping
     etof: SignalMapping
     itof: SignalMapping
+    # Added to pixel hit times before pulse assignment (module docstring).
+    pixel_offset_ns: float = DEFAULT_PIXEL_OFFSET_NS
 
     def to_dict(self):
-        return {name: getattr(self, name).to_dict() for name in _SIGNAL_NAMES}
+        data = {name: getattr(self, name).to_dict() for name in _SIGNAL_NAMES}
+        data["pixel_offset_ns"] = self.pixel_offset_ns
+        return data
 
     @classmethod
     def from_dict(cls, d):
         defaults = default_mapping()
-        return cls(**{name: SignalMapping.from_dict(d[name], getattr(defaults, name)) for name in _SIGNAL_NAMES})
+        signals = {name: SignalMapping.from_dict(d[name], getattr(defaults, name)) for name in _SIGNAL_NAMES}
+        return cls(**signals, pixel_offset_ns=parse_pixel_offset_ns(d.get("pixel_offset_ns")))
 
     def save(self, path):
         pathlib.Path(path).write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
@@ -178,6 +201,13 @@ def parse_dither_ns(value, default=DEFAULT_DITHER_NS):
     number -> float >= 0, or `default` if blank/invalid/negative."""
     width = parse_optional_float(value)
     return default if width is None or width < 0 else width
+
+
+def parse_pixel_offset_ns(value, default=DEFAULT_PIXEL_OFFSET_NS):
+    """A pixel clock offset as stored by the Hardware tab's entry (text) or
+    as a number -> float (may be negative), or `default` if blank/invalid."""
+    offset = parse_optional_float(value)
+    return default if offset is None else offset
 
 
 def _settings_key(signal_name, field):
@@ -251,4 +281,4 @@ def get_active_mapping():
                 app_settings.get(_settings_key(name, "dither_ns"), default_signal.dither_ns), default_signal.dither_ns
             ),
         )
-    return TdcMapping(**signals)
+    return TdcMapping(**signals, pixel_offset_ns=parse_pixel_offset_ns(app_settings.get(PIXEL_OFFSET_KEY)))

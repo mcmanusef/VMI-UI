@@ -258,7 +258,10 @@ def convert_job(job, hist_settings, timewalk=None, stop_event=None, on_file=None
     # from what it records.
     min_cluster_size = get_min_cluster_size()
     partial_path = cv4_writer.partial_path_for(job.cv4_path)
-    metadata = {**job.metadata, MIN_CLUSTER_SIZE_ATTR: min_cluster_size}
+    metadata = {
+        **job.metadata, MIN_CLUSTER_SIZE_ATTR: min_cluster_size,
+        tdc_mapping.PIXEL_OFFSET_ATTR: tdc_mapping.get_active_mapping().pixel_offset_ns,
+    }
     if isinstance(timewalk, ClusterTimingCalibration):
         metadata[CLUSTER_TIMING_ATTR] = timewalk.describe()
     writer = Cv4Writer(partial_path, metadata=metadata)
