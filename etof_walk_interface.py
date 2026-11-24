@@ -50,6 +50,7 @@ class EtofWalkCalibrationInterface(ttk.Frame):
         self.ref_lnq_var = pvar(tk.StringVar, "ref_lnq", f"{ew.DEFAULT_REF_LNQ:g}")
         self.position_var = pvar(tk.BooleanVar, "position_term", False)
         self.cell_px_var = pvar(tk.StringVar, "cell_px", str(ew.DEFAULT_CELL_PX))
+        self.position_lnq_bins_var = pvar(tk.StringVar, "position_lnq_bins", str(ew.DEFAULT_POSITION_LNQ_BINS))
         self.seed_var = pvar(tk.StringVar, "seed", "0")
         self.log_var = pvar(tk.BooleanVar, "log_color", True)
 
@@ -108,14 +109,18 @@ class EtofWalkCalibrationInterface(ttk.Frame):
             row=2, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
         ui_style.add_form_row(fit, 3, "Position cell (px):", ttk.Entry(fit, textvariable=self.cell_px_var, width=18))
-        ui_style.add_form_row(fit, 4, "Random seed:", ttk.Entry(fit, textvariable=self.seed_var, width=18))
+        ui_style.add_form_row(
+            fit, 4, "Position ln Q bins:", ttk.Entry(fit, textvariable=self.position_lnq_bins_var, width=18)
+        )
+        ui_style.add_form_row(fit, 5, "Random seed:", ttk.Entry(fit, textvariable=self.seed_var, width=18))
         ui_style.add_note(
-            fit, 5,
+            fit, 6,
             "Q is the cluster's summed ToT (codes). The walk curve is the median e-ToF time in quantile bins "
             "of ln Q; corrected times are t − [f(ln Q) − f(reference)], so they stay on the scale of a "
             "reference-charge cluster and the curve transfers between runs. The position term (an x / y "
-            "gradient plus a per-cell map) can remove physics: use it only where position and flight time "
-            "aren't linked by the momenta (high field). σ is checked on a random half of the shots held out "
+            "gradient, a per-cell map, and a per-cell map in each of the position ln Q bins, so the walk "
+            "curve can vary across the detector; 0 bins = no such stage) can remove physics: use it only "
+            "where position and flight time aren't linked by the momenta (high field). σ is checked on a random half of the shots held out "
             "of a separate fit; the saved correction uses all of them.",
             pady=(4, 4),
         )
@@ -229,6 +234,9 @@ class EtofWalkCalibrationInterface(ttk.Frame):
             n_bins = read_number(self.n_bins_var, "ln Q bins", integer=True, positive=True)
             ref_lnq = read_number(self.ref_lnq_var, "Reference ln Q")
             cell_px = read_number(self.cell_px_var, "Position cell", integer=True, positive=True)
+            position_lnq_bins = read_number(self.position_lnq_bins_var, "Position ln Q bins", integer=True)
+            if position_lnq_bins < 0:
+                raise ValueError("Position ln Q bins must be 0 or more.")
             seed = read_number(self.seed_var, "Random seed", integer=True)
         except ValueError as exc:
             self.status_var.set(f"Invalid setting: {exc}")
@@ -240,7 +248,7 @@ class EtofWalkCalibrationInterface(ttk.Frame):
             selected = ew.select_shots(shots, selection)
             return ew.fit_and_validate(
                 selected, n_bins=n_bins, ref_lnq=ref_lnq, use_position=use_position, cell_px=cell_px,
-                seed=seed, selection=selection, source=shots.path,
+                seed=seed, selection=selection, source=shots.path, position_lnq_bins=position_lnq_bins,
             )
 
         self.status_var.set("Fitting...")

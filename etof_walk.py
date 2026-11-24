@@ -6,16 +6,21 @@ The same electron also makes a Timepix cluster whose summed ToT ("charge",
 Q) tracks the MCP pulse amplitude, so each electron's walk delay is
 predicted from its own cluster and subtracted:
 
-    t_corr = t_etof - ([f(ln Q) - f(ref_lnq)] + pos(x, y))
+    t_corr = t_etof - ([f(ln Q) - f(ref_lnq)] + pos(x, y, ln Q))
 
 f is the median e-ToF time in quantile bins of ln Q, interpolated (flat
 beyond the fitted range); subtracting f(ref_lnq) keeps the corrected times
 on the scale of a ref_lnq cluster, so a correction trained on one run
-transfers to another as a shape. pos (optional) is a linear x / y gradient
-plus a per-cell map of what is left, both fitted on the walk-corrected
-residuals; it removes a detector-wide timing gradient but can also remove
-physics wherever position and flight time are linked by the momenta (low
-field), so it is off unless asked for.
+transfers to another as a shape. pos (optional) is fitted on the
+walk-corrected residuals in three nested stages, each on what the previous
+left: a linear x / y gradient, the median per cell_px x cell_px cell, and
+the median per (cell, ln Q quantile bin) -- the last lets the walk curve
+itself change across the detector (near the image centre the cluster charge
+under-reports the MCP pulse, so a global f(ln Q) over-corrects there). With
+4 px cells and 8 ln Q bins this matches a gradient-boosted (ln Q, x, y)
+model to ~2 ps on the 2026-11 data. It removes detector timing structure
+but can also remove physics wherever position and flight time are linked by
+the momenta (low field), so it is off unless asked for.
 
 Fitting uses single-electron shots only (select_shots): exactly one e-ToF
 hit in the pulse, inside the e-ToF window, and exactly one cluster, with at
@@ -49,7 +54,9 @@ LATEST_PATH_KEY = f"calibration.latest_{KIND}_path"
 DEFAULT_REF_LNQ = 7.2
 DEFAULT_N_BINS = 60
 DEFAULT_MIN_HITS = 8
-DEFAULT_CELL_PX = 16
+DEFAULT_CELL_PX = 4
+# ln Q quantile bins of the position term's (cell, ln Q) stage; 0 = no such stage.
+DEFAULT_POSITION_LNQ_BINS = 8
 DEFAULT_MIN_CELL_COUNT = 20
 MAD_TO_SIGMA = 1.4826
 
@@ -210,11 +217,14 @@ def fit_walk(lnq, t, n_bins=DEFAULT_N_BINS):
     return np.asarray(nodes_q)[order], np.asarray(nodes_t)[order]
 
 
-def fit_position(x, y, resid, cell_px=DEFAULT_CELL_PX, min_count=DEFAULT_MIN_CELL_COUNT, size=None):
+def fit_position(x, y, resid, cell_px=DEFAULT_CELL_PX, min_count=DEFAULT_MIN_CELL_COUNT, size=None,
+                 lnq=None, n_lnq_bins=DEFAULT_POSITION_LNQ_BINS):
     """The position term for walk-corrected residuals: a linear gradient
     about the median centroid (least squares after a 4-sigma MAD clip), then
-    the median of what is left in each cell_px x cell_px cell (cells with
-    fewer than min_count shots get 0). Returns its dict (see PositionTerm)."""
+    the median of what is left in each cell_px x cell_px cell, then (given
+    lnq and n_lnq_bins > 0) the median of what is left in each (cell, ln Q
+    quantile bin). Cells / bins with fewer than min_count shots get 0, i.e.
+    fall back to the stage before. Returns its dict (see _position_delay)."""
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     r = np.asarray(resid, dtype=np.float64)
@@ -243,13 +253,32 @@ def fit_position(x, y, resid, cell_px=DEFAULT_CELL_PX, min_count=DEFAULT_MIN_CEL
     for start, end in zip(starts, ends):
         if end - start >= min_count:
             cell_map[cells_sorted[start]] = float(np.median(left_sorted[start:end]))
-    return {
+    position = {
         "x0": x0, "y0": y0, "bx": float(bx), "by": float(by), "cell_px": cell_px, "n_cells": n_cells,
         "map": cell_map.reshape(n_cells, n_cells).tolist(),
     }
+    if lnq is not None and int(n_lnq_bins) > 0:
+        lnq = np.asarray(lnq, dtype=np.float64)
+        left = left - cell_map[cell]
+        edges = np.quantile(lnq[keep], np.linspace(0.0, 1.0, int(n_lnq_bins) + 1))[1:-1]
+        key = cell * (edges.size + 1) + np.searchsorted(edges, lnq)
+        order = np.argsort(key[keep], kind="stable")
+        keys_sorted = key[keep][order]
+        left_sorted = left[keep][order]
+        starts = np.flatnonzero(np.r_[True, np.diff(keys_sorted) != 0])
+        ends = np.r_[starts[1:], keys_sorted.size]
+        entries = []  # sparse: [key, median], key = cell * n_bins + ln Q bin
+        for start, end in zip(starts, ends):
+            if end - start >= min_count:
+                entries.append([int(keys_sorted[start]), float(np.median(left_sorted[start:end]))])
+        position["lnq_edges"] = edges.tolist()
+        position["lnq_map"] = entries
+    return position
 
 
-def _position_delay(position, x, y):
+def _position_delay(position, x, y, lnq=None):
+    """The position term's delay (ns). Its (cell, ln Q) stage, if the term
+    has one, needs lnq; without it only the gradient and cell map apply."""
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     out = position["bx"] * (x - position["x0"]) + position["by"] * (y - position["y0"])
@@ -261,7 +290,18 @@ def _position_delay(position, x, y):
         iy = np.floor(y / cell_px)
     inside = np.isfinite(ix) & np.isfinite(iy) & (ix >= 0) & (ix < n) & (iy >= 0) & (iy < n)
     out = np.where(np.isfinite(out), out, 0.0)
-    out[inside] += cell_map[ix[inside].astype(np.int64), iy[inside].astype(np.int64)]
+    ix_in = ix[inside].astype(np.int64)
+    iy_in = iy[inside].astype(np.int64)
+    out[inside] += cell_map[ix_in, iy_in]
+    entries = position.get("lnq_map")
+    if entries and lnq is not None:
+        edges = np.asarray(position["lnq_edges"], dtype=np.float64)
+        n_q = edges.size + 1
+        table = np.zeros(n * n * n_q)
+        keys, values = zip(*entries)
+        table[np.asarray(keys, dtype=np.int64)] = values
+        q = np.asarray(lnq, dtype=np.float64)[inside]
+        out[inside] += table[(ix_in * n + iy_in) * n_q + np.searchsorted(edges, q)]
     return out
 
 
@@ -292,9 +332,10 @@ class EtofWalkCorrection:
         ok = np.isfinite(tot) & (tot > 0)
         if not ok.any():
             return out
-        out[ok] = self.walk(np.log(tot[ok])) - float(self.walk(self.ref_lnq))
+        lnq = np.log(tot[ok])
+        out[ok] = self.walk(lnq) - float(self.walk(self.ref_lnq))
         if self.position is not None and x is not None and y is not None:
-            out[ok] += _position_delay(self.position, np.asarray(x)[ok], np.asarray(y)[ok])
+            out[ok] += _position_delay(self.position, np.asarray(x)[ok], np.asarray(y)[ok], lnq)
         return out
 
     def apply(self, t_etof, tot_sum, x=None, y=None):
@@ -357,18 +398,22 @@ class FitReport:
     sigma_ns: dict
 
 
-def _build(shots, rows, n_bins, ref_lnq, use_position, cell_px, min_count):
+def _build(shots, rows, n_bins, ref_lnq, use_position, cell_px, min_count,
+           position_lnq_bins=DEFAULT_POSITION_LNQ_BINS):
     lnq_nodes, t_nodes = fit_walk(shots.lnq[rows], shots.t_etof[rows], n_bins)
     correction = EtofWalkCorrection(lnq_nodes=lnq_nodes.tolist(), t_nodes=t_nodes.tolist(), ref_lnq=float(ref_lnq))
     if use_position:
         resid = shots.t_etof[rows] - correction.walk(shots.lnq[rows])
-        correction.position = fit_position(shots.x[rows], shots.y[rows], resid, cell_px, min_count)
+        correction.position = fit_position(
+            shots.x[rows], shots.y[rows], resid, cell_px, min_count,
+            lnq=shots.lnq[rows], n_lnq_bins=position_lnq_bins,
+        )
     return correction
 
 
 def fit_and_validate(shots, n_bins=DEFAULT_N_BINS, ref_lnq=DEFAULT_REF_LNQ, use_position=False,
                      cell_px=DEFAULT_CELL_PX, min_count=DEFAULT_MIN_CELL_COUNT, seed=0,
-                     selection=None, source=""):
+                     selection=None, source="", position_lnq_bins=DEFAULT_POSITION_LNQ_BINS):
     """(EtofWalkCorrection, FitReport). A check fit on a random half of the
     shots is scored on the other half (MAD sigma of the e-ToF time raw,
     walk-corrected, and walk + position corrected); the returned correction
@@ -381,7 +426,7 @@ def fit_and_validate(shots, n_bins=DEFAULT_N_BINS, ref_lnq=DEFAULT_REF_LNQ, use_
     train = np.flatnonzero(~held_out)
     test = np.flatnonzero(held_out)
 
-    check = _build(shots, train, n_bins, ref_lnq, False, cell_px, min_count)
+    check = _build(shots, train, n_bins, ref_lnq, False, cell_px, min_count, position_lnq_bins)
     t_test = shots.t_etof[test]
     walk_test = t_test - check.walk(shots.lnq[test])
     sigma = {"raw": mad_sigma(t_test), "walk": mad_sigma(walk_test)}
@@ -389,10 +434,13 @@ def fit_and_validate(shots, n_bins=DEFAULT_N_BINS, ref_lnq=DEFAULT_REF_LNQ, use_
         check.position = fit_position(
             shots.x[train], shots.y[train],
             shots.t_etof[train] - check.walk(shots.lnq[train]), cell_px, min_count,
+            lnq=shots.lnq[train], n_lnq_bins=position_lnq_bins,
         )
-        sigma["position"] = mad_sigma(walk_test - _position_delay(check.position, shots.x[test], shots.y[test]))
+        sigma["position"] = mad_sigma(
+            walk_test - _position_delay(check.position, shots.x[test], shots.y[test], shots.lnq[test])
+        )
 
-    correction = _build(shots, np.arange(n), n_bins, ref_lnq, use_position, cell_px, min_count)
+    correction = _build(shots, np.arange(n), n_bins, ref_lnq, use_position, cell_px, min_count, position_lnq_bins)
     correction.n_shots = n
     correction.held_out_sigma_ns = sigma
     correction.selection = selection.to_dict() if selection is not None else {}

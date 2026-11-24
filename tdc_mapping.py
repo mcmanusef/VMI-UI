@@ -26,7 +26,8 @@ can't pass for a short i-ToF pulse sharing its line.
 Each signal can also be dithered: a uniform random offset in
 [0, dither_ns) added to every time it yields, to smear out the TDC's
 quantization (the FPGA TDC's step is ~0.260 ns, the PicoTDC's ~3 ps). On
-by default for e-ToF and i-ToF, off for the pulse trigger.
+by default for e-ToF and i-ToF, off for the pulse trigger; on a PicoTDC
+line the width is capped at one PicoTDC step.
 
 The mapping also holds the pixel clock offset: the Timepix pixel clock runs
 ahead of the TDC, so a pixel hit is time-stamped ~180 ns before the e-ToF
@@ -112,8 +113,15 @@ class SignalMapping:
 
     @property
     def effective_dither_ns(self):
-        """The dither width actually applied (0 when dithering is off)."""
-        return self.dither_ns if self.dither and self.dither_ns > 0 else 0.0
+        """The dither width actually applied (0 when dithering is off).
+        A PicoTDC line is dithered by at most its own step (~3 ps): the
+        default width is one FPGA TDC step (0.26 ns), which on a PicoTDC
+        line adds ~75 ps rms of noise and removes no quantization."""
+        if not (self.dither and self.dither_ns > 0):
+            return 0.0
+        if self.source.family == FAMILY_PICOTDC:
+            return min(self.dither_ns, PICOTDC_NS_PER_COUNT)
+        return self.dither_ns
 
     def to_dict(self):
         return {
