@@ -16,24 +16,44 @@ creation, and saves on every change):
 
     var = app_settings.persistent_var(parent, tk.StringVar, "frame_time", "1")
 """
+import datetime
 import json
 import pathlib
 
 import platform_paths
 
 SETTINGS_PATH = pathlib.Path(__file__).with_name("app_settings.json")
+# Bumping this resets everyone's saved settings to the defaults on their
+# next start: a file saved under another version is backed up beside it
+# (app_settings.backup-<time>.json) and the app starts from empty.
+SETTINGS_VERSION = 2
+VERSION_KEY = "_settings_version"
 
 _cache = None
 
 
+def _backup_path():
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    return SETTINGS_PATH.with_name(f"app_settings.backup-{stamp}.json")
+
+
 def _load_from_disk():
     if not SETTINGS_PATH.exists():
-        return {}
+        return {VERSION_KEY: SETTINGS_VERSION}
     try:
         data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
-        return {}
+        return {VERSION_KEY: SETTINGS_VERSION}
+    if not isinstance(data, dict):
+        return {VERSION_KEY: SETTINGS_VERSION}
+    if data.get(VERSION_KEY) != SETTINGS_VERSION:
+        # Saved by an older version: keep a copy, then start from defaults.
+        try:
+            SETTINGS_PATH.replace(_backup_path())
+        except OSError:
+            pass
+        return {VERSION_KEY: SETTINGS_VERSION}
+    return data
 
 
 def _cache_ref():

@@ -14,6 +14,7 @@ venv/
 # default when missing -- so it's machine-specific, not shared config.
 # (serval_config.json stays tracked: those are real shared defaults.)
 app_settings.json
+app_settings.backup-*.json
 
 # Large binary data / manuals (not source)
 *.cv4

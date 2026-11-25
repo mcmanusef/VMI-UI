@@ -20,7 +20,7 @@ from calibration_interface import (
     BLUE, GREEN, GREY, KIND_MOMENTUM, KIND_MQ, BackgroundTask, CalibrationHub, PlotGrid, browse_cv4,
     read_number, relax_titles, set_visible, show_placeholder,
 )
-from plot_panel import ROTATION_DEFAULTS, build_rotation_row, read_rotation
+from plot_panel import DEFAULT_HIST_SETTINGS, ROTATION_DEFAULTS, build_rotation_row, read_rotation
 from qt_plots import ZoomFocusViewBox, rainforest_colormap
 
 EMPTY_TEXT = "No data — press Load"
@@ -42,6 +42,13 @@ CURVE_QUANTITIES = (co.QUANTITY_COUNTS, co.QUANTITY_DENSITY)
 SPLIT_NONE = "None"
 # More distinct values than this and the split uses ranges instead.
 MAX_SPLIT_VALUES = 12
+# Uncalibrated columns and the live tabs' histogram (shared_state hist_vars)
+# whose min / max they start from, so the gate plots show what the live
+# plots show.
+RAW_HIST_KEYS = {
+    "x": "cluster", "y": "cluster", "t": "cluster_t",
+    "t_etof": "etof", "t_etof_raw": "etof", "t_tof": "itof",
+}
 
 
 def colorize(values, levels, log):
@@ -89,6 +96,9 @@ class CoincidenceInterface(ttk.Frame):
             for field, value in ROTATION_DEFAULTS.items()
         }
         self._rotation_after = None
+        # The live tabs' histogram bins / min / max (shared_state), whose
+        # ranges uncalibrated data starts from.
+        self._hist_vars = (plot_shared_vars or {}).get("hist_vars") or {}
 
         def pvar(cls, key, default):
             return app_settings.persistent_var(self, cls, f"coincidence.{key}", default)
@@ -115,6 +125,9 @@ class CoincidenceInterface(ttk.Frame):
         self.quantity_var = pvar(tk.StringVar, "quantity", co.QUANTITY_DENSITY)
         self.split_var = pvar(tk.StringVar, "split_by", SPLIT_NONE)
         self.split_bins_var = pvar(tk.StringVar, "split_bins", "4")
+        # Zooming a gate plot rebins it over the zoomed range, so it can be
+        # zoomed past its bin width.
+        self.rebin_zoom_var = pvar(tk.BooleanVar, "rebin_on_zoom", True)
         # Which columns get a plot of their own, and which can be a main-plot
         # axis; kept separately for calibrated and uncalibrated data, which
         # have different columns.
@@ -148,6 +161,8 @@ class CoincidenceInterface(ttk.Frame):
         self._binning = {}        # key -> (low, high, bin index, inside) for the gate plots
         self._main_binning = {}   # (key, low, high, bins) -> (bin index, inside)
         self._mask_cache = {}     # key -> (range, boolean mask) for an applied gate
+        self._zoom = {}           # key -> (low, high) a gate plot is zoomed to and rebinned over
+        self._zoom_after = {}     # key -> pending rebin after a zoom
         self._small_drawn = set()
         self._redraw_after = None
         self._pending = "all"
@@ -161,6 +176,12 @@ class CoincidenceInterface(ttk.Frame):
                     self.split_var, self.split_bins_var):
             var.trace_add("write", self._schedule_main_redraw)
         self.gate_bins_var.trace_add("write", self._on_gate_bins_changed)
+        self.rebin_zoom_var.trace_add("write", self._on_rebin_zoom_changed)
+        for name in set(RAW_HIST_KEYS.values()):
+            for field in ("min", "max"):
+                var = self._hist_vars.get(name, {}).get(field)
+                if var is not None:
+                    var.trace_add("write", self._on_hist_range_changed)
         self._refresh_pairing()
         for var in self._rotation_vars.values():
             var.trace_add("write", self._on_rotation_changed)
@@ -298,6 +319,19 @@ class CoincidenceInterface(ttk.Frame):
         ], start_row=2)
         ui_style.add_form_row(
             gates, row, "Gate plot bins:", ttk.Entry(gates, textvariable=self.gate_bins_var, width=18),
+        )
+        row += 1
+        ttk.Checkbutton(gates, text="Rebin gate plots when zoomed", variable=self.rebin_zoom_var).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
+        row += 1
+        ui_style.add_note(
+            gates, row,
+            "Drag a rectangle on a gate plot, or use the mouse wheel, to zoom in; with rebinning on, the "
+            "plot is binned again over the zoomed range, so zooming goes past the bin width. Right-click "
+            "goes back to the full range. Uncalibrated x, y, t, e-ToF and ion ToF start from the live "
+            "tabs' histogram ranges.",
+            pady=(0, 4),
         )
         row += 1
         ui_style.add_note(
@@ -516,7 +550,8 @@ class CoincidenceInterface(ttk.Frame):
         keys = self._selected(self._show_plot) if self._dataset is not None else []
         for index, key in enumerate(keys):
             row, column = divmod(index, PLOTS_PER_ROW)
-            plot = self._grid.add(row, column)
+            plot = self._grid.add(row, column, on_reset=lambda key=key: self._reset_zoom(key))
+            plot.getViewBox().sigRangeChangedManually.connect(lambda *_, key=key: self._on_small_zoomed(key))
             label = self._dataset.label(key)
             plot.setTitle(label)
             plot.setLabel("bottom", label)
@@ -612,7 +647,7 @@ class CoincidenceInterface(ttk.Frame):
             return
         rotation = read_rotation(self._rotation_vars)
         dataset.set_rotation(rotation["angle"], rotation["cx"], rotation["cy"])
-        for cache in (self._mask_cache, self._data_ranges, self._distinct, self._binning):
+        for cache in (self._mask_cache, self._data_ranges, self._distinct, self._binning, self._zoom):
             cache.pop("x", None)
             cache.pop("y", None)
         self._main_binning = {}
@@ -629,6 +664,7 @@ class CoincidenceInterface(ttk.Frame):
         self._distinct = {}
         self._binning = {}
         self._main_binning = {}
+        self._zoom = {}
         self._build_column_table()
         self._refresh_axis_choices()
         self._build_small_plots()
@@ -662,8 +698,13 @@ class CoincidenceInterface(ttk.Frame):
         self._sync_range_text(key)
 
     def _ensure_range(self, key):
-        """A column's range, starting at the middle half of its own data."""
+        """A column's range, starting at the middle half of its own data, or
+        for uncalibrated data at the live tabs' histogram range."""
         if key not in self._ranges:
+            histogram = self._histogram_range(key)
+            if histogram is not None:
+                self._ranges[key] = histogram
+                return histogram
             values = self._dataset.arrays[key]
             values = values[np.isfinite(values)]
             if values.size:
@@ -787,8 +828,8 @@ class CoincidenceInterface(ttk.Frame):
         self._main_plot.setAspectLocked(is_2d and self.aspect_var.get())
         self._main_plot.autoRange()
         if what == "all":
-            for plot in self._small.values():
-                plot.autoRange()
+            for key, plot in self._small.items():
+                self._fit_small_view(key)
                 ui_style.show_empty_placeholder(plot, self._placeholders[plot], plot not in self._small_drawn)
         show_placeholder(self._main_plot, EMPTY_TEXT, self._main_plot not in drawn_main)
 
@@ -856,22 +897,51 @@ class CoincidenceInterface(ttk.Frame):
             for i in range(count)
         ]
 
+    def _histogram_range(self, key):
+        """For uncalibrated data, the (min, max) of the live tabs' histogram
+        that shows this column (RAW_HIST_KEYS); None otherwise, or when that
+        range isn't a usable one."""
+        name = RAW_HIST_KEYS.get(key)
+        if name is None or self._dataset is None or self._dataset.calibrated:
+            return None
+        defaults = DEFAULT_HIST_SETTINGS.get(name, {})
+        fields = self._hist_vars.get(name, {})
+        try:
+            low, high = (
+                float(fields[field].get()) if field in fields else float(defaults[field])
+                for field in ("min", "max")
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        return (low, high) if np.isfinite(low) and np.isfinite(high) and high > low else None
+
+    def _on_hist_range_changed(self, *_):
+        """A live tab's histogram range changed: the uncalibrated gate plots
+        it sets are drawn over the new range (ranges already set stay)."""
+        if self._dataset is None or self._dataset.calibrated:
+            return
+        for key in RAW_HIST_KEYS:
+            self._data_ranges.pop(key, None)
+        self._schedule_redraw()
+
     def _data_range(self, key):
-        """A column's plotting range. Worth keeping: it is a percentile over
-        the whole column, and every redraw asks for it."""
+        """A column's plotting range: for uncalibrated data the live tabs'
+        histogram range where there is one, else the data's own. Worth
+        keeping: it is a percentile over the whole column, and every redraw
+        asks for it."""
         cached = self._data_ranges.get(key)
         if cached is None:
-            cached = co.default_range(self._dataset.arrays[key])
+            cached = self._histogram_range(key) or co.default_range(self._dataset.arrays[key])
             self._data_ranges[key] = cached
         return cached
 
     def _binning_for(self, key, bins):
-        """The gate plot's bins for one column, computed once per dataset."""
+        """The gate plot's bins for one column: over its zoomed range when it
+        has one, else its plotting range. Kept until that range changes."""
+        low, high = self._zoom.get(key) or self._data_range(key)
         cached = self._binning.get(key)
-        if cached is None:
-            values = self._dataset.arrays[key]
-            low, high = self._data_range(key)
-            index, inside = co.bin_index(values, low, high, bins)
+        if cached is None or cached[:2] != (low, high):
+            index, inside = co.bin_index(self._dataset.arrays[key], low, high, bins)
             cached = (low, high, index, inside)
             self._binning[key] = cached
         return cached
@@ -880,24 +950,90 @@ class CoincidenceInterface(ttk.Frame):
         self._binning = {}
         self._schedule_redraw()
 
+    # ---- zooming the gate plots ---------------------------------------------------
+
+    def _on_small_zoomed(self, key):
+        """A rectangle or wheel zoom on a gate plot: rebin it over the new
+        range once the zooming stops."""
+        if not self.rebin_zoom_var.get():
+            return
+        pending = self._zoom_after.pop(key, None)
+        if pending is not None:
+            self.after_cancel(pending)
+        self._zoom_after[key] = self.after(REDRAW_DELAY_MS, lambda: self._apply_zoom(key))
+
+    def _apply_zoom(self, key):
+        self._zoom_after.pop(key, None)
+        plot = self._small.get(key)
+        if plot is None or self._dataset is None:
+            return
+        low, high = (float(v) for v in plot.getViewBox().viewRange()[0])
+        if not high > low:
+            return
+        self._zoom[key] = (low, high)
+        self._redraw_small_plot(key)
+
+    def _reset_zoom(self, key):
+        """Right-click: back to the column's full plotting range."""
+        pending = self._zoom_after.pop(key, None)
+        if pending is not None:
+            self.after_cancel(pending)
+        if self._zoom.pop(key, None) is not None and self._dataset is not None:
+            self._redraw_small_plot(key)
+        elif key in self._small:
+            self._small[key].autoRange()
+
+    def _on_rebin_zoom_changed(self, *_):
+        self._zoom = {}
+        self._schedule_redraw()
+
+    def _redraw_small_plot(self, key):
+        """Just one gate plot, as after zooming it."""
+        plot = self._small[key]
+        try:
+            bins = read_number(self.gate_bins_var, "Gate plot bins", integer=True, positive=True)
+            self._draw_small_plot(key, bins)
+        except ValueError as exc:
+            self.status_var.set(f"Invalid setting: {exc}")
+            return
+        self._small_drawn.add(plot)
+        self._fit_small_view(key)
+        ui_style.show_empty_placeholder(plot, self._placeholders[plot], False)
+
+    def _fit_small_view(self, key):
+        """A zoomed plot keeps its x range, with y fitted to what is in it;
+        any other fits all its data."""
+        plot = self._small[key]
+        zoom = self._zoom.get(key)
+        if zoom is None:
+            plot.autoRange()
+            return
+        _, counts = self._curves[key].getData()
+        top = float(np.nanmax(counts)) if counts is not None and len(counts) else 0.0
+        plot.setXRange(*zoom, padding=0)
+        plot.setYRange(0.0, top * 1.05 if top > 0 else 1.0, padding=0)
+
     # ---- drawing the plots --------------------------------------------------------
 
     def _draw_small(self):
         """Counts per gate plot, gated by every gate except the plot's own."""
         drawn = set()
-        arrays = self._dataset.arrays
-        forward = arrays.get(co.FORWARD_KEY)
         bins = read_number(self.gate_bins_var, "Gate plot bins", integer=True, positive=True)
         for key, plot in self._small.items():
-            low, high, index, inside = self._binning_for(key, bins)
-            mask = self._combined_mask(skip=key)
-            selected = inside if mask is None else (inside & mask)
-            centers, counts = co.histogram_1d(
-                arrays[key], forward, bins, low, high, co.QUANTITY_COUNTS, binning=(index, selected),
-            )
-            self._curves[key].setData(centers, counts)
+            self._draw_small_plot(key, bins)
             drawn.add(plot)
         return drawn
+
+    def _draw_small_plot(self, key, bins):
+        arrays = self._dataset.arrays
+        low, high, index, inside = self._binning_for(key, bins)
+        mask = self._combined_mask(skip=key)
+        selected = inside if mask is None else (inside & mask)
+        centers, counts = co.histogram_1d(
+            arrays[key], arrays.get(co.FORWARD_KEY), bins, low, high, co.QUANTITY_COUNTS,
+            binning=(index, selected),
+        )
+        self._curves[key].setData(centers, counts)
 
     def _draw_main(self, is_2d):
         drawn = set()

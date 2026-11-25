@@ -177,10 +177,11 @@ class PlotGrid:
         self._focused = None
         self._on_focus_changed = on_focus_changed
 
-    def add(self, row, col, rowspan=1, colspan=1):
+    def add(self, row, col, rowspan=1, colspan=1, on_reset=None):
+        """`on_reset` replaces the right-click autoRange, as ZoomFocusViewBox's."""
         plot = self.widget.addPlot(
             row=row, col=col, rowspan=rowspan, colspan=colspan,
-            viewBox=ZoomFocusViewBox(on_focus=lambda: self.toggle_focus(plot)),
+            viewBox=ZoomFocusViewBox(on_focus=lambda: self.toggle_focus(plot), on_reset=on_reset),
         )
         self._cells.append((plot, row, col, rowspan, colspan))
         return plot
