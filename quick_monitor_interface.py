@@ -480,24 +480,27 @@ class QuickMonitorInterface(ttk.Frame):
     # ---- dashboard polling (cheap, non-blocking) ---------------------------
 
     def _poll_dashboard(self):
-        try:
-            resp = serval_client.SESSION.get(f"{self._server_url()}/dashboard", timeout=1)
-            data = json.loads(resp.text)
-            measurement = data.get("Measurement", {})
-            self.dash_status_var.set(str(measurement.get("Status", "--")))
-            self.dash_frames_var.set(str(measurement.get("FrameCount", "--")))
-            elapsed = measurement.get("ElapsedTime")
-            self.dash_elapsed_var.set(f"{elapsed:.1f}s" if isinstance(elapsed, (int, float)) else "--")
-            rate = measurement.get("PixelEventRate")
-            self.dash_rate_var.set(f"{rate:,}/s" if isinstance(rate, (int, float)) else "--")
-        except Exception:
-            pass
-        # Runs unconditionally for the app's entire lifetime regardless of
-        # which tab is active. Now goes through serval_client.SESSION (a
-        # shared, reused requests.Session -- see serval_client.py) rather
-        # than a bare requests.get(), which used to open/tear down a fresh
-        # TCP connection every call.
-        self.after(2000, self._poll_dashboard)
+        # Runs for the app's entire lifetime regardless of which tab is
+        # active. The request itself happens on DashboardPoller's thread
+        # (see serval_client.py), so an unreachable Serval can't stall the
+        # window; this timer only shows whatever it last fetched.
+        poller = getattr(self, "_dashboard_poller", None)
+        if poller is None:
+            poller = self._dashboard_poller = serval_client.DashboardPoller()
+        poller.set_server(self._server_url())
+        data, _error = poller.latest
+        if data is not None:
+            try:
+                measurement = data.get("Measurement", {})
+                self.dash_status_var.set(str(measurement.get("Status", "--")))
+                self.dash_frames_var.set(str(measurement.get("FrameCount", "--")))
+                elapsed = measurement.get("ElapsedTime")
+                self.dash_elapsed_var.set(f"{elapsed:.1f}s" if isinstance(elapsed, (int, float)) else "--")
+                rate = measurement.get("PixelEventRate")
+                self.dash_rate_var.set(f"{rate:,}/s" if isinstance(rate, (int, float)) else "--")
+            except Exception:
+                pass
+        self.after(500, self._poll_dashboard)
 
     # ---- main-thread queue handling / drawing -----------------------------
 

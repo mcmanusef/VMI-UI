@@ -31,6 +31,9 @@ class ServalInterface(ttk.Frame):
         self.status_var = tk.StringVar(self, value="Idle")
 
         self._build_ui()
+        self._dashboard_poller = None
+        self._dashboard_shown = None
+        self._dashboard_text = None
         self._schedule_dashboard_refresh()
 
     def _build_ui(self):
@@ -130,24 +133,35 @@ class ServalInterface(ttk.Frame):
         self._log(text)
 
     def _schedule_dashboard_refresh(self):
+        # Runs for the app's entire lifetime regardless of which tab is
+        # active. The request itself happens on DashboardPoller's thread
+        # (see serval_client.py); this timer only hands it the current URL
+        # and shows whatever it last fetched, so an unreachable Serval
+        # can't stall the window.
+        if self._dashboard_poller is None:
+            self._dashboard_poller = serval_client.DashboardPoller()
+        try:
+            self._dashboard_poller.set_server(self._server_url())
+        except ValueError:
+            self._dashboard_poller.set_server(None)
         self._refresh_dashboard()
-        # Runs unconditionally for the app's entire lifetime regardless of
-        # which tab is active. Now goes through serval_client.SESSION (a
-        # shared, reused requests.Session) rather than a bare requests.get()
-        # that opened/tore down a fresh TCP connection every call -- kept at
-        # 2000ms since a live JSON dashboard dump doesn't need sub-second
-        # refresh anyway, though this alone turned out not to explain the
-        # destination-config timeouts (see serval_client.py's SESSION
-        # comment for the current leading theory: proxy env vars).
-        self.after(2000, self._schedule_dashboard_refresh)
+        self.after(500, self._schedule_dashboard_refresh)
 
     def _refresh_dashboard(self):
-        try:
-            resp = serval_client.SESSION.get(f"{self._server_url()}/dashboard", timeout=1)
-            data = json.loads(resp.text)
+        latest = self._dashboard_poller.latest
+        if latest is self._dashboard_shown:
+            return
+        self._dashboard_shown = latest
+        data, error = latest
+        if error is not None:
+            display = f"Dashboard unavailable: {error}"
+        else:
             display = json.dumps(data, indent=2, sort_keys=True)
-        except Exception as exc:
-            display = f"Dashboard unavailable: {exc}"
+        # Only rewrite the text when it changed: replacing it resets the
+        # scroll position and any selection.
+        if display == self._dashboard_text:
+            return
+        self._dashboard_text = display
 
         self.dashboard.configure(state="normal")
         self.dashboard.delete("1.0", "end")

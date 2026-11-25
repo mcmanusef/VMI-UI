@@ -6,6 +6,7 @@ frames (configure_continuous_destination, restart_continuous_batch).
 import json
 import math
 import pathlib
+import threading
 import time
 
 import requests
@@ -31,6 +32,41 @@ import platform_paths
 # SESSION rather than calling the bare `requests` module directly.
 SESSION = requests.Session()
 SESSION.trust_env = False
+
+class DashboardPoller:
+    """Fetches /dashboard on a background thread so the GUI thread never
+    waits on Serval: with Serval down or unreachable, each request blocks
+    for its full connect timeout (twice over for "localhost", which tries
+    IPv6 then IPv4), which froze the whole window for ~2 s out of every 4
+    when this ran from a UI timer.
+
+    The GUI side calls set_server() with the current URL and reads
+    `latest` -- (data, error), one of which is None -- from its own timer;
+    both are plain attribute swaps, safe across threads.
+    """
+
+    def __init__(self, interval=2.0, timeout=1.0):
+        self.latest = (None, None)
+        self._server = None
+        self._interval = interval
+        self._timeout = timeout
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def set_server(self, server):
+        self._server = server
+
+    def _run(self):
+        while True:
+            server = self._server
+            if server:
+                try:
+                    resp = SESSION.get(f"{server}/dashboard", timeout=self._timeout)
+                    self.latest = (json.loads(resp.text), None)
+                except Exception as exc:
+                    self.latest = (None, exc)
+            time.sleep(self._interval)
+
 
 # NOT "comfortably under MaxPulseCount" (2147483647) -- that was the
 # original idea (an effectively-unbounded placeholder for "run until we
