@@ -111,7 +111,6 @@ class CoincidenceInterface(ttk.Frame):
         # Which pulse each species is taken from: set on the Hardware tab's
         # TDC mapping page (tdc_mapping.get_pulse_offsets), shown here.
         self._pairing_var = tk.StringVar(self, value="")
-        self._source_note_var = tk.StringVar(self, value="")
         self.mode_var = pvar(tk.StringVar, "mode", MODE_2D)
         self.x_var = pvar(tk.StringVar, "x", "px")
         self.y_var = pvar(tk.StringVar, "y", "pz")
@@ -225,28 +224,32 @@ class CoincidenceInterface(ttk.Frame):
             self, self._hub, data, 4, self.status_var.set, self._task.is_running,
             walk_setting_key="coincidence.apply_etof_walk",
         )
-        ui_style.add_note(data, 5, textvariable=self._source_note_var, pady=(4, 4))
+        self._source_note = ui_style.add_note(data, 5, pady=(4, 4))
         ui_style.add_note(
             data, 6,
-            "Each electron is joined to the ions of its own pulse, so m/q is per coincidence; electrons "
-            "with no ion have no m/q. p_r is the full momentum magnitude |p|.",
+            "m/q is per coincidence; p_r is |p|.",
+            tip="Each electron is joined to the ions of its own pulse, so m/q is per coincidence; "
+                "electrons with no ion have no m/q. p_r is the full momentum magnitude |p|.",
             pady=(0, 4),
         )
-        build_rotation_row(data, self._rotation_vars, "cluster").grid(
+        build_rotation_row(data, self._rotation_vars, "cluster", compact=True).grid(
             row=9, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
         ui_style.add_note(
             data, 10,
-            "Turns the x and y columns of uncalibrated data (cv4 without a momentum calibration); "
-            "the same rotation as the live tabs' cluster maps.",
+            "For uncalibrated x and y only.",
+            tip="Turns the x and y columns of uncalibrated data (cv4 without a momentum calibration) "
+                "counter-clockwise. The same rotation as the live tabs' cluster maps, shared with "
+                "every tab.",
             pady=(0, 4),
         )
         ui_style.add_form_row(data, 7, "Pulse pairing:", ttk.Label(data, textvariable=self._pairing_var))
         ui_style.add_note(
             data, 8,
-            "Set on Hardware > TDC mapping; applies on the next Load. Pairing across pulses gives only "
-            "random coincidences (the false-coincidence background). A calibrated file's clusters and "
-            "e-ToF are already paired, so with one only i-ToF can come from a different pulse.",
+            "Set on Hardware > TDC mapping; applies on the next Load.",
+            tip="Pairing across pulses gives only random coincidences (the false-coincidence "
+                "background). A calibrated file's clusters and e-ToF are already paired, so with one "
+                "only i-ToF can come from a different pulse.",
             pady=(0, 4),
         )
 
@@ -290,25 +293,28 @@ class CoincidenceInterface(ttk.Frame):
         )
         ui_style.add_note(
             plot, 12,
-            "Probability density normalizes the counts to integrate to 1 over the plotted range. Other "
-            "quantities are drawn as points, one per bin that has data; the asymmetry is "
-            "(forward − backward) / total by the sign of p_x, the propagation axis (calibrated data "
-            "only). An axis whose gate "
-            "is applied is bounded "
-            "by that gate. Drag the color bar's handles to set the heat map's levels, which turns auto "
-            "levels off. “Split by” draws a 1D line per value of a second column, or per range of it "
-            "when it has many values, each normalized on its own. The log scales apply to counts and "
-            "density only; empty bins are left out of a log plot.",
+            "Density integrates to 1 over the plotted range.",
+            tip="Other quantities are drawn as points, one per bin that has data. The asymmetry is "
+                "(forward − backward) / total by the sign of p_x, the propagation axis (calibrated "
+                "data only).\n\n"
+                "An axis whose gate is applied is bounded by that gate.\n\n"
+                "Drag the color bar's handles to set the heat map's levels, which turns auto levels "
+                "off.\n\n"
+                "“Split by” draws a 1D line per value of a second column, or per range of it when it "
+                "has many values, each normalized on its own.\n\n"
+                "The log scales apply to counts and density only; empty bins are left out of a log "
+                "plot.",
             pady=(4, 4),
         )
 
         gates = ui_style.build_section(sidebar, 4, "Gates", pady=0)
         ui_style.add_note(
             gates, 0,
-            "Drag the shaded region on a plot, or its edges, to set that column's range; the range can "
-            "be edited whether or not the gate is on. “Plot” shows the column's own plot and “Gate” "
-            "applies its range, independently: a gate works with no plot shown, and each plot shows the "
-            "data gated by the other columns only.",
+            "Drag a plot's shaded region to set that column's range.",
+            tip="Drag the region or its edges; the range can be edited whether or not the gate is on.\n\n"
+                "“Plot” shows the column's own plot and “Gate” applies its range, independently: a "
+                "gate works with no plot shown, and each plot shows the data gated by the other "
+                "columns only.",
             pady=(4, 4),
         )
         ui_style.add_note(gates, 1, textvariable=self.gate_info_var)
@@ -327,18 +333,18 @@ class CoincidenceInterface(ttk.Frame):
         row += 1
         ui_style.add_note(
             gates, row,
-            "Drag a rectangle on a gate plot, or use the mouse wheel, to zoom in; with rebinning on, the "
-            "plot is binned again over the zoomed range, so zooming goes past the bin width. Right-click "
-            "goes back to the full range. Uncalibrated x, y, t, e-ToF and ion ToF start from the live "
-            "tabs' histogram ranges.",
+            "Drag or scroll to zoom a gate plot; right-click resets.",
+            tip="With rebinning on, the plot is binned again over the zoomed range, so zooming goes "
+                "past the bin width.\n\n"
+                "Uncalibrated x, y, t, e-ToF and ion ToF start from the live tabs' histogram ranges.",
             pady=(0, 4),
         )
         row += 1
         ui_style.add_note(
             gates, row,
-            "Columns of the dataframe: “Plot” shows one, “Gate” applies its range, “Axis” offers it to "
-            "the main plot. The low and high boxes are the range: type one and press Enter, or drag the "
-            "region on its plot.",
+            "Plot shows, Gate applies, Axis offers to the main plot.",
+            tip="One row per column of the dataframe. Low and High are the gate range: type one and "
+                "press Enter, or drag the region on the column's plot.",
             pady=(6, 2),
         )
         self._gates_body = gates
@@ -403,14 +409,16 @@ class CoincidenceInterface(ttk.Frame):
         cv4 = self._cv4_input()
         set_visible([self._h5_label, self._h5_field], not cv4)
         set_visible([self._cv4_label, self._cv4_field, self._apply_frame, self._picker.frame], cv4)
-        self._source_note_var.set(
-            "A cv4 or grouped file, read in memory without saving anything. With the momentum "
-            "calibration applied, rows are cluster/e-ToF pairs calibrated as the apply calibration tab "
-            "would (pz uses the e-ToF time). Without it, each detector cluster is a row with its raw "
-            "x, y and t, the e-ToF time of its pulse if any, and that pulse's ions."
-            if cv4 else
-            "An HDF5 file from the apply calibration tab."
-        )
+        if cv4:
+            ui_style.set_note(
+                self._source_note, "A cv4 or grouped file, read in memory.",
+                "Nothing is saved. With the momentum calibration applied, rows are cluster / "
+                "e-ToF pairs calibrated as the apply calibration tab would (pz uses the e-ToF "
+                "time). Without it, each detector cluster is a row with its raw x, y and t, the "
+                "e-ToF time of its pulse if any, and that pulse's ions.",
+            )
+        else:
+            ui_style.set_note(self._source_note, "An HDF5 file from the apply calibration tab.")
 
     def _browse(self):
         initial = self.path_var.get().strip()

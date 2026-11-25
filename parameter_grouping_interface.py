@@ -13,15 +13,20 @@ import parameter_grouping as pgr
 import ui_style
 from calibration_interface import BackgroundTask, add_label, read_number, set_visible
 
+# mode -> (note, hover tip)
 MODE_NOTES = {
-    pgr.MODE_DIRECT: "Group values are the stage positions. Collect asks for the parameter label.",
+    pgr.MODE_DIRECT: (
+        "Group values are the stage positions.",
+        "Collect asks for the parameter label.",
+    ),
     pgr.MODE_QWP: (
-        "Ellipticity = tan χ, with sin 2χ = sin 2(θ − zero angle), for linearly polarized light into a "
-        "quarter-wave plate at stage angle θ. The sign gives the handedness; ±45° from the zero angle "
-        "is circular."
+        "Ellipticity = tan χ, sin 2χ = sin 2(θ − zero angle).",
+        "For linearly polarized light into a quarter-wave plate at stage angle θ. The sign gives "
+        "the handedness; ±45° from the zero angle is circular.",
     ),
     pgr.MODE_DELAY: (
-        "Delay = passes × (position − zero) / c, with positions in mm. Use 2 passes for a retroreflector."
+        "Delay = passes × (position − zero) / c.",
+        "Positions are in mm. Use 2 passes for a retroreflector.",
     ),
 }
 
@@ -49,7 +54,6 @@ class ParameterGroupingInterface(ttk.Frame):
         self.files_var = tk.StringVar(self, value="--")
         self.skipped_var = tk.StringVar(self, value="--")
         self.skipped_list_var = tk.StringVar(self, value="")
-        self.mode_note_var = tk.StringVar(self, value="")
         self.output_info_var = tk.StringVar(self, value="")
 
         self._task = BackgroundTask(self)
@@ -86,9 +90,8 @@ class ParameterGroupingInterface(ttk.Frame):
             scan, 1, "Output file:", ui_style.build_path_field(scan, self.output_var, self._browse_output),
         )
         ui_style.add_note(
-            scan, 2,
-            f"Pick a parameter sweep's run folder. Leave the output file blank to write "
-            f"<folder name>{pgr.GROUPED_SUFFIX} into it.",
+            scan, 2, f"Blank output = <folder name>{pgr.GROUPED_SUFFIX} in the scan folder.",
+            tip="The scan folder is a parameter sweep's run folder.",
         )
 
         param = ui_style.build_section(sidebar, 3, "Parameter")
@@ -104,7 +107,7 @@ class ParameterGroupingInterface(ttk.Frame):
         self._passes_label = add_label(param, 3, "Passes:")
         self._passes_entry = ttk.Entry(param, textvariable=self.delay_passes_var, width=18)
         self._passes_entry.grid(row=3, column=1, sticky="ew", pady=4)
-        ui_style.add_note(param, 4, textvariable=self.mode_note_var, pady=(4, 4))
+        self._mode_note = ui_style.add_note(param, 4, pady=(4, 4))
 
         found = ui_style.build_section(sidebar, 4, "Detected files", pady=0)
         list_row = ui_style.add_stat_rows(found, [("Scan files:", self.files_var), ("Skipped:", self.skipped_var)])
@@ -149,7 +152,7 @@ class ParameterGroupingInterface(ttk.Frame):
         mode = self.mode_var.get()
         set_visible((self._qwp_label, self._qwp_entry), mode == pgr.MODE_QWP)
         set_visible((self._zero_label, self._zero_entry, self._passes_label, self._passes_entry), mode == pgr.MODE_DELAY)
-        self.mode_note_var.set(MODE_NOTES.get(mode, ""))
+        ui_style.set_note(self._mode_note, *MODE_NOTES.get(mode, ("",)))
         self._refresh_table()
 
     # ---- scan -----------------------------------------------------------------

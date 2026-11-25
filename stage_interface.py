@@ -128,9 +128,9 @@ class StageInterface(ttk.Frame):
         ], pady=(4, 6), columnspan=2)
         ui_style.add_note(
             manual, 4,
-            'A Move failing with "Not allowed action" usually means the stage '
-            "hasn't been initialized/homed yet -- try Initialize, then Home. This "
-            "connection is shared with Parameter Sweep.",
+            "“Not allowed action”? Initialize, then Home.",
+            tip="A Move failing with “Not allowed action” usually means the stage hasn't been "
+                "initialized / homed yet. This connection is shared with Parameter Sweep.",
         )
 
     # ---- stage connection / manual control (background threads) ----------

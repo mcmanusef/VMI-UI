@@ -777,9 +777,11 @@ class PowerSupplyInterface(ttk.Frame):
 
         ui_style.add_note(
             self._grid, len(channels) + 2,
-            "Edit V0 / I0 / ramp values, then click Apply (or press Enter in any field). "
-            "ON / OFF act immediately. Name and Group are saved per channel. Toggle All below flips "
-            "every listed channel together (all off if they're not all in the same state).",
+            "Edit values, then Apply or Enter. ON / OFF act immediately.",
+            tip="V0 / I0 / ramp edits take effect on Apply (or Enter in any field). Name and Group "
+                "are saved per channel.\n\n"
+                "Toggle All below flips every listed channel together (all off if they're not all in "
+                "the same state).",
             columnspan=len(headers), pady=(6, 4),
         )
         self._populate_group_grid()
@@ -1087,14 +1089,17 @@ class PowerSupplyInterface(ttk.Frame):
 
         ui_style.add_note(
             grid, len(groups) + 2,
-            "Toggle turns every member ON or OFF together: if they're all already in the same state it "
-            "flips them the other way, otherwise (mixed, or status not read yet) it turns them all off. "
-            "Reference picks which channel the others are measured against (defaults to the first "
-            "channel). Mode picks how: Ratio keeps each member a fixed multiple of the reference V0, "
-            "Difference keeps each member a fixed number of volts above or below it. Capture records "
-            "each member's current V0 relative to the reference under that mode. Apply sets the "
-            "reference channel's V0 to Lead V0 and scales/offsets the others to match. Each channel "
-            "still ramps at its own rate, so the relationship holds exactly once ramping finishes.",
+            "A group holds its members' V0 at a fixed ratio or difference to a reference channel.",
+            tip="Toggle turns every member ON or OFF together: if they're all in the same state it "
+                "flips them, otherwise (mixed, or status not read yet) it turns them all off.\n\n"
+                "Reference picks the channel the others are measured against (default: the first "
+                "channel).\n\n"
+                "Mode: Ratio keeps each member a fixed multiple of the reference V0; Difference keeps "
+                "it a fixed number of volts above or below.\n\n"
+                "Capture records each member's current V0 relative to the reference under that mode.\n\n"
+                "Apply sets the reference channel's V0 to Lead V0 and scales / offsets the others to "
+                "match. Each channel still ramps at its own rate, so the relationship holds exactly "
+                "once ramping finishes.",
             columnspan=len(headers), pady=(6, 4),
         )
 
@@ -1198,13 +1203,14 @@ class PowerSupplyInterface(ttk.Frame):
         ], pady=(4, 4))
 
         ui_style.add_note(
-            card, 2,
-            f"Power On sets {', '.join(self.PRESET_STACK)} to the repeller V0 scaled by the captured ratios and "
-            f"turns them on, then raises {self.PRESET_UPPER} to {self.PRESET_LOWER}'s V0, turns {self.PRESET_LOWER} "
-            f"on, and finally takes {self.PRESET_UPPER} to its full V0. Power Off runs the same steps in reverse. "
-            "Each step waits for the voltages to settle. Capture Ratios records the current V0 set values of "
-            f"{', '.join(self.PRESET_STACK)} as ratios to {self.PRESET_LEAD}. Stop Sequence halts between "
-            "steps and leaves the channels where they are.",
+            card, 2, "Power On / Off step the stack up or down, waiting for each step to settle.",
+            tip=f"Power On sets {', '.join(self.PRESET_STACK)} to the repeller V0 scaled by the captured "
+                f"ratios and turns them on, then raises {self.PRESET_UPPER} to {self.PRESET_LOWER}'s V0, "
+                f"turns {self.PRESET_LOWER} on, and finally takes {self.PRESET_UPPER} to its full V0. "
+                "Power Off runs the same steps in reverse.\n\n"
+                "Capture Ratios records the current V0 set values of "
+                f"{', '.join(self.PRESET_STACK)} as ratios to {self.PRESET_LEAD}.\n\n"
+                "Stop Sequence halts between steps and leaves the channels where they are.",
             pady=(2, 4),
         )
 

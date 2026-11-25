@@ -309,9 +309,9 @@ class SweepInterface(ttk.Frame):
         # connection to already be up before Start.
         ui_style.add_note(
             sidebar, 2,
-            '"Stop" lets the current backlog fully process before stopping (no half-done files); '
-            '"Force Stop" cuts off immediately. Uses the connection from the Stage Control tab -- '
-            "connect/initialize/home there first.",
+            "Connect and home the stage on Stage Control first.",
+            tip="Stop lets the current backlog fully process before stopping (no half-done files). "
+                "Force Stop cuts off immediately.",
             columnspan=1, pady=(0, 8),
         )
 
@@ -343,7 +343,7 @@ class SweepInterface(ttk.Frame):
 
         options = ui_style.build_section(sidebar, 4, "Sweep options")
         ui_style.add_form_row(options, 0, "Passes:", ttk.Entry(options, textvariable=self.passes_var, width=18))
-        ui_style.add_note(options, 1, "1 = forward only; more than 1 alternates forward/backward.")
+        ui_style.add_note(options, 1, "1 = forward only; more alternates forward / backward.")
         dwell_row = ttk.Frame(options)
         dwell_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ttk.Radiobutton(
@@ -383,14 +383,17 @@ class SweepInterface(ttk.Frame):
         )
         ui_style.add_note(
             hv, 5,
-            "Before each move (calibration moves included) the group's lead V0 goes to the moving value; "
-            "after the move it goes back to the collecting value. Each ramp is waited out -- VMON has to "
-            "reach the new setpoint -- so nothing moves mid-ramp and no frame is collected mid-ramp. "
-            "Needs the Power Supply tab connected with the group's V0 ratios captured; the other members "
-            "follow the lead by those ratios, exactly as the Groups card's Apply does. The collecting "
-            "value is filled in from the group's lead V0 when a group is picked -- keep it in step if "
-            "that voltage changes. If a ramp doesn't finish within the timeout the sweep stops, leaving "
-            "the group where the ramp got to.",
+            "Ramps the group around every move. Needs Power Supply connected.",
+            tip="Before each move (calibration moves included) the group's lead V0 goes to the moving "
+                "value; after the move it goes back to the collecting value. Each ramp is waited out "
+                "(VMON has to reach the new setpoint), so nothing moves and no frame is collected "
+                "mid-ramp.\n\n"
+                "Needs the Power Supply tab connected with the group's V0 ratios captured; the other "
+                "members follow the lead by those ratios, exactly as the Groups card's Apply does.\n\n"
+                "The collecting value is filled in from the group's lead V0 when a group is picked; "
+                "keep it in step if that voltage changes.\n\n"
+                "If a ramp doesn't finish within the timeout the sweep stops, leaving the group where "
+                "the ramp got to.",
         )
 
         self.notes = ui_style.build_metadata_section(sidebar, 6, self)

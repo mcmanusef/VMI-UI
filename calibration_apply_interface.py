@@ -83,8 +83,9 @@ class CalibrationPicker:
         ], pady=(4, 6), columnspan=2)
         ui_style.add_note(
             cal, 10,
-            "These follow the calibration tabs: a fit, edit, save or load there replaces them here. "
-            "At startup the last saved or loaded calibration files are used.",
+            "Follows the calibration tabs.",
+            tip="A fit, edit, save or load on a calibration tab replaces the calibration here. At "
+                "startup the last saved or loaded calibration files are used.",
             pady=(0, 4),
         )
 
@@ -231,18 +232,18 @@ class CalibrationApplyInterface(ttk.Frame):
         ui_style.add_form_row(
             data, 1, "Output file:", ui_style.build_path_field(data, self.output_var, self._browse_output),
         )
-        ui_style.add_note(
-            data, 2, f"Leave the output file blank to save next to the cv4 file as <name>{ac.OUTPUT_SUFFIX}.",
-        )
+        ui_style.add_note(data, 2, f"Blank output = <name>{ac.OUTPUT_SUFFIX} next to the cv4 file.")
         ttk.Checkbutton(data, text="Only include electron data", variable=self.electrons_only_var).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
         ui_style.add_note(
             data, 4,
-            "pz uses the e-ToF time (walk-corrected if that is ticked, keeping the raw time as t_etof_raw), "
-            "with the calibration's time dither added. Pairs outside the "
-            "calibration's valid Δt range are kept with NaN momenta. A grouped file from the parameter "
-            "grouping tab is processed group by group, with its parameter value in a parameter column.",
+            "How the momenta are computed.",
+            tip="pz uses the e-ToF time, with the calibration's time dither added. With walk "
+                "correction ticked the corrected time is used and the raw one kept as t_etof_raw.\n\n"
+                "Pairs outside the calibration's valid Δt range are kept, with NaN momenta.\n\n"
+                "A grouped file from the parameter grouping tab is processed group by group, with its "
+                "parameter value in a parameter column.",
             pady=(4, 4),
         )
 
@@ -256,11 +257,13 @@ class CalibrationApplyInterface(ttk.Frame):
         ui_style.add_note(output, 4, textvariable=self.output_info_var, pady=(4, 4))
         ui_style.add_note(
             output, 5,
-            "Tables (pd.read_hdf(path, key)): electrons (raw x, y, t, t_etof, pulse, t_pulse and hit "
-            "counts, with dt, px, py, pz, energy), raw/clusters, raw/etof, and ions (t_tof, pulse, "
-            "t_pulse, n_tof, mq) unless only electron data is included. Grouped input adds a leading "
-            "parameter column to each, and is written a group at a time; read one value with "
-            "where=\"parameter == value\".",
+            "Read a table with pd.read_hdf(path, key).",
+            tip="electrons: raw x, y, t, t_etof, pulse, t_pulse and hit counts, with dt, px, py, pz, "
+                "energy.\n\n"
+                "raw/clusters and raw/etof.\n\n"
+                "ions: t_tof, pulse, t_pulse, n_tof, mq (unless only electron data is included).\n\n"
+                "Grouped input adds a leading parameter column to each and is written a group at a "
+                "time; read one value with where=\"parameter == value\".",
         )
 
         self._grid = PlotGrid()

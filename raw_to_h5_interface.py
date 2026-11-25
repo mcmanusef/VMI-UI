@@ -92,11 +92,12 @@ class RawToH5Interface(ttk.Frame):
         )
         ui_style.add_note(
             params, 2,
-            "Pick a single raw .tpx3 file, or a run folder (or its raw folder) from any acquisition "
-            "tab. Leave the output folder blank to write each raw file's .h5 next to it. Each h5 "
-            "holds pixel hits (x, y, toa, tot, pixel_chip) and TDC hits (tdc_time, tdc_type, "
-            "tdc_channel, tdc_edge, tdc_chip) -- PicoTDC and FPGA TDC alike -- with no clustering, "
-            "pulse-grouping, or timewalk correction.",
+            "Blank output folder = next to each raw file.",
+            tip="Source: a single raw .tpx3 file, or a run folder (or its raw folder) from any "
+                "acquisition tab.\n\n"
+                "Each h5 holds pixel hits (x, y, toa, tot, pixel_chip) and TDC hits (tdc_time, "
+                "tdc_type, tdc_channel, tdc_edge, tdc_chip), PicoTDC and FPGA TDC alike, with no "
+                "clustering, pulse grouping or timewalk correction.",
         )
 
         totals = ui_style.build_section(sidebar, 3, "Totals", pady=0)
@@ -113,14 +114,16 @@ class RawToH5Interface(ttk.Frame):
         """Like ui_style.build_path_field, but with two browse buttons --
         the source can be a single raw file or a whole folder."""
         row = ttk.Frame(parent)
-        row.columnconfigure(0, weight=1)
+        row.columnconfigure(2, weight=1)
         entry = ttk.Entry(row, textvariable=self.source_folder_var)
-        entry.grid(row=0, column=0, sticky="ew")
-        ttk.Button(row, text="File...", width=6, command=self._browse_source_file).grid(
-            row=0, column=1, padx=(4, 0)
+        entry.grid(row=0, column=0, columnspan=3, sticky="ew")
+        # Under the entry rather than beside it: two full-size buttons next
+        # to the field don't fit the sidebar.
+        ttk.Button(row, text="File...", command=self._browse_source_file).grid(
+            row=1, column=0, pady=(4, 0)
         )
-        ttk.Button(row, text="Folder...", width=8, command=self._browse_source_folder).grid(
-            row=0, column=2, padx=(4, 0)
+        ttk.Button(row, text="Folder...", command=self._browse_source_folder).grid(
+            row=1, column=1, padx=(8, 0), pady=(4, 0)
         )
         ui_style.wire_path_entry(entry, self.source_folder_var)
         return row

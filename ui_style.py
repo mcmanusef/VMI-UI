@@ -5,6 +5,8 @@ Tabs build their layout out of these instead of re-deriving margins,
 colors and spacing on their own, so every tab stays on the same
 grey/grey/white surface hierarchy, spacing scale and component set.
 """
+import html
+
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -30,6 +32,10 @@ RUNNING = "#2e7d32"
 WARNING = "#ef6c00"
 IDLE = "#9e9e9e"
 PLACEHOLDER_RGB = (140, 140, 140)
+
+# Marks a note that has more to say on hover (see add_note / set_tip).
+TIP_MARK = " ⓘ"
+TIP_WIDTH = 380
 
 EMPTY_PLOT_TEXT = "No data — press Start to acquire"
 
@@ -126,32 +132,116 @@ def style_danger_button(button):
     button.setStyleSheet(DANGER_BUTTON_STYLE)
 
 
+class FlowLayout(QtWidgets.QLayout):
+    """Lays its items out left to right at their size hints, wrapping onto
+    another row whenever the next one wouldn't fit the width it's given --
+    so a row of buttons never runs out of a fixed-width sidebar (which
+    doesn't scroll sideways) however many there are or however long their
+    labels. Its minimum width is just its widest single item."""
+
+    def __init__(self, parent=None, hspacing=8, vspacing=6):
+        super().__init__(parent)
+        self._items = []
+        self._hspacing = hspacing
+        self._vspacing = vspacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return QtCore.Qt.Orientations(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._arrange(QtCore.QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._arrange(rect, apply=True)
+
+    def sizeHint(self):
+        # Everything on one row.
+        hints = [item.sizeHint() for item in self._items if not item.isEmpty()]
+        width = sum(h.width() for h in hints) + self._hspacing * max(0, len(hints) - 1)
+        return QtCore.QSize(width, max((h.height() for h in hints), default=0))
+
+    def minimumSize(self):
+        hints = [item.sizeHint() for item in self._items if not item.isEmpty()]
+        return QtCore.QSize(
+            max((h.width() for h in hints), default=0), max((h.height() for h in hints), default=0)
+        )
+
+    def _arrange(self, rect, apply):
+        x, y, row_height = rect.x(), rect.y(), 0
+        for item in self._items:
+            if item.isEmpty():
+                continue
+            hint = item.sizeHint()
+            if x > rect.x() and x + hint.width() > rect.right() + 1:
+                x = rect.x()
+                y += row_height + self._vspacing
+                row_height = 0
+            if apply:
+                item.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), hint))
+            x += hint.width() + self._hspacing
+            row_height = max(row_height, hint.height())
+        return y + row_height - rect.y()
+
+
+class FlowFrame(tk.TkCompatMixin, tk.GridMixin, QtWidgets.QWidget):
+    """A frame whose children (added with .add()) wrap like text -- see
+    FlowLayout. Grid it sticky="ew" so it's told the width to wrap to."""
+
+    def __init__(self, parent=None, hspacing=8, vspacing=6):
+        super().__init__(parent)
+        self._flow = FlowLayout(self, hspacing, vspacing)
+        policy = self.sizePolicy()
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def add(self, widget):
+        self._flow.addWidget(widget)
+        return widget
+
+
 def build_button_bar(parent, row, actions, danger=None, pady=(0, 6), columnspan=1):
     """A row of plain action buttons (`actions`: [(text, command), ...]),
     optionally followed by one danger button (`danger`: (text, command)) --
     set apart by a separator and extra padding, so a misaimed click on the
-    last normal button doesn't land on it. Returns the buttons in order.
-    Pass columnspan=2 when placing it inside a two-column form."""
-    bar = ttk.Frame(parent)
+    last normal button doesn't land on it. Buttons that don't fit the
+    width wrap onto another row (see FlowLayout). Returns the buttons in
+    order. Pass columnspan=2 when placing it inside a two-column form."""
+    bar = FlowFrame(parent)
     bar.grid(row=row, column=0, columnspan=columnspan, sticky="ew", pady=pady)
-    buttons = []
-    col = 0
-    for idx, (text, command) in enumerate(actions):
-        last = idx == len(actions) - 1 and danger is None
-        button = ttk.Button(bar, text=text, command=command)
-        button.grid(row=0, column=col, padx=(0, 0 if last else 8))
-        buttons.append(button)
-        col += 1
+    buttons = [bar.add(ttk.Button(bar, text=text, command=command)) for text, command in actions]
     if danger is not None:
-        ttk.Separator(bar, orient="vertical").grid(row=0, column=col, sticky="ns", padx=(0, 10))
-        button = ttk.Button(bar, text=danger[0], command=danger[1])
-        button.grid(row=0, column=col + 1)
+        # The separator and the danger button wrap as one unit.
+        group = QtWidgets.QWidget(bar)
+        box = QtWidgets.QHBoxLayout(group)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(10)
+        if actions:
+            line = QtWidgets.QFrame(group)
+            line.setFrameShape(QtWidgets.QFrame.VLine)
+            line.setFrameShadow(QtWidgets.QFrame.Sunken)
+            box.addWidget(line)
+        button = ttk.Button(group, text=danger[0], command=danger[1])
+        box.addWidget(button)
         style_danger_button(button)
+        bar.add(group)
         buttons.append(button)
-        col += 2
-    # An empty trailing column takes the leftover width, so the buttons
-    # stay packed at the left instead of spreading across the bar.
-    bar.columnconfigure(col, weight=1)
     return buttons
 
 
@@ -264,11 +354,33 @@ def make_wrapping_label(parent, text="", textvariable=None, font=None):
     return label
 
 
-def add_note(parent, row, text="", textvariable=None, column=0, columnspan=2, pady=(0, 4)):
-    """Small-print (8 pt) wrapping text: helper notes, file paths."""
+def set_tip(widget, text):
+    """A hover text box for `widget`. Rich text, so Qt word-wraps it (a
+    plain-text tooltip is one long line) -- at TIP_WIDTH px. Blank lines
+    in `text` separate paragraphs."""
+    body = "<br><br>".join(html.escape(part.strip()) for part in text.split("\n\n"))
+    widget.setToolTip(f"<qt><table width='{TIP_WIDTH}'><tr><td>{body}</td></tr></table></qt>")
+    return widget
+
+
+def add_note(parent, row, text="", textvariable=None, column=0, columnspan=2, pady=(0, 4), tip=None):
+    """Small-print (8 pt) wrapping text: helper notes, file paths. Keep
+    guide text to one short line and put the rest in `tip`: the note then
+    ends in TIP_MARK and shows `tip` in a hover box (see set_tip)."""
     label = make_wrapping_label(parent, text, textvariable, SMALL_FONT)
     label.grid(row=row, column=column, columnspan=columnspan, sticky="ew", pady=pady)
+    if tip:
+        set_note(label, text, tip)
     return label
+
+
+def set_note(label, text, tip=None):
+    """Change a note's text and hover tip (for notes that follow a mode)."""
+    label.setText(text + TIP_MARK if tip else text)
+    if tip:
+        set_tip(label, tip)
+    else:
+        label.setToolTip("")
 
 
 class PathEntryFilter(QtCore.QObject):
@@ -318,9 +430,9 @@ def build_cluster_timing_mode_row(parent, row, var):
         parent, textvariable=var, values=CLUSTER_TIMING_MODES, state="readonly", width=16,
     ))
     add_note(
-        parent, row + 1,
-        "For a .npz cluster timing file: core = best timing, bright = hits with ToT >= 1 us only, "
-        "all = every hit. Ignored for a .json time-walk curve.",
+        parent, row + 1, "Only for a .npz cluster timing file.",
+        tip="core = best timing, bright = hits with ToT >= 1 us only, all = every hit. "
+            "Ignored for a .json time-walk curve.",
     )
 
 

@@ -56,22 +56,23 @@ class TdcMappingInterface(ttk.Frame):
 
         ui_style.add_note(
             page, 0,
-            "Which physical TDC line (PicoTDC channel 0-63, or FPGA TDC channel 1/2) feeds each "
-            "logical signal, and how multiple signals sharing one line are told apart by pulse "
-            "width. Uncheck e-ToF or i-ToF if that signal isn't connected, so no hits are recorded "
-            "for it. Leave a gate blank to take every hit on that line directly. With a gate set, "
-            "each rising edge is paired with the next falling edge on the same line and kept only "
-            "if that pulse's width falls in range -- e.g. a long trigger pulse and a short i-ToF "
-            "pulse can share one FPGA TDC channel this way. Set a ringing holdoff to drop pulses "
-            "that start within that many ns after the previous pulse on the same line ended -- a "
-            "signal ringing back across threshold -- before the gate is applied; leave it blank "
-            "to keep every pulse. Dither adds a random offset, uniform between 0 and the width "
-            "given, to every time on that signal to smooth out the TDC's time steps (FPGA TDC: "
-            "~0.260 ns, PicoTDC: ~0.003 ns); it's on for e-ToF and i-ToF by default and off for "
-            "the pulse trigger. These settings apply everywhere "
-            "(Monitored Acquisition, Analysis > conversion, Diagnostics, Timewalk Calibration, "
-            "Parameter Sweep) and are saved as you edit them -- the \"tpx to h5\" raw dump is "
-            "unaffected, since it already keeps every hit's own channel and edge.",
+            "Which TDC line feeds each signal. Saved as you edit; applies everywhere.",
+            tip="Line: the physical TDC line (PicoTDC channel 0-63, or FPGA TDC channel 1/2) that "
+                "feeds each logical signal. Uncheck e-ToF or i-ToF if that signal isn't connected, so "
+                "no hits are recorded for it.\n\n"
+                "Gate: tells signals sharing one line apart by pulse width. Blank takes every hit on "
+                "the line. With a gate, each rising edge is paired with the next falling edge on the "
+                "same line and kept only if that pulse's width is in range, so e.g. a long trigger "
+                "pulse and a short i-ToF pulse can share one FPGA TDC channel.\n\n"
+                "Ringing holdoff: drops pulses that start within that many ns after the previous "
+                "pulse on the same line ended (a signal ringing back across threshold), before the "
+                "gate is applied. Blank keeps every pulse.\n\n"
+                "Dither: adds a random offset, uniform between 0 and the width given, to every time "
+                "on that signal to smooth out the TDC's time steps (FPGA TDC: ~0.260 ns, PicoTDC: "
+                "~0.003 ns). On for e-ToF and i-ToF by default, off for the pulse trigger.\n\n"
+                "These settings apply to Monitored Acquisition, Analysis > conversion, Diagnostics, "
+                "Timewalk Calibration and Parameter Sweep. The “tpx to h5” raw dump is unaffected: it "
+                "keeps every hit's own channel and edge.",
         )
 
         row = 1
@@ -203,12 +204,14 @@ class TdcMappingInterface(ttk.Frame):
         )
         ui_style.add_note(
             section, 1,
-            "Added to every pixel hit time before it is put in a pulse. The Timepix pixel clock runs "
-            "~180 ns ahead of the TDC, so without it electrons arriving just before a trigger land at the "
-            "end of the previous pulse (t near one trigger period), split from their own e-ToF hit, with "
-            "their low-ToT, walked hits spilling into the next pulse -- which breaks the time-walk fits "
-            "and the cluster / e-ToF pairing. Cluster times shift by the same amount. Files converted with "
-            "a different value keep the offset they were converted with.",
+            "Added to every pixel hit time before it is put in a pulse.",
+            tip="The Timepix pixel clock runs ~180 ns ahead of the TDC. Without the offset, electrons "
+                "arriving just before a trigger land at the end of the previous pulse (t near one "
+                "trigger period), split from their own e-ToF hit, with their low-ToT, walked hits "
+                "spilling into the next pulse. That breaks the time-walk fits and the cluster / e-ToF "
+                "pairing.\n\n"
+                "Cluster times shift by the same amount. Files converted with a different value keep "
+                "the offset they were converted with.",
             pady=(4, 4),
         )
 
@@ -223,12 +226,13 @@ class TdcMappingInterface(ttk.Frame):
             ))
         ui_style.add_note(
             section, len(tdc_mapping.PULSE_OFFSET_SPECIES),
-            "Pair each kind of hit with the others from the previous or next pulse instead of its own. "
-            "Pairing across pulses gives only random coincidences: the false-coincidence background. "
-            "A neighbour more than half a trigger period away (first / last pulse, frame gaps) is left "
-            "unpaired. Applies to what's shown and analysed -- Diagnostics' x / y vs e-ToF maps and the "
-            "Coincidence tab (on its next Load) -- never to saved cv4 / calibrated files or calibration "
-            "fits, which always keep every hit's own pulse.",
+            "Pairs hits with a neighbouring pulse: random coincidences only.",
+            tip="Pair each kind of hit with the others from the previous or next pulse instead of its "
+                "own, to get the false-coincidence background. A neighbour more than half a trigger "
+                "period away (first / last pulse, frame gaps) is left unpaired.\n\n"
+                "Applies to what's shown and analysed (Diagnostics' x / y vs e-ToF maps, and the "
+                "Coincidence tab on its next Load), never to saved cv4 / calibrated files or "
+                "calibration fits, which always keep every hit's own pulse.",
             pady=(4, 4),
         )
 

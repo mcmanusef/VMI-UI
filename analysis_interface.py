@@ -118,8 +118,9 @@ class ConversionInterface(ttk.Frame):
         )
         ui_style.add_note(
             params, 2,
-            "Pick a run folder (or its raw folder) from any acquisition tab. Leave the output "
-            "folder blank to write the cv4 file(s) into the run folder.",
+            "Blank output folder = the run folder.",
+            tip="Source: a run folder (or its raw folder) from any acquisition tab. With no output "
+                "folder, the cv4 file(s) are written into the run folder.",
         )
         ttk.Checkbutton(
             params, text="Apply timewalk correction before clustering", variable=self.timewalk_enabled_var

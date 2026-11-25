@@ -182,8 +182,12 @@ always be visible, and a boxed section when it should collapse.
 
 ### 5.3 Buttons: `ui_style.build_button_bar(parent, row, actions, danger=None)`
 
-- Buttons pack at the **left**, 8 px apart. An empty trailing column takes
-  the leftover width. Inside a two-column form, pass `columnspan=2`.
+- Buttons pack at the **left**, 8 px apart, and **wrap** onto another row
+  (6 px below) when they don't fit the width (`ui_style.FlowLayout`), so a
+  bar never runs out of the sidebar. Inside a two-column form, pass
+  `columnspan=2`.
+- Don't hand-build a row of buttons in a sidebar: use `build_button_bar`, or
+  a `ui_style.FlowFrame` for other widgets that should wrap.
 - **Default**: plain `ttk.Button`, Fusion look. Short Title Case labels:
   `Start`, `Stop`, `Reset`, `Show All`, `Set Current as Zero`.
 - **Browse**: `...` directly to the right of its path field (built by
@@ -266,6 +270,13 @@ Two-column grid, fields stretch. Label `sticky="w"`, `padx=(0, 8)`, `pady=4`.
 Use these for any text of unknown length: status messages, paths, helper
 notes, fit summaries. They wrap to the width the layout gives them. Grid
 them `sticky="ew"`.
+
+**Guide text** is one short line, with the detail in a hover box:
+`add_note(parent, row, "Short line.", tip="The rest...")`. A note with a
+tip ends in ⓘ (`ui_style.TIP_MARK`). Blank lines in `tip` separate
+paragraphs; the box wraps at 380 px (`ui_style.set_tip`, which also works
+on any other widget). For a note that follows a mode, keep the label and
+call `ui_style.set_note(label, text, tip)`.
 
 **Never** give a label a fixed `wraplength`, and never grid a wrapping label
 `sticky="w"`. Qt then guesses the label's height for the wrong width and
@@ -361,6 +372,7 @@ double-click only toggles focus.
 - [ ] Every group is a `build_section`; set-once or occasional groups start collapsed; the last one gets `pady=0`; add a trailing `weight=1` row.
 - [ ] Fields via `add_form_row`; paths via `build_path_field` with a browse command; stats via `add_stat_rows`.
 - [ ] Unknown-length text via `add_note` / `make_wrapping_label`, never `wraplength`.
+- [ ] Guide text: one short line, the rest in `tip=`.
 - [ ] Main area: plots flush; headed tables/logs in `build_card`.
 - [ ] Empty plots show a placeholder that names the next action.
 - [ ] Any extra structural frame gets `zero_margins`.

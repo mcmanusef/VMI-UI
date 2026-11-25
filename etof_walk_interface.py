@@ -83,7 +83,9 @@ class EtofWalkCalibrationInterface(ttk.Frame):
         ui_style.add_note(data, 1, textvariable=self.data_info_var, pady=(4, 4))
         ui_style.add_note(
             data, 2,
-            "Needs a cv4 file with cluster ToT (converted after it was added). A grouped file uses every group.",
+            "Needs a cv4 file with cluster ToT.",
+            tip="The file must have been converted after cluster ToT was added. A grouped file uses "
+                "every group.",
             pady=(0, 4),
         )
 
@@ -95,10 +97,12 @@ class EtofWalkCalibrationInterface(ttk.Frame):
         ui_style.add_form_row(sel, 4, "Min cluster hits:", ttk.Entry(sel, textvariable=self.min_hits_var, width=18))
         ui_style.add_note(
             sel, 5,
-            "Single-electron shots only: exactly one e-ToF hit in the pulse, inside the e-ToF window, and "
-            "exactly one cluster, with at least the minimum hits and its time inside the cluster window. "
-            "Leave a bound blank to use the populated range of the data. The e-ToF pulse-width cut is the "
-            "e-ToF gate on Hardware > TDC mapping, applied when acquiring.",
+            "Single-electron shots only. Blank bound = the data's range.",
+            tip="A shot is used when its pulse has exactly one e-ToF hit, inside the e-ToF window, "
+                "and exactly one cluster, with at least the minimum hits and its time inside the "
+                "cluster window.\n\n"
+                "The e-ToF pulse-width cut is the e-ToF gate on Hardware > TDC mapping, applied when "
+                "acquiring.",
             pady=(4, 4),
         )
 
@@ -115,13 +119,17 @@ class EtofWalkCalibrationInterface(ttk.Frame):
         ui_style.add_form_row(fit, 5, "Random seed:", ttk.Entry(fit, textvariable=self.seed_var, width=18))
         ui_style.add_note(
             fit, 6,
-            "Q is the cluster's summed ToT (codes). The walk curve is the median e-ToF time in quantile bins "
-            "of ln Q; corrected times are t − [f(ln Q) − f(reference)], so they stay on the scale of a "
-            "reference-charge cluster and the curve transfers between runs. The position term (an x / y "
-            "gradient, a per-cell map, and a per-cell map in each of the position ln Q bins, so the walk "
-            "curve can vary across the detector; 0 bins = no such stage) can remove physics: use it only "
-            "where position and flight time aren't linked by the momenta (high field). σ is checked on a random half of the shots held out "
-            "of a separate fit; the saved correction uses all of them.",
+            "The position term can remove physics.",
+            tip="Q is the cluster's summed ToT (codes). The walk curve is the median e-ToF time in "
+                "quantile bins of ln Q; corrected times are t − [f(ln Q) − f(reference)], so they "
+                "stay on the scale of a reference-charge cluster and the curve transfers between "
+                "runs.\n\n"
+                "The position term is an x / y gradient, a per-cell map, and a per-cell map in each "
+                "of the position ln Q bins (0 bins = no such stage), so the walk curve can vary "
+                "across the detector. Use it only where position and flight time aren't linked by the "
+                "momenta (high field).\n\n"
+                "σ is checked on a random half of the shots held out of a separate fit; the saved "
+                "correction uses all of them.",
             pady=(4, 4),
         )
 
@@ -139,8 +147,9 @@ class EtofWalkCalibrationInterface(ttk.Frame):
         ui_style.add_note(export, 1, textvariable=self.export_info_var)
         ui_style.add_note(
             export, 2,
-            "Diagnostics' x / y vs e-ToF maps use the last saved or loaded correction file; the other tabs "
-            "also follow an unsaved fit.",
+            "Diagnostics uses the last saved or loaded file.",
+            tip="Diagnostics' x / y vs e-ToF maps use the last saved or loaded correction file; the "
+                "other tabs also follow an unsaved fit.",
         )
 
         self._grid = PlotGrid()

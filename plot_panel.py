@@ -78,10 +78,21 @@ def read_rotation(rotation_vars, previous=None):
     return rotation
 
 
-def build_rotation_row(parent, rotation_vars, what):
+def build_rotation_row(parent, rotation_vars, what, compact=False):
     """A frame with the "Rotate <what> x / y by [angle] ° about x [cx] y [cy]"
-    fields, for the shared rotation variables."""
+    fields, for the shared rotation variables. compact=True stacks it on
+    two short lines, to fit a sidebar."""
     row = ttk.Frame(parent)
+    if compact:
+        ttk.Label(row, text=f"Rotate {what} x / y by").grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Entry(row, textvariable=rotation_vars["angle"], width=7).grid(row=0, column=3, padx=(6, 2))
+        ttk.Label(row, text="°").grid(row=0, column=4, sticky="w")
+        ttk.Label(row, text="about x").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(row, textvariable=rotation_vars["cx"], width=7).grid(row=1, column=1, padx=(6, 2), pady=(4, 0))
+        ttk.Label(row, text="y").grid(row=1, column=2, padx=(4, 0), pady=(4, 0))
+        ttk.Entry(row, textvariable=rotation_vars["cy"], width=7).grid(row=1, column=3, padx=(6, 2), pady=(4, 0))
+        ttk.Label(row, text="px").grid(row=1, column=4, sticky="w", pady=(4, 0))
+        return row
     ttk.Label(row, text=f"Rotate {what} x / y by").grid(row=0, column=0, sticky="w")
     ttk.Entry(row, textvariable=rotation_vars["angle"], width=7).grid(row=0, column=1, padx=(6, 2))
     ttk.Label(row, text="° about x").grid(row=0, column=2)

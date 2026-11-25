@@ -442,9 +442,10 @@ class MomentumCalibrationInterface(ttk.Frame):
         ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ui_style.add_note(
             data, 8,
-            "Corrects each cluster / e-ToF pair's e-ToF time from its cluster's ToT, with the latest "
-            "correction from the e-ToF walk calibration tab (or the last one saved there). Needs cv4 "
-            "files with cluster ToT; applies to the e-ToF time source, on Load Data.",
+            "Needs cv4 files with cluster ToT.",
+            tip="Corrects each cluster / e-ToF pair's e-ToF time from its cluster's ToT, with the "
+                "latest correction from the e-ToF walk calibration tab (or the last one saved there). "
+                "Applies to the e-ToF time source, on Load Data.",
             pady=(4, 0),
         )
         ui_style.add_note(data, 9, textvariable=self._walk_note_var, pady=(0, 4))
@@ -466,11 +467,14 @@ class MomentumCalibrationInterface(ttk.Frame):
         ui_style.add_form_row(center, 7, "Time slice |Δt| < (ns):", ttk.Entry(center, textvariable=self.slice_ns_var, width=18))
         ui_style.add_note(
             center, 8,
-            "The center estimate comes from ring symmetry; center of mass and median are shown for comparison. "
-            "With Plot clicks set, click the detector image or the thin time slice to place the center, or "
-            "to point the orange symmetry axis through the click. Click the arrival-time or t vs x' plot "
-            "(or drag the red line on either) to set tc between the early and late peaks. "
-            "A wrong center shows up as rings that aren't circular. Double-click any plot to show it alone.",
+            "Click the plots to set center, angle and tc.",
+            tip="Estimate Center uses ring symmetry; center of mass and median are shown for "
+                "comparison. A wrong center shows up as rings that aren't circular.\n\n"
+                "With Plot clicks set, click the detector image or the thin time slice to place the "
+                "center, or to point the orange symmetry axis through the click. Click the "
+                "arrival-time or t vs x' plot (or drag the red line on either) to set tc between the "
+                "early and late peaks.\n\n"
+                "Double-click any plot to show it alone.",
             pady=(4, 4),
         )
         ui_style.add_note(center, 9, textvariable=self.center_info_var)
@@ -505,12 +509,14 @@ class MomentumCalibrationInterface(ttk.Frame):
 
         ui_style.add_note(
             peaks, len(rows) + 1,
-            "Leave the time window blank to cover the loaded arrival times. "
-            "Find Peaks keeps the most prominent peaks of the smoothed negative second derivative on each "
-            "side. Ctrl+click a spectrum to add a peak, Shift+click to remove the nearest. A ring peak "
-            "stays where you click, and those radii set the energy scale; time peaks snap to the nearest "
-            "maximum. Rings pair with time peaks in order from the center, so both lists must start at "
-            "the same ring.",
+            "Ctrl+click adds a peak, Shift+click removes the nearest.",
+            tip="Leave the time window blank to cover the loaded arrival times.\n\n"
+                "Find Peaks keeps the most prominent peaks of the smoothed negative second derivative "
+                "on each side.\n\n"
+                "A ring peak stays where you click, and those radii set the energy scale; time peaks "
+                "snap to the nearest maximum.\n\n"
+                "Rings pair with time peaks in order from the center, so both lists must start at the "
+                "same ring.",
             pady=(4, 4),
         )
         ui_style.add_note(peaks, len(rows) + 2, textvariable=self.peak_info_var)
@@ -522,8 +528,8 @@ class MomentumCalibrationInterface(ttk.Frame):
         ui_style.add_form_row(fit, 3, "k (eV/px²):", ttk.Entry(fit, textvariable=self.k_var, width=18))
         ui_style.add_note(
             fit, 4,
-            "Fit sets k from the ring spacing, assuming the rings are consecutive ATI orders. "
-            "Edit k afterwards to override it.",
+            "Fit sets k; edit it afterwards to override.",
+            tip="k comes from the ring spacing, assuming the rings are consecutive ATI orders.",
             pady=(4, 4),
         )
         ui_style.add_note(fit, 5, textvariable=self.fit_info_var)
@@ -612,13 +618,19 @@ class MomentumCalibrationInterface(ttk.Frame):
         circular = self._is_circular()
         self._time_path_label.configure(text="Dataset:" if circular else "S dataset:")
         set_visible([self._p_path_label, self._p_path_field, self._validation_label, self._validation_combo], not circular)
-        self._mode_note.setText(
-            "Circular: the angle is the propagation axis. Ring radii come from the in-plane axis "
-            "perpendicular to it, which is equivalent to the ToF axis."
-            if circular else
-            "S (polarization along ToF) gives tc and the time peaks. P (polarization in the detector "
-            "plane) gives the center, the angle (polarization axis) and the ring radii along it."
-        )
+        if circular:
+            ui_style.set_note(
+                self._mode_note, "Circular: the angle is the propagation axis.",
+                "Ring radii come from the in-plane axis perpendicular to the propagation axis, "
+                "which is equivalent to the ToF axis.",
+            )
+        else:
+            ui_style.set_note(
+                self._mode_note, "S gives tc and time peaks; P gives center, angle and radii.",
+                "S (polarization along ToF) gives tc and the time peaks. P (polarization in the "
+                "detector plane) gives the center, the angle (polarization axis) and the ring "
+                "radii along it.",
+            )
         if not initial:
             self._events = {}
             self._clear_fits()
@@ -1413,14 +1425,14 @@ class MassCalibrationInterface(ttk.Frame):
         ttk.Checkbutton(data, text="Log scale", variable=self.log_var).grid(
             row=4, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
-        ui_style.add_note(data, 5, "Leave t min or t max blank to fit the spectrum.", pady=(4, 4))
+        ui_style.add_note(data, 5, "Blank t min / t max = the spectrum's own range.", pady=(4, 4))
 
         peaks = ui_style.build_section(sidebar, 3, "Peaks")
         ui_style.add_note(
             peaks, 0,
-            "Ctrl+click a peak in the ToF spectrum to label it, Shift+click to remove the nearest label. "
-            "Labels are an m/q number or a formula with its charge: H2O+, N2+, Xe++ or Xe^2+. "
-            "Formulas use the most abundant isotope.",
+            "Ctrl+click labels a peak, Shift+click removes the nearest.",
+            tip="Click in the ToF spectrum. A label is an m/q number or a formula with its charge: "
+                "H2O+, N2+, Xe++ or Xe^2+. Formulas use the most abundant isotope.",
             pady=(4, 4),
         )
         ui_style.add_form_row(peaks, 1, "Snap window ± (ns):", ttk.Entry(peaks, textvariable=self.snap_var, width=18))

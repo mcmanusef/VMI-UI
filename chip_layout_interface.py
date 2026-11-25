@@ -26,11 +26,12 @@ class ChipLayoutInterface(ttk.Frame):
 
         ui_style.add_note(
             page, 0,
-            "How the chips of a multi-chip (e.g. quad) detector tile one image: each chip's tile "
-            "position and orientation, as Serval reports them. Fetch it from Serval whenever the "
-            "detector or Serval's rotate/flip setting changes. Pixel and cluster maps span the "
-            "whole image, so set their range to 0 to the image size. Files already converted "
-            "keep the layout they were converted with.",
+            "How the chips of a multi-chip detector tile one image.",
+            tip="Each chip's tile position and orientation, as Serval reports them. Fetch it from "
+                "Serval whenever the detector or Serval's rotate/flip setting changes.\n\n"
+                "Pixel and cluster maps span the whole image, so set their range to 0 to the image "
+                "size.\n\n"
+                "Files already converted keep the layout they were converted with.",
         )
 
         section = ui_style.build_section(page, 1, "Current Layout")

@@ -127,9 +127,9 @@ class TimewalkInterface(ttk.Frame):
             params, 2, "Temp folder:", ui_style.build_path_field(params, self.temp_dir_var, self._browse_temp_dir),
         )
         ui_style.add_note(
-            params, 3,
-            f"Serval writes each frame here as {FILE_PREFIX}*.tpx3; older {FILE_PREFIX}*.tpx3 files in it are "
-            "deleted as new ones arrive. Other files are left alone.",
+            params, 3, f"Older {FILE_PREFIX}*.tpx3 files here are deleted.",
+            tip=f"Serval writes each frame here as {FILE_PREFIX}*.tpx3; older {FILE_PREFIX}*.tpx3 files "
+                "in it are deleted as new ones arrive. Other files are left alone.",
         )
         ttk.Checkbutton(params, text="Use test file", variable=self.use_test_file_var).grid(
             row=4, column=0, columnspan=2, sticky="w", pady=(4, 0)
@@ -177,9 +177,10 @@ class TimewalkInterface(ttk.Frame):
         ct = ui_style.build_section(sidebar, 5, "Cluster timing fit", pady=0)
         ui_style.add_note(
             ct, 0,
-            "Fits a cluster timing calibration (.npz) from a run's raw files, using the e-ToF (or i-ToF) "
-            "TDC as each electron's reference time. Half the chosen files are fitted, the other half "
-            "check the result. Load the .npz in a tab's time-walk field to use it.",
+            "Fits a cluster timing calibration (.npz) from raw files.",
+            tip="Uses the e-ToF (or i-ToF) TDC as each electron's reference time. Half the chosen "
+                "files are fitted, the other half check the result. Load the .npz in a tab's "
+                "time-walk field to use it.",
         )
         ui_style.add_form_row(
             ct, 1, "Raw data folder:", ui_style.build_path_field(ct, self.ct_raw_folder_var, self._browse_ct_raw),
@@ -196,8 +197,10 @@ class TimewalkInterface(ttk.Frame):
             state="readonly", width=16,
         ))
         ui_style.add_note(
-            ct, 6, "TDC mapping: active = the tdc mapping Hardware tab; default = the built-in FPGA-TDC "
-                   "scheme (needed for older data).",
+            ct, 6,
+            "TDC mapping: active or the built-in default.",
+            tip="active = the tdc mapping Hardware tab. default = the built-in FPGA-TDC scheme "
+                "(needed for older data).",
         )
         self._ct_buttons = ui_style.build_button_bar(
             ct, 7, [("Fit Cluster Timing", self.fit_cluster_timing), ("Cancel Fit", self.cancel_cluster_timing_fit)],

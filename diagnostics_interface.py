@@ -149,9 +149,9 @@ class DiagnosticsInterface(ttk.Frame):
             params, 2, "Temp folder:", ui_style.build_path_field(params, self.temp_dir_var, self._browse_temp_dir),
         )
         ui_style.add_note(
-            params, 3,
-            f"Serval writes each frame here as {FILE_PREFIX}*.tpx3; older {FILE_PREFIX}*.tpx3 files in it are "
-            "deleted as new ones arrive. Other files are left alone.",
+            params, 3, f"Older {FILE_PREFIX}*.tpx3 files here are deleted.",
+            tip=f"Serval writes each frame here as {FILE_PREFIX}*.tpx3; older {FILE_PREFIX}*.tpx3 files "
+                "in it are deleted as new ones arrive. Other files are left alone.",
         )
         ttk.Checkbutton(
             params, text="Accumulate", variable=self.accumulate_var, command=self._on_accumulate_toggle,
